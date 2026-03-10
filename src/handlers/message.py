@@ -1,0 +1,127 @@
+"""Message handlers: text, photo, and unknown messages."""
+
+from __future__ import annotations
+
+import logging
+import re
+
+from telegram import Update
+from telegram.error import BadRequest
+from telegram.ext import ContextTypes
+
+from src.orchestrator.main_loop import process_message
+
+logger = logging.getLogger(__name__)
+
+
+_MAX_MSG_LEN = 4096
+
+
+def _escape_markdown(text: str) -> str:
+    """Escape special Markdown v1 characters so Telegram won't reject the message."""
+    return re.sub(r"([_*`\[])", r"\\\1", text)
+
+
+def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
+    """Split *text* into chunks that each fit within Telegram's message length limit.
+
+    Prefers splitting at newline boundaries to avoid cutting mid-sentence.
+    """
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # Prefer splitting at a newline
+        split_pos = text.rfind("\n", 0, max_len)
+        if split_pos <= 0:
+            split_pos = max_len
+        chunks.append(text[:split_pos])
+        text = text[split_pos:].lstrip("\n")
+    return chunks
+
+
+async def _safe_reply(message, text: str) -> None:
+    """Send *text* with Markdown, auto-splitting if too long.
+
+    Each chunk is tried with Markdown first; if Telegram rejects the formatting,
+    the same chunk is retried as plain text so the message is never lost.
+    """
+    chunks = _split_text(text)
+    for chunk in chunks:
+        try:
+            await message.reply_text(chunk, parse_mode="Markdown", quote=True)
+        except BadRequest as exc:
+            logger.warning("Markdown parse failed (%s), retrying as plain text.", exc)
+            try:
+                await message.reply_text(chunk, parse_mode=None, quote=True)
+            except BadRequest as exc2:
+                logger.error("Failed to send chunk even as plain text: %s", exc2)
+
+
+async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route a text message through the agent orchestrator and reply."""
+    message = update.message
+    user    = update.effective_user
+
+    logger.info("Text from user=%s: %.100s", user.id, message.text)
+
+    # Show typing indicator while the pipeline runs
+    await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+
+    task = await process_message(
+        session_id=str(user.id),
+        user_text=message.text,
+    )
+
+    reply = task.result or "Maaf, saya tidak dapat memproses permintaan Anda."
+
+    # Send text reply (falls back to plain text if Markdown is malformed)
+    await _safe_reply(message, reply)
+
+    # If agent produced an Excel file, send it as a document
+    excel_path = task.metadata.get("excel_path")
+    if excel_path:
+        try:
+            await context.bot.send_chat_action(
+                chat_id=message.chat_id, action="upload_document"
+            )
+            with open(excel_path, "rb") as f:
+                await message.reply_document(
+                    document=f,
+                    filename=excel_path.split("/")[-1],
+                    caption="📊 File Excel mandays siap digunakan.",
+                    quote=True,
+                )
+            logger.info("Sent Excel to user=%s path=%s", user.id, excel_path)
+        except Exception as exc:
+            logger.exception("Failed to send Excel to user=%s: %s", user.id, exc)
+            await message.reply_text(
+                "⚠️ Gagal mengirim file Excel. Coba lagi nanti.", quote=True
+            )
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Acknowledge photo uploads (image analysis is a future feature)."""
+    user = update.effective_user
+    logger.info("Photo from user=%s.", user.id)
+
+    photo = update.message.photo[-1]
+    await update.message.reply_text(
+        f"📷 Foto diterima! (file_id: <code>{photo.file_id}</code>)\n\n"
+        "Analisis gambar akan segera hadir. 🚀",
+        parse_mode="HTML",
+        quote=True,
+    )
+
+
+async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Catch-all for unsupported message types."""
+    logger.debug("Unknown message type from user=%s.", update.effective_user.id)
+    await update.message.reply_text(
+        "⚠️ Tipe pesan ini belum didukung. Coba kirim teks.",
+        quote=True,
+    )

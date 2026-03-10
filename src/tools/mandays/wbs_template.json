@@ -1,0 +1,77 @@
+{
+  "project_info": {
+    "name": "PROJECT NAME HERE",
+    "start_date": "01 Januari 2026",
+    "end_date": "31 Januari 2026"
+  },
+  "roles": [
+    "SA",
+    "TL",
+    "BA",
+    "SM",
+    "UI",
+    "DBA",
+    "BE1",
+    "BE2",
+    "FE1",
+    "FE2",
+    "QA",
+    "DevOps",
+    "TW"
+  ],
+  "work_breakdown_structure": [
+    {
+      "sprint_name": "Sprint 1",
+      "period": "01 Jan - 14 Jan 2026",
+      "total_mandays": {
+        "SA": 0,
+        "TL": 0,
+        "BA": 0,
+        "SM": 0,
+        "UI": 0,
+        "DBA": 0,
+        "BE1": 0,
+        "BE2": 0,
+        "FE1": 0,
+        "FE2": 0,
+        "QA": 0,
+        "DevOps": 0,
+        "TW": 0
+      },
+      "features": [
+        {
+          "feature_group": "Feature Group Name",
+          "tasks": [
+            {
+              "name": "Example Task 1",
+              "mandays": { "BE1": 2 }
+            },
+            {
+              "name": "Example Task 2",
+              "mandays": { "FE1": 1, "QA": 1 }
+            }
+          ]
+        },
+        {
+          "feature_group": "Another Feature",
+          "tasks": []
+        }
+      ]
+    }
+  ],
+  "grand_total": {
+    "SA": 0,
+    "TL": 0,
+    "BA": 0,
+    "SM": 0,
+    "UI": 0,
+    "DBA": 0,
+    "BE1": 0,
+    "BE2": 0,
+    "FE1": 0,
+    "FE2": 0,
+    "QA": 0,
+    "DevOps": 0,
+    "TW": 0
+  }
+}

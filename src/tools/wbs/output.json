@@ -1,0 +1,120 @@
+{
+  "project_info": {
+    "project_name": "AI PDF Extractor & Summarizer with RBAC",
+    "start_date": "2026-04-01",
+    "end_date": "2026-05-26"
+  },
+  "timeline_config": {
+    "sprints": [
+      {
+        "sprint_name": "Sprint 1: Foundation & RBAC",
+        "days": [
+          {"date": 1, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 2, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 3, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 6, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 7, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 8, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 9, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 10, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 13, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 14, "month": "April", "year": 2026, "is_weekday": true}
+        ]
+      },
+      {
+        "sprint_name": "Sprint 2: AI Core Development",
+        "days": [
+          {"date": 15, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 16, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 17, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 20, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 21, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 22, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 23, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 24, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 27, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 28, "month": "April", "year": 2026, "is_weekday": true}
+        ]
+      },
+      {
+        "sprint_name": "Sprint 3: Integration & Admin Dashboard",
+        "days": [
+          {"date": 29, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 30, "month": "April", "year": 2026, "is_weekday": true},
+          {"date": 1, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 4, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 5, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 6, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 7, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 8, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 11, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 12, "month": "Mei", "year": 2026, "is_weekday": true}
+        ]
+      },
+      {
+        "sprint_name": "Sprint 4: QA & Deployment",
+        "days": [
+          {"date": 13, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 14, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 15, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 18, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 19, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 20, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 21, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 22, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 25, "month": "Mei", "year": 2026, "is_weekday": true},
+          {"date": 26, "month": "Mei", "year": 2026, "is_weekday": true}
+        ]
+      }
+    ]
+  },
+  "wbs_data": [
+    {
+      "category": "Project Initiation",
+      "is_header": true,
+      "tasks": [
+        { "task_name": "Requirement Gathering & Tech Stack Setup", "active_days": [1, 2] },
+        { "task_name": "Database Schema Design (Auth & RBAC)", "active_days": [3] }
+      ]
+    },
+    {
+      "category": "Development",
+      "is_header": true,
+      "sub_categories": [
+        {
+          "name": "Backend - Authentication & RBAC",
+          "tasks": [
+            { "task_name": "Implement JWT Auth & Middleware", "active_days": [6, 7] },
+            { "task_name": "Role Management System (Admin/User)", "active_days": [8, 9, 10] }
+          ]
+        },
+        {
+          "name": "Backend - AI Core",
+          "tasks": [
+            { "task_name": "PDF Parsing & Text Extraction Service", "active_days": [15, 16, 17] },
+            { "task_name": "AI Integration (LLM Prompting for Summary)", "active_days": [20, 21, 22] },
+            { "task_name": "File Storage Management (S3/Minio)", "active_days": [23, 24] }
+          ]
+        },
+        {
+          "name": "Frontend - UI Implementation",
+          "tasks": [
+            { "task_name": "Dashboard & PDF Upload Interface", "active_days": [27, 28, 29, 30] },
+            { "task_name": "Admin Panel: User & Activity Monitoring", "active_days": [1, 4, 5, 6] },
+            { "task_name": "Result Visualization (Summary View)", "active_days": [7, 8] }
+          ]
+        }
+      ]
+    },
+    {
+      "category": "Testing & Finalization",
+      "is_header": true,
+      "tasks": [
+        { "task_name": "Integration Testing (AI + Auth)", "active_days": [11, 12, 13] },
+        { "task_name": "UAT & Bug Fixing", "active_days": [14, 15, 18, 19] },
+        { "task_name": "Production Deployment (Docker/K8s)", "active_days": [20, 21, 22] },
+        { "task_name": "Final Documentation", "active_days": [25, 26] }
+      ]
+    }
+  ]
+}

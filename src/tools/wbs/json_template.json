@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_name": "PROJECT NAME",
+    "start_date": "2026-02-18",
+    "end_date": "2026-04-20"
+  },
+  "timeline_config": {
+    "sprints": [
+      {
+        "sprint_name": "Sprint 1",
+        "days": [
+          {"date": 20, "month": "Februari", "year": 2026, "is_weekday": true},
+          {"date": 23, "month": "Februari", "year": 2026, "is_weekday": true},
+          {"date": 24, "month": "Februari", "year": 2026, "is_weekday": true},
+          {"date": 25, "month": "Februari", "year": 2026, "is_weekday": true},
+          {"date": 26, "month": "Februari", "year": 2026, "is_weekday": true},
+          {"date": 27, "month": "Februari", "year": 2026, "is_weekday": true},
+          {"date": 2,  "month": "Maret",    "year": 2026, "is_weekday": true},
+          {"date": 3,  "month": "Maret",    "year": 2026, "is_weekday": true}
+        ]
+      },
+      {
+        "sprint_name": "Sprint 2",
+        "days": [
+          {"date": 4, "month": "Maret", "year": 2026, "is_weekday": true},
+          {"date": 5, "month": "Maret", "year": 2026, "is_weekday": true}
+        ]
+      }
+    ]
+  },
+  "wbs_data": [
+    {
+      "category": "Requirement Gathering",
+      "is_header": true,
+      "tasks": [
+        { "task_name": "Requirement Gathering", "active_days": [20] },
+        { "task_name": "Design UI/UX", "active_days": [20] }
+      ]
+    },
+    {
+      "category": "Development",
+      "is_header": true,
+      "sub_categories": [
+        {
+          "name": "Midleware",
+          "tasks": [
+            { "task_name": "Create service api to access cyberapp  (be) - 2", "active_days": [23, 24] },
+            { "task_name": "Create queue consumer log mapping  (be) - 5", "active_days": [25, 26, 27, 2, 3] }
+          ]
+        }
+      ]
+    }
+  ]
+}

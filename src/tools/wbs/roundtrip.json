@@ -1,0 +1,515 @@
+{
+  "project_info": {
+    "project_name": "WATI CR",
+    "start_date": "2026-02-18",
+    "end_date": "2026-04-20"
+  },
+  "timeline_config": {
+    "sprints": [
+      {
+        "sprint_name": "Sprint 1",
+        "days": [
+          {
+            "date": 20,
+            "month": "Februari",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 23,
+            "month": "Februari",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 24,
+            "month": "Februari",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 25,
+            "month": "Februari",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 26,
+            "month": "Februari",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 27,
+            "month": "Februari",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 2,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 3,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          }
+        ]
+      },
+      {
+        "sprint_name": "Sprint 2",
+        "days": [
+          {
+            "date": 4,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 5,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 6,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 9,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 10,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 11,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 12,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 13,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 16,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 17,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          }
+        ]
+      },
+      {
+        "sprint_name": "Sprint 3",
+        "days": [
+          {
+            "date": 25,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 26,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 27,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 30,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 31,
+            "month": "Maret",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 1,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 2,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 6,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 7,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 8,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          }
+        ]
+      },
+      {
+        "sprint_name": "Sprint 4",
+        "days": [
+          {
+            "date": 9,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 10,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 13,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 14,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 15,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 16,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 17,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 20,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 21,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          },
+          {
+            "date": 22,
+            "month": "April",
+            "year": 2026,
+            "is_weekday": true
+          }
+        ]
+      }
+    ]
+  },
+  "wbs_data": [
+    {
+      "category": "Requirement Gathering",
+      "is_header": true,
+      "tasks": [
+        {
+          "task_name": "Requirement Gathering",
+          "active_days": [
+            20
+          ]
+        },
+        {
+          "task_name": "Design UI/UX",
+          "active_days": [
+            20
+          ]
+        },
+        {
+          "task_name": "Design Review Meeting",
+          "active_days": [
+            20
+          ]
+        },
+        {
+          "task_name": "Design Finalization",
+          "active_days": [
+            20
+          ]
+        }
+      ]
+    },
+    {
+      "category": "Development",
+      "is_header": true,
+      "sub_categories": [
+        {
+          "name": "Midleware",
+          "tasks": [
+            {
+              "task_name": "Create service api to access cyberapp  (be) - 2",
+              "active_days": [
+                23,
+                24
+              ]
+            },
+            {
+              "task_name": "Create queue consumer log mapping  (be) - 5",
+              "active_days": [
+                25,
+                26,
+                27,
+                2,
+                3
+              ]
+            },
+            {
+              "task_name": "Create queue consumer blocking soar  (be) - 2",
+              "active_days": [
+                25,
+                26
+              ]
+            },
+            {
+              "task_name": "Create midleware autorization (be) - 1",
+              "active_days": [
+                27
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Wati Dashboard",
+          "tasks": [
+            {
+              "task_name": "DBA design database - 8",
+              "active_days": [
+                20,
+                23,
+                24,
+                25,
+                26,
+                27
+              ]
+            },
+            {
+              "task_name": "Response",
+              "active_days": []
+            },
+            {
+              "task_name": "Create service api response list (be) - 1",
+              "active_days": [
+                4,
+                5
+              ]
+            },
+            {
+              "task_name": "Create service api response detail  (be) - 1",
+              "active_days": [
+                6,
+                9
+              ]
+            },
+            {
+              "task_name": "Create service api close  (be) -1",
+              "active_days": [
+                10,
+                11
+              ]
+            },
+            {
+              "task_name": "Create service api re-open  (be) - 1",
+              "active_days": [
+                12
+              ]
+            },
+            {
+              "task_name": "Create service api input response  (be) - 2",
+              "active_days": [
+                13,
+                16
+              ]
+            },
+            {
+              "task_name": "Create service api blocking soar  (be) - 2",
+              "active_days": [
+                13,
+                16
+              ]
+            },
+            {
+              "task_name": "Create service api push & get command  (be) - 2",
+              "active_days": [
+                16,
+                17
+              ]
+            },
+            {
+              "task_name": "Slicing UI (fe) - 3",
+              "active_days": [
+                4,
+                5,
+                6
+              ]
+            },
+            {
+              "task_name": "Integration response list api (fe) - 1",
+              "active_days": [
+                9,
+                10
+              ]
+            },
+            {
+              "task_name": "Integration detail response api (fe) - 1",
+              "active_days": [
+                11,
+                12
+              ]
+            },
+            {
+              "task_name": "Integration push & get command api (fe) - 2",
+              "active_days": [
+                11,
+                12
+              ]
+            },
+            {
+              "task_name": "Integration blocking soar, close & re-open api (fe) - 1",
+              "active_days": [
+                13,
+                16
+              ]
+            },
+            {
+              "task_name": "Configuration",
+              "active_days": []
+            },
+            {
+              "task_name": "Create service api configuration list (be) - 1",
+              "active_days": [
+                25
+              ]
+            },
+            {
+              "task_name": "Create service api configuration detail  (be) - 1",
+              "active_days": [
+                26
+              ]
+            },
+            {
+              "task_name": "Create service api configuration update & create  (be) - 3",
+              "active_days": [
+                27,
+                30,
+                31,
+                1
+              ]
+            },
+            {
+              "task_name": "Slicing UI (fe) - 2",
+              "active_days": [
+                25,
+                26
+              ]
+            },
+            {
+              "task_name": "Integration configuration list & detail api (fe) - 1",
+              "active_days": [
+                2,
+                6
+              ]
+            },
+            {
+              "task_name": "Integration configuration update & create api (fe) - 2",
+              "active_days": [
+                7,
+                8
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "category": "Closing",
+      "is_header": true,
+      "tasks": [
+        {
+          "task_name": "UAT / Re-UAT",
+          "active_days": [
+            9,
+            10,
+            13,
+            14,
+            15
+          ]
+        },
+        {
+          "task_name": "D2P",
+          "active_days": [
+            21,
+            22
+          ]
+        },
+        {
+          "task_name": "Documentation",
+          "active_days": [
+            16,
+            17,
+            20,
+            21,
+            22
+          ]
+        }
+      ]
+    }
+  ]
+}
