@@ -34,7 +34,6 @@ import logging
 import re
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, urlunparse
 
 from pydantic import BaseModel, ValidationError
 
@@ -120,10 +119,14 @@ Jelaskan dampak potensial jika masalah dibiarkan.
 _EXTRACT_PROMPT = """\
 Ekstrak informasi berikut dari pesan pengguna dan balas dalam JSON:
 {{
-  "repo_url":   "<GitHub URL lengkap atau string kosong>",
+  "repo_url":   "<URL lengkap repository (GitHub, GitLab, Bitbucket, dll.) atau string kosong jika tidak ada>",
   "problem":    "<deskripsi ringkas masalah yang dilaporkan atau area yang ingin diinspeksi>",
-  "keywords":   ["<keyword error atau simbol yang relevan untuk dicari di kode>"]
+  "keywords":   ["<keyword error atau simbol yang relevan untuk dicari di kode>"],
+  "branch":     "<nama git branch jika disebutkan secara eksplisit dalam pesan, jika tidak ada biarkan string kosong>"
 }}
+
+Perhatian: repo_url bisa berupa URL GitHub (github.com), GitLab (gitlab.com), atau platform git lainnya.
+Salin URL persis seperti yang disebutkan pengguna, termasuk scheme https://.
 
 Pesan pengguna: {user_input}
 """
@@ -132,10 +135,37 @@ Pesan pengguna: {user_input}
 # ── Pydantic schema untuk parsing LLM extract ─────────────────────────────────
 
 class InspectionRequest(BaseModel):
-    repo_url: str  = ""
-    problem:  str  = ""
+    repo_url: str       = ""
+    problem:  str       = ""
     keywords: list[str] = []
+    branch:   str       = ""
 
+# ── Branch confirmation state (per session, in-process) ─────────────────────
+#
+# Mirrors the pattern in developer/agent.py: when no branch is specified the
+# agent returns a confirmation request to the client via the orchestrator, and
+# resumes on the next message from the stored pending state.
+
+_inspector_pending_confirmations: dict[str, dict] = {}
+
+_CONFIRMATION_ANSWERS = {
+    "ya", "yes", "ok", "lanjutkan", "continue", "iya",
+    "proceed", "y", "yep", "sure", "lanjut",
+}
+
+
+def _resolve_branch_from_reply(user_input: str, detected_branch: str) -> str | None:
+    """
+    Parse the user's confirmation reply and return the branch to use.
+    Returns the branch name or None if the reply is not a recognizable confirmation.
+    """
+    clean = user_input.strip()
+    lower = clean.lower()
+    if lower in _CONFIRMATION_ANSWERS:
+        return detected_branch
+    if len(clean) <= 100 and " " not in clean and re.match(r"^[\w\-./]+$", clean):
+        return clean
+    return None
 
 # ── Agent ──────────────────────────────────────────────────────────────────────
 
@@ -167,7 +197,34 @@ class DeveloperInspectorAgent(BaseAgent):
         result: CommandResult = await self._cli.run(cmd, work_dir=cwd)
         out = (result.stdout or "") + (result.stderr or "")
         return out.strip()
+    async def _get_current_branch(self, repo_path: Path) -> str:
+        """Return the name of the currently checked-out branch (read-only)."""
+        out = await self._run_cmd("git rev-parse --abbrev-ref HEAD", cwd=repo_path)
+        return out.strip() or "main"
 
+    async def _checkout_branch(self, repo_path: Path, branch: str) -> None:
+        """
+        Checkout the requested branch for read-only inspection.
+
+        Strategy:
+          1. Try a simple `git checkout <branch>`.
+          2. If the branch is not found locally, fetch all remotes and retry
+             as a tracking branch (`-b <branch> origin/<branch>`).
+        """
+        cli = CLIExecutor(timeout=30)
+        result = await cli.run(f"git checkout {branch}", work_dir=repo_path)
+        if result.succeeded:
+            logger.info("Inspector: checked out branch '%s'", branch)
+            return
+        # Branch missing locally – fetch then try again.
+        await cli.run("git fetch --all --prune", work_dir=repo_path)
+        result = await cli.run(f"git checkout -b {branch} origin/{branch}", work_dir=repo_path)
+        if not result.succeeded:
+            raise RuntimeError(
+                f"Branch '{branch}' tidak ditemukan di lokal maupun remote:\n"
+                f"{(result.stdout or '') + (result.stderr or '')[:400]}"
+            )
+        logger.info("Inspector: checked out remote branch '%s'", branch)
     async def _get_dir_tree(self, repo_path: Path) -> str:
         """Return a pruned directory listing."""
         out = await self._run_cmd(
@@ -248,7 +305,9 @@ class DeveloperInspectorAgent(BaseAgent):
         """
         if repo_url:
             # Clone into sandbox dir if not already there.
-            repo_name  = re.sub(r"[^\w\-]", "_", repo_url.split("/")[-1].removesuffix(".git"))
+            # Use owner-repo slug (same convention as developer/agent.py) so
+            # both agents share the same local directory for the same repo.
+            repo_name  = _repo_name_from_url(repo_url)
             local_path = self._repos_dir / repo_name
             self._repos_dir.mkdir(parents=True, exist_ok=True)
 
@@ -345,11 +404,30 @@ class DeveloperInspectorAgent(BaseAgent):
         try:
             logger.info("DeveloperInspectorAgent: starting inspection for session=%s", task.session_id)
 
+            # ── Check for pending branch confirmation ──────────────────────
+            pending = _inspector_pending_confirmations.get(task.session_id)
+            if pending:
+                branch_choice = _resolve_branch_from_reply(
+                    task.user_input, pending["detected_branch"]
+                )
+                if branch_choice is not None:
+                    del _inspector_pending_confirmations[task.session_id]
+                    repo_path = Path(pending["repo_path"])
+                    await self._checkout_branch(repo_path, branch_choice)
+                    req = InspectionRequest(
+                        repo_url=pending["repo_url"],
+                        problem=pending["problem"],
+                        keywords=pending["keywords"],
+                        branch=branch_choice,
+                    )
+                    return await self._run_inspection_task(task, repo_path, req)
+                # Not a recognizable confirmation – fall through to normal parse.
+
             # ── Step 1: Extract structured request ────────────────────────
             req = await self._extract_request(task.user_input)
             logger.info(
-                "Inspector: repo_url=%r problem=%r keywords=%s",
-                req.repo_url, req.problem, req.keywords,
+                "Inspector: repo_url=%r problem=%r keywords=%s branch=%r",
+                req.repo_url, req.problem, req.keywords, req.branch,
             )
 
             # ── Step 2: Resolve local repo path ───────────────────────────
@@ -366,38 +444,38 @@ class DeveloperInspectorAgent(BaseAgent):
                     "(URL tidak diberikan atau tidak ada repo yang sebelumnya di-clone). "
                     "Analisis ini didasarkan pada deskripsi pengguna saja.\n"
                 )
+                report = await self._run_inspection_llm(
+                    task.user_input,
+                    req.problem or task.user_input,
+                    evidence,
+                )
+                task.mark_done(report + warning)
+                return task
+
+            # ── Branch selection ───────────────────────────────────────────
+            if req.branch:
+                # Branch explicitly mentioned → checkout immediately.
+                await self._checkout_branch(repo_path, req.branch)
+                return await self._run_inspection_task(task, repo_path, req)
             else:
-                warning = ""
-                logger.info("Inspector: inspecting repo at %s", repo_path)
-
-                # ── Step 3: Collect read-only evidence ────────────────────
-                (
-                    dir_tree,
-                    git_log,
-                    git_diff,
-                    grep_result,
-                    key_files,
-                    error_logs,
-                ) = await _gather_evidence(self, repo_path, req.keywords)
-
-                evidence = {
-                    "Struktur Direktori":   dir_tree,
-                    "Git Log (terbaru)":    git_log,
-                    "Git Diff (terakhir)":  git_diff,
-                    "Grep Keyword Masalah": grep_result,
-                    "File Kunci":           key_files,
-                    "Log & Error Files":    error_logs,
+                # No branch specified → detect current branch and ask client.
+                detected_branch = await self._get_current_branch(repo_path)
+                _inspector_pending_confirmations[task.session_id] = {
+                    "repo_url":        req.repo_url,
+                    "repo_path":       str(repo_path),
+                    "problem":         req.problem,
+                    "keywords":        req.keywords,
+                    "detected_branch": detected_branch,
                 }
-
-            # ── Step 4: LLM analysis ───────────────────────────────────────
-            report = await self._run_inspection_llm(
-                task.user_input,
-                req.problem or task.user_input,
-                evidence,
-            )
-
-            final = report + warning
-            task.mark_done(final)
+                task.mark_done(
+                    f"⚠️ **Branch tidak ditentukan dalam permintaan.**\n\n"
+                    f"Repository berhasil diakses. Branch aktif saat ini adalah: **`{detected_branch}`**\n\n"
+                    f"Inspeksi akan dijalankan pada branch **`{detected_branch}`**.\n\n"
+                    f"Balas **`lanjutkan`** untuk melanjutkan pada branch ini, "
+                    f"atau ketik nama branch yang diinginkan "
+                    f"(contoh: `develop`, `feature/my-feature`)."
+                )
+                return task
 
         except Exception as exc:
             logger.exception("DeveloperInspectorAgent: unexpected error: %s", exc)
@@ -408,38 +486,60 @@ class DeveloperInspectorAgent(BaseAgent):
 
         return task
 
+    async def _run_inspection_task(
+        self,
+        task:      AgentTask,
+        repo_path: Path,
+        req:       InspectionRequest,
+    ) -> AgentTask:
+        """
+        Execute the actual inspection after the branch has been confirmed
+        and checked out.  Separated from run() so it can be called both on
+        the first turn (branch explicit) and on the confirmation turn.
+        """
+        try:
+            logger.info("Inspector: inspecting repo at %s (branch=%s)", repo_path, req.branch)
+
+            (
+                dir_tree,
+                git_log,
+                git_diff,
+                grep_result,
+                key_files,
+                error_logs,
+            ) = await _gather_evidence(self, repo_path, req.keywords)
+
+            evidence = {
+                "Struktur Direktori":   dir_tree,
+                "Git Log (terbaru)":    git_log,
+                "Git Diff (terakhir)":  git_diff,
+                "Grep Keyword Masalah": grep_result,
+                "File Kunci":           key_files,
+                "Log & Error Files":    error_logs,
+            }
+
+            report = await self._run_inspection_llm(
+                req.problem or "",
+                req.problem or "",
+                evidence,
+            )
+            branch_header = f"🌿 **Branch:** `{req.branch}`\n\n" if req.branch else ""
+            task.mark_done(branch_header + report)
+
+        except Exception as exc:
+            logger.exception("Inspector._run_inspection_task: error: %s", exc)
+            task.mark_failed(
+                f"❌ Inspeksi gagal pada branch `{req.branch}`: {exc}"
+            )
+
+        return task
+
 
 # ── Git URL helpers ───────────────────────────────────────────────────────────
 
-def _is_gitlab_url(repo_url: str) -> bool:
-    """Return True when *repo_url* points to a GitLab instance."""
-    return "gitlab." in repo_url.lower()
-
-
-def _inject_pat_into_url(repo_url: str, pat: str) -> str:
-    """
-    Embed a PAT into an HTTPS clone URL (works for GitHub and GitLab).
-
-    https://github.com/owner/repo.git
-      →  https://<PAT>@github.com/owner/repo.git
-
-    https://gitlab.com/owner/repo.git
-      →  https://oauth2:<PAT>@gitlab.com/owner/repo.git
-      (GitLab requires ``oauth2`` as the username for PAT auth.)
-
-    SSH URLs and empty PATs are returned unchanged.
-    """
-    if not pat:
-        return repo_url
-    parsed = urlparse(repo_url)
-    if parsed.scheme not in ("http", "https"):
-        return repo_url  # SSH – leave as-is
-    port = f":{parsed.port}" if parsed.port and parsed.port not in (80, 443) else ""
-    # GitLab requires "oauth2" as the username; GitHub accepts the PAT directly.
-    user     = "oauth2" if _is_gitlab_url(repo_url) else pat
-    password = f":{pat}" if _is_gitlab_url(repo_url) else ""
-    authed   = parsed._replace(netloc=f"{user}{password}@{parsed.hostname}{port}")
-    return urlunparse(authed)
+# is_gitlab_url, inject_pat_into_url, repo_name_from_url are imported from
+# src.tools.git_utils at the top of this module.
+# Self-hosted GitLab instances are handled via the GITLAB_HOSTS setting.
 
 
 # ── Private gather helper (module-level to avoid 'self' closure issues) ────────

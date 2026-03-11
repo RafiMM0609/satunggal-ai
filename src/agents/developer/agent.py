@@ -36,6 +36,11 @@ from src.memory.repo_tracker import RepoTracker
 from src.memory.state import AgentTask
 from src.tools.cli_executor import CLIExecutor, CommandResult
 from src.tools.git_manager import GitManager, GitPushResult
+from src.tools.git_utils import (
+    inject_pat_into_url as _inject_pat_into_url,
+    is_gitlab_url       as _is_gitlab_url,
+    repo_name_from_url  as _repo_name_from_url,
+)
 from src.tools.sandbox_runner import SandboxResult, SandboxRunner
 
 logger = logging.getLogger(__name__)
@@ -78,7 +83,8 @@ _EXTRACT_PROMPT = """\
 Extract the following from the user message below and respond in JSON:
 {{
   "repo_url": "<full GitHub or GitLab URL or empty string>",
-  "task":     "<concise description of the code change requested>"
+  "task":     "<concise description of the code change requested>",
+  "branch":   "<git branch name if explicitly mentioned in the message, otherwise empty string>"
 }}
 
 User message: {user_input}
@@ -140,6 +146,42 @@ Docker sandbox returned this error:
 
 Fix the error. Respond with JSON array of changed files only.
 """
+
+
+# ── Branch confirmation state (per session, in-process) ─────────────────────
+#
+# When no branch is specified in the request, the agent stores the pending
+# task here and returns a confirmation message to the client via the
+# orchestrator.  On the user's next reply the agent resumes from this state.
+
+_pending_branch_confirmations: dict[str, dict] = {}
+
+_CONFIRMATION_ANSWERS = {
+    "ya", "yes", "ok", "lanjutkan", "continue", "iya",
+    "proceed", "y", "yep", "sure", "lanjut",
+}
+
+
+def _resolve_branch_from_reply(user_input: str, detected_branch: str) -> str | None:
+    """
+    Parse the user's confirmation reply and return the branch to use.
+
+    Returns:
+        The branch name to use (detected or user-specified),
+        or None if the reply is not a recognizable confirmation.
+    """
+    clean = user_input.strip()
+    lower = clean.lower()
+
+    # Simple confirmation → use the previously detected branch.
+    if lower in _CONFIRMATION_ANSWERS:
+        return detected_branch
+
+    # Looks like an explicit branch name (no spaces, valid git chars).
+    if len(clean) <= 100 and " " not in clean and re.match(r"^[\w\-./]+$", clean):
+        return clean
+
+    return None
 
 
 # ── CLI detection & code-patch helpers ────────────────────────────────────────
@@ -234,7 +276,27 @@ class DeveloperAgent(BaseAgent):
         task.mark_processing(self.name)
 
         try:
-            repo_url, dev_task = await self._parse_instruction(task.user_input)
+            # ── Check if this is a reply to a branch-confirmation request ──────
+            pending = _pending_branch_confirmations.get(task.session_id)
+            if pending:
+                branch_choice = _resolve_branch_from_reply(
+                    task.user_input, pending["detected_branch"]
+                )
+                if branch_choice is not None:
+                    del _pending_branch_confirmations[task.session_id]
+                    local_path = Path(pending["local_path"])
+                    await self._checkout_branch(local_path, branch_choice)
+                    return await self._execute_task(
+                        task,
+                        repo_url=pending["repo_url"],
+                        dev_task=pending["dev_task"],
+                        local_path=local_path,
+                        branch=branch_choice,
+                    )
+                # Reply was not a valid confirmation → fall through to normal parse.
+
+            # ── Normal flow ───────────────────────────────────────────────────
+            repo_url, dev_task, branch = await self._parse_instruction(task.user_input)
 
             if not repo_url:
                 # No repo URL → list tracked repos instead.
@@ -242,9 +304,59 @@ class DeveloperAgent(BaseAgent):
                 task.mark_done(result)
                 return task
 
-            local_path   = await self._clone_or_pull(repo_url)
-            executor     = CLIExecutor(work_dir=local_path, timeout=self._timeout)
-            sandbox      = SandboxRunner(
+            local_path = await self._clone_or_pull(repo_url)
+
+            # ── Branch selection ───────────────────────────────────────────────
+            if branch:
+                # Branch explicitly mentioned → checkout immediately.
+                await self._checkout_branch(local_path, branch)
+                return await self._execute_task(task, repo_url, dev_task, local_path, branch)
+            else:
+                # No branch specified → detect current branch and ask client.
+                detected_branch = await self._get_current_branch(local_path)
+                _pending_branch_confirmations[task.session_id] = {
+                    "repo_url":        repo_url,
+                    "dev_task":        dev_task,
+                    "local_path":      str(local_path),
+                    "detected_branch": detected_branch,
+                }
+                task.mark_done(
+                    f"⚠️ **Branch tidak ditentukan dalam permintaan.**\n\n"
+                    f"Repository berhasil di-clone/update. "
+                    f"Branch aktif saat ini adalah: **`{detected_branch}`**\n\n"
+                    f"Proses pengerjaan akan dijalankan pada branch **`{detected_branch}`**.\n\n"
+                    f"Balas **`lanjutkan`** untuk melanjutkan pada branch ini, "
+                    f"atau ketik nama branch yang diinginkan "
+                    f"(contoh: `develop`, `feature/my-feature`)."
+                )
+                return task
+
+        except Exception as exc:
+            logger.exception("DeveloperAgent: unexpected error: %s", exc)
+            task.mark_failed(str(exc))
+            task.result = (
+                f"❌ Terjadi kesalahan saat memproses permintaan: {exc}\n\n"
+                "Pastikan repo URL valid dan bot memiliki akses ke repository."
+            )
+
+        return task
+
+    async def _execute_task(
+        self,
+        task:       AgentTask,
+        repo_url:   str,
+        dev_task:   str,
+        local_path: Path,
+        branch:     str,
+    ) -> AgentTask:
+        """
+        Run the actual development work after the branch has been confirmed
+        and checked out.  Separated from run() so it can be called both on
+        the first turn (branch explicit) and on the confirmation turn.
+        """
+        try:
+            executor = CLIExecutor(work_dir=local_path, timeout=self._timeout)
+            sandbox  = SandboxRunner(
                 repo_path=local_path,
                 python_image=self._python_image,
                 timeout=self._timeout,
@@ -252,6 +364,7 @@ class DeveloperAgent(BaseAgent):
             git_mgr = GitManager(
                 repo_path=local_path,
                 github_pat=self._github_pat,
+                gitlab_pat=self._gitlab_pat,
                 user_name=self._git_user_name,
                 user_email=self._git_user_email,
                 timeout=self._timeout,
@@ -277,13 +390,14 @@ class DeveloperAgent(BaseAgent):
 
             diff   = await git_mgr.get_diff()
             report = self._build_report(dev_task, sandbox_result, diff, commit_hash, push_result)
+            report = f"🌿 **Branch:** `{branch}`\n\n" + report
             task.mark_done(report)
 
         except Exception as exc:
-            logger.exception("DeveloperAgent: unexpected error: %s", exc)
+            logger.exception("DeveloperAgent._execute_task: error: %s", exc)
             task.mark_failed(str(exc))
             task.result = (
-                f"❌ Terjadi kesalahan saat memproses permintaan: {exc}\n\n"
+                f"❌ Terjadi kesalahan saat mengeksekusi task pada branch `{branch}`: {exc}\n\n"
                 "Pastikan repo URL valid dan bot memiliki akses ke repository."
             )
 
@@ -291,21 +405,55 @@ class DeveloperAgent(BaseAgent):
 
     # ── Step 1: Parse instruction ─────────────────────────────────────────────
 
-    async def _parse_instruction(self, user_input: str) -> tuple[str, str]:
+    async def _parse_instruction(self, user_input: str) -> tuple[str, str, str]:
         """
-        Use LLM to extract repo_url and task description from free-form input.
+        Use LLM to extract repo_url, task description, and branch from free-form input.
 
         Returns:
-            (repo_url, task_description)
+            (repo_url, task_description, branch)
             repo_url is empty string when user is asking about tracked repos.
+            branch is empty string when not explicitly specified.
         """
         prompt = _EXTRACT_PROMPT.format(user_input=user_input)
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user",   "content": prompt},
         ]
-        raw = await self._llm.chat(messages, max_tokens=256)
-        return _parse_json_fields(raw, keys=("repo_url", "task"))
+        raw = await self._llm.chat(messages, max_tokens=300)
+        return _parse_json_fields(raw, keys=("repo_url", "task", "branch"))
+
+    # ── Branch helpers ─────────────────────────────────────────────────────────
+
+    async def _get_current_branch(self, local_path: Path) -> str:
+        """Return the name of the currently checked-out branch."""
+        executor = CLIExecutor(work_dir=local_path, timeout=15)
+        result   = await executor.run("git rev-parse --abbrev-ref HEAD")
+        branch   = (result.stdout or "").strip()
+        return branch or "main"
+
+    async def _checkout_branch(self, local_path: Path, branch: str) -> None:
+        """
+        Checkout the requested branch.
+
+        Strategy:
+          1. Try a simple `git checkout <branch>`.
+          2. If the branch is not found locally, fetch all remotes and retry
+             as a tracking branch (`-b <branch> origin/<branch>`).
+        """
+        executor = CLIExecutor(work_dir=local_path, timeout=30)
+        result   = await executor.run(f"git checkout {branch}")
+        if result.succeeded:
+            logger.info("DeveloperAgent: checked out branch '%s'", branch)
+            return
+        # Branch missing locally – fetch then try again.
+        await executor.run("git fetch --all --prune")
+        result = await executor.run(f"git checkout -b {branch} origin/{branch}")
+        if not result.succeeded:
+            raise RuntimeError(
+                f"Branch '{branch}' tidak ditemukan di lokal maupun remote:\n"
+                f"{result.stderr[:400]}"
+            )
+        logger.info("DeveloperAgent: checked out remote branch '%s'", branch)
 
     # ── Step 2: Clone or pull ─────────────────────────────────────────────────
 
@@ -313,8 +461,11 @@ class DeveloperAgent(BaseAgent):
         """
         Git clone if the repo is new; git pull if it already exists locally.
 
-        Injects GITHUB_PAT into the HTTPS URL automatically when set,
-        so private repos can be cloned without interactive prompts.
+        Injects the correct PAT into the HTTPS URL automatically:
+        - GitHub repos use GITHUB_PAT  → ``<PAT>@github.com``
+        - GitLab repos use GITLAB_PAT  → ``oauth2:<PAT>@gitlab.com``
+        Private repos can be cloned without interactive prompts when the
+        matching PAT is configured.
 
         Updates the RepoTracker with the current local path.
 
@@ -746,13 +897,9 @@ class DeveloperAgent(BaseAgent):
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
 
-def _repo_name_from_url(repo_url: str) -> str:
-    """Extract 'owner-repo' slug from a GitHub URL."""
-    clean = repo_url.rstrip("/").rstrip(".git")
-    parts = clean.split("/")
-    if len(parts) >= 2:
-        return f"{parts[-2]}-{parts[-1]}"
-    return parts[-1]
+# Git URL helpers (is_gitlab_url, inject_pat_into_url, repo_name_from_url)
+# are imported from src.tools.git_utils at the top of this file.
+# Self-hosted GitLab instances are handled via the GITLAB_HOSTS setting.
 
 
 def _build_ai_cli_command(task: str, cli: str = "claude") -> str:
@@ -966,35 +1113,3 @@ def _raise_if_failed(result: CommandResult, label: str) -> None:
         raise RuntimeError(
             f"{label} failed (exit={result.returncode}):\n{result.combined_output}"
         )
-
-
-def _is_gitlab_url(repo_url: str) -> bool:
-    """Return True when *repo_url* points to a GitLab instance."""
-    return "gitlab." in repo_url.lower()
-
-
-def _inject_pat_into_url(repo_url: str, pat: str) -> str:
-    """
-    Embed a PAT into an HTTPS clone URL (works for GitHub and GitLab).
-
-    https://github.com/owner/repo.git
-      →  https://<PAT>@github.com/owner/repo.git
-
-    https://gitlab.com/owner/repo.git
-      →  https://oauth2:<PAT>@gitlab.com/owner/repo.git
-      (GitLab requires ``oauth2`` as the username for PAT auth.)
-
-    SSH URLs and empty PATs are returned unchanged.
-    """
-    if not pat:
-        return repo_url
-    from urllib.parse import urlparse, urlunparse
-    parsed = urlparse(repo_url)
-    if parsed.scheme not in ("http", "https"):
-        return repo_url  # SSH – leave as-is
-    port = f":{parsed.port}" if parsed.port and parsed.port not in (80, 443) else ""
-    # GitLab requires "oauth2" as the username; GitHub accepts the PAT directly.
-    user = "oauth2" if _is_gitlab_url(repo_url) else pat
-    password = f":{pat}" if _is_gitlab_url(repo_url) else ""
-    authed = parsed._replace(netloc=f"{user}{password}@{parsed.hostname}{port}")
-    return urlunparse(authed)

@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # scope (and `write_repository` if pushing is needed).
     # Leave empty to rely on pre-configured SSH keys (no PAT auth).
     gitlab_pat:       str = Field("", alias="GITLAB_PAT")
+    # Comma-separated list of ADDITIONAL hostnames that host self-managed GitLab
+    # instances.  'gitlab.com' is always treated as GitLab regardless of this list.
+    # Example: GITLAB_HOSTS=repo.jesica.id,git.mycompany.io
+    gitlab_hosts:     str = Field("", alias="GITLAB_HOSTS")
     # Identity written to git config inside each sandbox repo before committing.
     git_user_name:    str = Field("AdvanceAI Bot", alias="GIT_USER_NAME")
     git_user_email:   str = Field("bot@advanceai.local", alias="GIT_USER_EMAIL")

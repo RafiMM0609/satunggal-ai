@@ -3,8 +3,9 @@ GitManager – high-level git operations for the DeveloperAgent.
 
 Responsibilities:
 - Configure per-repo git identity (user.name / user.email).
-- Inject GITHUB_PAT into the remote URL so push/pull work without
-  interactive password prompts (HTTPS credential helper via URL).
+- Inject GITHUB_PAT or GITLAB_PAT into the remote URL so push/pull work
+  without interactive password prompts (HTTPS credential helper via URL).
+  GitHub: ``<PAT>@github.com``, GitLab: ``oauth2:<PAT>@gitlab.com``.
 - Stage all changes, commit with a conventional message.
 - Push to origin with the authenticated remote URL.
 - Fall back gracefully when PAT is empty (assumes SSH key auth).
@@ -18,9 +19,9 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
 
 from src.tools.cli_executor import CLIExecutor
+from src.tools.git_utils import inject_pat_into_url, is_gitlab_url
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class GitManager:
         self,
         repo_path:   Path | str,
         github_pat:  str = "",
+        gitlab_pat:  str = "",
         user_name:   str = "AdvanceAI Bot",
         user_email:  str = "bot@advanceai.local",
         timeout:     int = 120,
@@ -71,12 +73,15 @@ class GitManager:
         Args:
             repo_path:   Absolute path to the local git repo.
             github_pat:  GitHub Personal Access Token (empty → SSH key auth).
+            gitlab_pat:  GitLab Personal Access Token (empty → SSH key auth).
+                         GitLab requires ``oauth2:<PAT>@`` auth format in the URL.
             user_name:   Identity written to `git config user.name`.
             user_email:  Identity written to `git config user.email`.
             timeout:     Max seconds per git command.
         """
         self._repo_path  = Path(repo_path)
         self._github_pat = github_pat
+        self._gitlab_pat = gitlab_pat
         self._user_name  = user_name
         self._user_email = user_email
         self._executor   = CLIExecutor(work_dir=self._repo_path, timeout=timeout, auto_yes=False)
@@ -182,28 +187,16 @@ class GitManager:
 
     def _inject_pat(self, remote_url: str) -> str:
         """
-        Embed the PAT into an HTTPS remote URL so git can push without
-        interactive prompts.
+        Embed the correct PAT into an HTTPS remote URL so git can push/pull
+        without interactive prompts.
 
-        https://github.com/owner/repo.git
-          →  https://<PAT>@github.com/owner/repo.git
-
-        If the URL is already SSH (git@github.com:…) or the PAT is empty,
-        the URL is returned unchanged (SSH key auth is assumed).
+        Delegates to src.tools.git_utils.inject_pat_into_url which handles:
+        - GitHub  : https://<PAT>@github.com/owner/repo.git
+        - GitLab  : https://oauth2:<PAT>@<host>/owner/repo.git
+        - Self-hosted GitLab (configured via GITLAB_HOSTS setting)
         """
-        if not self._github_pat:
-            logger.debug("GitManager: no PAT configured, using existing auth (SSH/credential helper)")
-            return remote_url
-
-        parsed = urlparse(remote_url)
-        if parsed.scheme not in ("http", "https"):
-            # SSH URL – PAT cannot be injected; rely on SSH key.
-            logger.debug("GitManager: SSH remote, skipping PAT injection")
-            return remote_url
-
-        # Strip any existing credentials before injecting the PAT.
-        authed = parsed._replace(netloc=f"{self._github_pat}@{parsed.hostname}{_port_suffix(parsed)}")
-        return urlunparse(authed)
+        pat = self._gitlab_pat if is_gitlab_url(remote_url) else self._github_pat
+        return inject_pat_into_url(remote_url, pat)
 
     async def _commit(self, message: str) -> tuple[str, str]:
         """
