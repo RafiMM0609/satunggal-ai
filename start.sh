@@ -5,8 +5,14 @@
 #
 # Penggunaan:
 #   chmod +x start.sh
-#   ./start.sh            → setup + jalankan bot
-#   ./start.sh --install  → setup dependency saja (tanpa jalankan bot)
+#   ./start.sh               → setup + jalankan bot (foreground)
+#   ./start.sh --install     → setup dependency saja (tanpa jalankan bot)
+#   ./start.sh --background  → setup + jalankan bot di background (nohup)
+#   ./start.sh --service     → install & aktifkan sebagai systemd user service
+#   ./start.sh --stop        → hentikan bot yang berjalan di background
+#   ./start.sh --restart     → restart bot di background
+#   ./start.sh --status      → cek apakah bot sedang berjalan
+#   ./start.sh --logs        → tail log bot (Ctrl+C untuk keluar)
 # =============================================================================
 
 set -euo pipefail
@@ -37,8 +43,127 @@ detect_os() {
 }
 
 OS=$(detect_os)
-INSTALL_ONLY=false
-[[ "${1:-}" == "--install" ]] && INSTALL_ONLY=true
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PID_FILE="$SCRIPT_DIR/bot.pid"
+LOG_FILE="$SCRIPT_DIR/logs/bot.log"
+SERVICE_NAME="advance_ai_bot"
+
+# ── Parse argumen ─────────────────────────────────────────────────────────────
+MODE="run"
+for arg in "$@"; do
+    case "$arg" in
+        --install)           MODE="install"     ;;
+        --background|-b)     MODE="background"  ;;
+        --service)           MODE="service"     ;;
+        --stop)              MODE="stop"        ;;
+        --status)            MODE="status"      ;;
+        --logs|-l)           MODE="logs"        ;;
+        --restart)           MODE="restart"     ;;
+    esac
+done
+
+# ── Fungsi manajemen background ───────────────────────────────────────────────
+bot_pid()        { [[ -f "$PID_FILE" ]] && cat "$PID_FILE" || echo ""; }
+
+bot_is_running() {
+    local pid
+    pid=$(bot_pid)
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+stop_bot() {
+    if bot_is_running; then
+        local pid
+        pid=$(bot_pid)
+        info "Menghentikan bot (PID $pid) ..."
+        kill "$pid" 2>/dev/null && sleep 2
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+        success "Bot dihentikan."
+    else
+        warning "Bot tidak sedang berjalan."
+        [[ -f "$PID_FILE" ]] && rm -f "$PID_FILE"
+    fi
+}
+
+bot_status() {
+    header "Status Bot"
+    if bot_is_running; then
+        local pid
+        pid=$(bot_pid)
+        success "Bot AKTIF  (PID: $pid)"
+        echo -e "  Log  : $LOG_FILE"
+        echo -e "  PID  : $PID_FILE"
+    else
+        warning "Bot TIDAK berjalan."
+        [[ -f "$PID_FILE" ]] && { warning "PID file lama ditemukan, dihapus."; rm -f "$PID_FILE"; }
+    fi
+}
+
+install_systemd_service() {
+    local SERVICE_FILE="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
+    mkdir -p "$(dirname "$SERVICE_FILE")"
+    mkdir -p "$(dirname "$LOG_FILE")"
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=advance_ai Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${SCRIPT_DIR}
+ExecStart=${SCRIPT_DIR}/.venv/bin/python ${SCRIPT_DIR}/main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:${LOG_FILE}
+StandardError=append:${LOG_FILE}
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable "$SERVICE_NAME"
+    systemctl --user restart "$SERVICE_NAME"
+    success "Systemd user service '${SERVICE_NAME}' aktif."
+    info "Perintah berguna:"
+    echo "  systemctl --user status  ${SERVICE_NAME}"
+    echo "  systemctl --user stop    ${SERVICE_NAME}"
+    echo "  systemctl --user restart ${SERVICE_NAME}"
+    echo "  journalctl --user -u ${SERVICE_NAME} -f"
+    echo ""
+    info "Agar bot tetap jalan saat SSH logout, aktifkan lingering (sekali saja):"
+    echo "  loginctl enable-linger \$USER"
+}
+
+# ── Mode yang tidak butuh setup dependency ─────────────────────────────────────
+case "$MODE" in
+    stop)
+        bot_status
+        stop_bot
+        exit 0
+        ;;
+    status)
+        bot_status
+        exit 0
+        ;;
+    logs)
+        if [[ -f "$LOG_FILE" ]]; then
+            info "Menampilkan log dari $LOG_FILE (Ctrl+C untuk keluar) ..."
+            echo ""
+            tail -f "$LOG_FILE"
+        else
+            warning "File log tidak ditemukan: $LOG_FILE"
+            info "Jalankan bot dulu dengan: ./start.sh --background"
+        fi
+        exit 0
+        ;;
+    restart)
+        stop_bot
+        MODE="background"  # lanjut ke setup + background run
+        ;;
+esac
 
 # ==============================================================================
 # 1. Python virtual environment
@@ -217,14 +342,58 @@ check "mmdc"    "mmdc"
 echo ""
 
 # ==============================================================================
-# 5. Jalankan bot (jika tidak --install only)
+# 5. Jalankan bot
 # ==============================================================================
-if [[ "$INSTALL_ONLY" == true ]]; then
-    success "Setup selesai. Jalankan bot dengan: ./start.sh"
-    exit 0
-fi
+case "$MODE" in
+    install)
+        success "Setup selesai. Pilih cara menjalankan bot:"
+        echo ""
+        echo "  ./start.sh               → foreground (lihat output langsung)"
+        echo "  ./start.sh --background  → background, tetap aktif saat SSH logout*"
+        echo "  ./start.sh --service     → systemd service (auto-restart, boot otomatis)"
+        echo ""
+        echo "  *) pastikan nohup aktif: nohup sudah dipakai secara otomatis."
+        echo "     Untuk sesi persisten sejati gunakan --service + loginctl enable-linger"
+        exit 0
+        ;;
 
-header "Menjalankan Bot"
-info "Mengaktifkan venv dan menjalankan main.py ..."
-echo ""
-exec "$VENV_DIR/bin/python" main.py
+    background)
+        header "Menjalankan Bot (Background)"
+        if bot_is_running; then
+            warning "Bot sudah berjalan (PID: $(bot_pid)). Gunakan --restart untuk restart."
+            exit 1
+        fi
+        mkdir -p "$(dirname "$LOG_FILE")"
+        info "Menjalankan bot di background ..."
+        info "Log  → $LOG_FILE"
+        nohup "$VENV_DIR/bin/python" -u main.py >> "$LOG_FILE" 2>&1 &
+        echo $! > "$PID_FILE"
+        sleep 2
+        if bot_is_running; then
+            success "Bot berjalan di background (PID: $(cat "$PID_FILE"))."
+            echo ""
+            info "Perintah berguna:"
+            echo "  ./start.sh --status   → cek status"
+            echo "  ./start.sh --logs     → lihat log real-time"
+            echo "  ./start.sh --restart  → restart"
+            echo "  ./start.sh --stop     → hentikan bot"
+        else
+            error "Bot gagal dijalankan. Cek log: $LOG_FILE"
+            cat "$LOG_FILE" 2>/dev/null | tail -20 || true
+            exit 1
+        fi
+        ;;
+
+    service)
+        header "Install Systemd User Service"
+        install_systemd_service
+        ;;
+
+    run)
+        header "Menjalankan Bot (Foreground)"
+        info "Mengaktifkan venv dan menjalankan main.py ..."
+        info "(Tekan Ctrl+C untuk menghentikan. Gunakan --background agar tetap aktif saat SSH logout.)"
+        echo ""
+        exec "$VENV_DIR/bin/python" -u main.py
+        ;;
+esac
