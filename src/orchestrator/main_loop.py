@@ -29,9 +29,23 @@ Flow:
 from __future__ import annotations
 
 import logging
-from typing import Optional, TYPE_CHECKING
+from typing import Awaitable, Callable, Optional, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
+
+# Type alias for the optional progress callback passed in by the interface layer.
+# Signature: async callback(rendered_text: str) -> None
+StatusCallback = Optional[Callable[[str], Awaitable[None]]]
+
+
+async def _notify(cb: StatusCallback, text: str) -> None:
+    """Fire the progress callback, swallowing any errors so the pipeline continues."""
+    if cb is None:
+        return
+    try:
+        await cb(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Progress callback raised: %s", exc)
 
 if TYPE_CHECKING:
     from src.memory.state import AgentTask
@@ -56,6 +70,7 @@ def _get_pipeline():
 
     from src.agents.content_creator.agent import ContentCreatorAgent
     from src.agents.developer.agent import DeveloperAgent
+    from src.agents.developer_inspector.agent import DeveloperInspectorAgent
     from src.agents.gatekeeper.agent import GatekeeperAgent
     from src.agents.llm_client import LLMClient
     from src.agents.mandays_agent.agent import MandaysAgent
@@ -100,8 +115,9 @@ def _get_pipeline():
         "content_creator":   ContentCreatorAgent(_history, _llm),
         "wbs_agent":         WBSAgent(_llm),
         "mandays_agent":     MandaysAgent(_llm),
-        "developer":         DeveloperAgent(_llm),
-        "technical_writer":  TechnicalWriterAgent(_history, _llm),
+        "developer":            DeveloperAgent(_llm),
+        "developer_inspector": DeveloperInspectorAgent(_llm),
+        "technical_writer":    TechnicalWriterAgent(_history, _llm),
     }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
@@ -115,21 +131,31 @@ def _get_pipeline():
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-async def process_message(session_id: str, user_text: str) -> "AgentTask":
+async def process_message(
+    session_id: str,
+    user_text: str,
+    status_callback: "StatusCallback" = None,
+) -> "AgentTask":
     """
     Core pipeline called by every interface.
 
     Args:
-        session_id: Unique identifier for the conversation (e.g. Telegram user_id).
-        user_text:  The raw text from the user.
+        session_id:       Unique identifier for the conversation (e.g. Telegram user_id).
+        user_text:        The raw text from the user.
+        status_callback:  Optional async callable ``async (rendered_text: str) -> None``
+                          invoked at every pipeline stage to update a live progress message.
 
     Returns:
         The completed AgentTask (task.result holds the reply text;
         task.metadata may contain extra data such as "excel_path").
     """
     from src.memory.state import AgentTask
+    from src.tools.progress_tracker import ProgressTracker
 
     history, agents, router, gatekeeper, tools = _get_pipeline()
+
+    # ── Bootstrap progress tracker ─────────────────────────────────────────
+    tracker = ProgressTracker(title="⏳ Sedang memproses permintaan...")
 
     # 1. Record the user turn in history
     history.add(session_id, "user", user_text)
@@ -138,6 +164,9 @@ async def process_message(session_id: str, user_text: str) -> "AgentTask":
     task = AgentTask(session_id=session_id, user_input=user_text)
 
     # 3. Classify intent (gatekeeper) – now also returns which tools to run
+    tracker.advance("gatekeeper")
+    await _notify(status_callback, tracker.render())
+
     intent_result = await gatekeeper.classify_intent(user_text, session_id=session_id)
     task.mark_routed(intent_result.intent.value)
     logger.info(
@@ -145,6 +174,7 @@ async def process_message(session_id: str, user_text: str) -> "AgentTask":
         session_id, intent_result.intent.value, intent_result.confidence,
         intent_result.tools,
     )
+    tracker.complete_current()
 
     # 4. Execute tools declared by gatekeeper (before calling specialist agent)
     for tool_name in intent_result.tools:
@@ -152,6 +182,10 @@ async def process_message(session_id: str, user_text: str) -> "AgentTask":
         if tool is None:
             logger.warning("Tool '%s' requested by gatekeeper but not registered; skipping.", tool_name)
             continue
+
+        tracker.advance(f"pre_tool:{tool_name}")
+        await _notify(status_callback, tracker.render())
+
         try:
             logger.info("Executing tool '%s' for session=%s", tool_name, session_id)
             tool_output = await tool.run(task)
@@ -171,16 +205,22 @@ async def process_message(session_id: str, user_text: str) -> "AgentTask":
             logger.exception("Tool '%s' raised an exception: %s", tool_name, exc)
             task.tool_results[tool_name] = {"error": str(exc)}
 
+        tracker.complete_current()
+
     # 5. Route to specialist agent
     agent = router.resolve(task)
     task.mark_processing(agent.name)
 
     # 6. Execute agent (task.tool_results is already populated)
+    tracker.advance(f"agent:{agent.name}")
+    await _notify(status_callback, tracker.render())
+
     task = await agent.run(task)
     logger.info(
         "Agent done: session=%s agent=%s pending_tools=%s",
         session_id, agent.name, task.pending_tools,
     )
+    tracker.complete_current()
 
     # 6b. Post-agent: drain pending_tools set by the agent during its run
     for tool_name in list(task.pending_tools):
@@ -188,6 +228,10 @@ async def process_message(session_id: str, user_text: str) -> "AgentTask":
         if tool is None:
             logger.warning("pending_tools: '%s' not in registry; skipping.", tool_name)
             continue
+
+        tracker.advance(f"post_tool:{tool_name}")
+        await _notify(status_callback, tracker.render())
+
         try:
             logger.info("Post-agent tool '%s' starting for session=%s", tool_name, session_id)
             tool_output = await tool.run(task)
@@ -203,7 +247,14 @@ async def process_message(session_id: str, user_text: str) -> "AgentTask":
         except Exception as exc:
             logger.exception("Post-agent tool '%s' raised: %s", tool_name, exc)
             task.tool_results[tool_name] = {"error": str(exc)}
+
+        tracker.complete_current()
+
     task.pending_tools.clear()
+
+    # 6c. Signal 100 % done before returning
+    tracker.advance("done")
+    await _notify(status_callback, tracker.render())
 
     # 7. Build final reply text (stored on task for callers)
     if not task.result:

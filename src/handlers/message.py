@@ -69,13 +69,45 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logger.info("Text from user=%s: %.100s", user.id, message.text)
 
+    # ── Send initial progress message ──────────────────────────────────────
+    # This message will be edited live at each pipeline stage so the user
+    # always sees what the bot is doing.
+    progress_msg = await message.reply_text(
+        "⏳ *Sedang memproses permintaan...*\n`[░░░░░░░░░░]` *0%*",
+        parse_mode="Markdown",
+        quote=True,
+    )
+
+    async def _progress_callback(rendered_text: str) -> None:
+        """Edit the progress message with the latest tracker output."""
+        try:
+            await context.bot.edit_message_text(
+                chat_id=progress_msg.chat_id,
+                message_id=progress_msg.message_id,
+                text=rendered_text,
+                parse_mode="Markdown",
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Telegram raises if the text didn't change – silently ignore.
+            logger.debug("edit_message_text skipped: %s", exc)
+
     # Show typing indicator while the pipeline runs
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
 
     task = await process_message(
         session_id=str(user.id),
         user_text=message.text,
+        status_callback=_progress_callback,
     )
+
+    # ── Delete the progress message now that we have the real reply ────────
+    try:
+        await context.bot.delete_message(
+            chat_id=progress_msg.chat_id,
+            message_id=progress_msg.message_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not delete progress message: %s", exc)
 
     reply = task.result or "Maaf, saya tidak dapat memproses permintaan Anda."
 

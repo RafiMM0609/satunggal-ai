@@ -37,8 +37,9 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.CONTENT_CREATION:  "content_creator",
     IntentCategory.DATA_ANALYSIS:     "wbs_agent",
     IntentCategory.MANDAYS_PLANNING:  "mandays_agent",
-    IntentCategory.CODE_DEVELOPMENT:  "developer",       #← clone / AI-edit / sandbox
-    IntentCategory.DOCUMENT_CREATION: "technical_writer", #← generate PDF/Word dari repo/topik
+    IntentCategory.CODE_DEVELOPMENT:  "developer",          #← clone / AI-edit / sandbox
+    IntentCategory.CODE_INSPECTION:   "developer_inspector", #← read-only inspect + root cause
+    IntentCategory.DOCUMENT_CREATION: "technical_writer",    #← generate PDF/Word dari repo/topik
 }
 
 

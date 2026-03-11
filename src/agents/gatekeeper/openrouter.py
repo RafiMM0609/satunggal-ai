@@ -33,6 +33,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - research           (user explicitly requests deep research or investigation using live data)
 - content_creation   (user wants to create, write, or draft content for a platform such as LinkedIn, Twitter, blog, etc.)
 - code_development   (user wants to clone a repo, edit/fix code using AI CLI, or run code in a Docker sandbox)
+- code_inspection    (user wants to INSPECT a repo, find bugs/issues/root causes, review code quality — read-only, NO code changes)
 - document_creation  (user wants to generate a technical document, PDF, or Word file — from a GitHub repo, topic, or data such as WBS/mandays output)
 - unknown
 
@@ -58,7 +59,14 @@ Rules:
 10. Use "code_development" when the user mentions cloning a repo/GitHub URL, fixing/editing code with AI CLI (Copilot, Claude), running code in Docker/sandbox, or listing cloned repos:
     - Indonesian: clone repo, kloning, perbaiki kode di repo, jalankan di sandbox, daftar repo, edit kode, tambah fitur ke repo
     - English: clone repo, fix code in repo, run in docker sandbox, list cloned repos, edit this repo, add feature to repo
-11. Use "document_creation" when the user asks to generate, create, or compile a technical document in PDF or Word format:
+11. Use "code_inspection" when the user wants to INSPECT, REVIEW, or DIAGNOSE code/repo without making changes:
+    - Indonesian: inspeksi repo, periksa kode, cari bug, temukan masalah, audit kode, review kode, analisa bug, cari penyebab error,
+      diagnosis masalah, lacak bug, inspektor, investigasi kode, apa yang salah di repo, kenapa error, selidiki bug
+    - English: inspect repo, review code, find bug, audit code, analyze error, diagnose issue, trace bug, what is wrong in repo,
+      why is it failing, code review, root cause analysis, check the code, look at the repo for issues
+    - Key differentiator: user wants FINDINGS and RECOMMENDATIONS (not actual code changes).
+      If user says "perbaiki" / "fix" → code_development. If user says "cari tahu" / "periksa" / "apa yang salah" → code_inspection.
+12. Use "document_creation" when the user asks to generate, create, or compile a technical document in PDF or Word format:
     - Indonesian: buat dokumen, buat dokumen teknis, generate PDF, buat PDF, buat Word, buat laporan teknis, dokumentasikan, buatkan dokumentasi, buat doc
     - English: generate document, create technical doc, make a PDF, create Word document, document this repo, write technical documentation
     - Even if a repo URL is mentioned, if the primary intent is to produce a document (not to fix/edit code), use "document_creation"
@@ -68,6 +76,7 @@ Example responses:
   {"intent": "mandays_planning", "confidence": 0.95, "tools": []}
   {"intent": "research",         "confidence": 0.91, "tools": ["tavily_search"]}
   {"intent": "code_development",  "confidence": 0.96, "tools": []}
+  {"intent": "code_inspection",   "confidence": 0.95, "tools": []}
   {"intent": "document_creation", "confidence": 0.95, "tools": []}
   {"intent": "general_inquiry",   "confidence": 0.88, "tools": []}
 """
