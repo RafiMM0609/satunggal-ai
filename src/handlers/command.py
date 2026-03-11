@@ -89,8 +89,10 @@ async def deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(_DEPLOY_SCRIPT.parent),
+            # jalankan di session baru agar sinyal tidak menyebar ke subprocess
+            start_new_session=True,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
         output = stdout.decode(errors="replace").strip()
 
         if proc.returncode == 0:

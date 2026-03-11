@@ -88,20 +88,55 @@ else
     fi
 fi
 
-# ── 2. Restart service ────────────────────────────────────────────────────────
-header "2/2 — Restart Service"
+# ── 2. Update Python dependencies ────────────────────────────────────────────
+header "2/3 — Update Python Dependencies"
+
+VENV_DIR="$SCRIPT_DIR/.venv"
+PIP="$VENV_DIR/bin/pip"
 
 if $DRY_RUN; then
-    warning "[DRY-RUN] ./start.sh --restart dilewati."
+    warning "[DRY-RUN] pip install dilewati."
+elif [[ ! -f "$PIP" ]]; then
+    warning "Virtual environment belum ada di $VENV_DIR — akan dibuat saat restart."
 else
-    bash "$START_SH" --restart 2>&1 | tee -a "$DEPLOY_LOG" || {
-        error "Restart gagal. Cek $DEPLOY_LOG untuk detail."
+    info "Mengupgrade pip ..."
+    "$PIP" install --upgrade pip -q 2>&1 | tee -a "$DEPLOY_LOG"
+    info "Menginstall dependencies dari requirements.txt ..."
+    if ! "$PIP" install -r "$SCRIPT_DIR/requirements.txt" 2>&1 | tee -a "$DEPLOY_LOG"; then
+        error "pip install gagal. Deploy dibatalkan."
         exit 1
-    }
-    success "Service berhasil di-restart."
+    fi
+    success "Python dependencies berhasil diupdate."
+fi
+
+# ── 3. Jadwalkan restart (fully detached) ─────────────────────────────────────
+# PENTING: Tidak boleh memanggil start.sh --restart secara langsung dari sini,
+# karena start.sh akan membunuh proses bot yang sedang menjalankan handler ini.
+# Solusi: jadwalkan restart sebagai proses terpisah (setsid + disown + delay)
+# agar bot sempat mengirim hasil deploy ke Telegram sebelum mati.
+header "3/3 — Jadwalkan Restart Service"
+
+RESTART_LOG="$LOG_DIR/restart_$(date +%Y%m%d_%H%M%S).log"
+RESTART_DELAY=8  # detik — cukup untuk bot kirim pesan ke Telegram
+
+if $DRY_RUN; then
+    warning "[DRY-RUN] Penjadwalan restart dilewati."
+else
+    if ! command -v setsid &>/dev/null; then
+        # Fallback tanpa setsid
+        (sleep "$RESTART_DELAY" && bash "$START_SH" --restart >> "$RESTART_LOG" 2>&1) &
+        disown $!
+    else
+        # setsid: proses masuk session baru, tidak ikut mati saat parent kill
+        setsid bash -c "sleep $RESTART_DELAY && bash '$START_SH' --restart >> '$RESTART_LOG' 2>&1" &
+        disown $!
+    fi
+    success "Restart dijadwalkan dalam ${RESTART_DELAY} detik."
+    info "Log restart → $RESTART_LOG"
 fi
 
 # ── Ringkasan ─────────────────────────────────────────────────────────────────
 DEPLOY_END=$(date +%s)
 ELAPSED=$(( DEPLOY_END - DEPLOY_START ))
 header "Deploy selesai dalam ${ELAPSED}s — $(ts)"
+info "Bot akan restart dalam ~${RESTART_DELAY} detik."
