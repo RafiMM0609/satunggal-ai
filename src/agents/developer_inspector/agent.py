@@ -42,6 +42,11 @@ from src.agents.llm_client import LLMClient
 from src.memory.repo_tracker import RepoTracker
 from src.memory.state import AgentTask
 from src.tools.cli_executor import CLIExecutor, CommandResult
+from src.tools.git_utils import (
+    inject_pat_into_url as _inject_pat_into_url,
+    is_gitlab_url       as _is_gitlab_url,
+    repo_name_from_url  as _repo_name_from_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +221,8 @@ class DeveloperInspectorAgent(BaseAgent):
         if result.succeeded:
             logger.info("Inspector: checked out branch '%s'", branch)
             return
-        # Branch missing locally – fetch then try again.
+        # Branch missing locally – expand refspec, fetch all, then retry.
+        await cli.run("git remote set-branches origin '*'", work_dir=repo_path)
         await cli.run("git fetch --all --prune", work_dir=repo_path)
         result = await cli.run(f"git checkout -b {branch} origin/{branch}", work_dir=repo_path)
         if not result.succeeded:
@@ -317,6 +323,14 @@ class DeveloperInspectorAgent(BaseAgent):
 
             if local_path.exists():
                 logger.info("Inspector: repo already exists, pulling. path=%s", local_path)
+                # Expand remote refspec so 'git fetch --all' picks up ALL branches,
+                # even if the repo was previously cloned with --single-branch.
+                await self._run_cmd(
+                    "git remote set-branches origin '*'", cwd=local_path
+                )
+                fetch_out = await self._run_cmd(
+                    f"git fetch {auth_url} --all --prune", cwd=local_path
+                )
                 pull_out = await self._run_cmd(
                     f"git pull {auth_url} --rebase --quiet", cwd=local_path
                 )
@@ -324,8 +338,10 @@ class DeveloperInspectorAgent(BaseAgent):
                     logger.warning("Inspector: git pull may have failed: %s", pull_out)
             else:
                 logger.info("Inspector: cloning %s → %s", repo_url, local_path)
+                # --no-single-branch ensures ALL remote branches are fetched,
+                # not just the default branch (which --depth implies by default).
                 result = await self._run_cmd(
-                    f"git clone --depth 50 {auth_url} {local_path}"
+                    f"git clone --no-single-branch {auth_url} {local_path}"
                 )
                 if "fatal" in result.lower() or "error" in result.lower():
                     logger.warning("Inspector: clone may have failed: %s", result)

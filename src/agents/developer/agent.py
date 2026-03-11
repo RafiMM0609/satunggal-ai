@@ -445,7 +445,8 @@ class DeveloperAgent(BaseAgent):
         if result.succeeded:
             logger.info("DeveloperAgent: checked out branch '%s'", branch)
             return
-        # Branch missing locally – fetch then try again.
+        # Branch missing locally – expand refspec, fetch all, then retry.
+        await executor.run("git remote set-branches origin '*'")
         await executor.run("git fetch --all --prune")
         result = await executor.run(f"git checkout -b {branch} origin/{branch}")
         if not result.succeeded:

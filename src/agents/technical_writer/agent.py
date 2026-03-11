@@ -287,6 +287,7 @@ class TechnicalWriterAgent(BaseAgent):
         if result.succeeded:
             logger.info("TechnicalWriterAgent: checked out branch '%s'", branch)
             return
+        await cli.run("git remote set-branches origin '*'")
         await cli.run("git fetch --all --prune")
         result = await cli.run(f"git checkout -b {branch} origin/{branch}")
         if not result.succeeded:
