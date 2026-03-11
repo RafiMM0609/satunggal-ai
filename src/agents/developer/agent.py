@@ -77,7 +77,7 @@ lalu mengeksekusinya menggunakan AI CLI (seperti GitHub Copilot atau Claude Code
 _EXTRACT_PROMPT = """\
 Extract the following from the user message below and respond in JSON:
 {{
-  "repo_url": "<full GitHub URL or empty string>",
+  "repo_url": "<full GitHub or GitLab URL or empty string>",
   "task":     "<concise description of the code change requested>"
 }}
 
@@ -212,6 +212,7 @@ class DeveloperAgent(BaseAgent):
         self._max_retries  = _settings.sandbox_max_retries
         # Git credentials – read once at startup from .env
         self._github_pat   = _settings.github_pat
+        self._gitlab_pat   = _settings.gitlab_pat
         self._git_user_name  = _settings.git_user_name
         self._git_user_email = _settings.git_user_email
         self._repos_dir.mkdir(parents=True, exist_ok=True)
@@ -325,7 +326,9 @@ class DeveloperAgent(BaseAgent):
         executor   = CLIExecutor(work_dir=self._repos_dir, timeout=120)
 
         # Build an authenticated URL for HTTPS repos when PAT is available.
-        auth_url   = _inject_pat_into_url(repo_url, self._github_pat)
+        # Select the appropriate PAT based on the git host (GitLab vs GitHub).
+        _pat     = self._gitlab_pat if _is_gitlab_url(repo_url) else self._github_pat
+        auth_url = _inject_pat_into_url(repo_url, _pat)
 
         if local_path.exists():
             logger.info("DeveloperAgent: repo exists, pulling %s", repo_url)
@@ -965,12 +968,21 @@ def _raise_if_failed(result: CommandResult, label: str) -> None:
         )
 
 
+def _is_gitlab_url(repo_url: str) -> bool:
+    """Return True when *repo_url* points to a GitLab instance."""
+    return "gitlab." in repo_url.lower()
+
+
 def _inject_pat_into_url(repo_url: str, pat: str) -> str:
     """
-    Embed a GitHub PAT into an HTTPS clone URL.
+    Embed a PAT into an HTTPS clone URL (works for GitHub and GitLab).
 
     https://github.com/owner/repo.git
       →  https://<PAT>@github.com/owner/repo.git
+
+    https://gitlab.com/owner/repo.git
+      →  https://oauth2:<PAT>@gitlab.com/owner/repo.git
+      (GitLab requires ``oauth2`` as the username for PAT auth.)
 
     SSH URLs and empty PATs are returned unchanged.
     """
@@ -981,5 +993,8 @@ def _inject_pat_into_url(repo_url: str, pat: str) -> str:
     if parsed.scheme not in ("http", "https"):
         return repo_url  # SSH – leave as-is
     port = f":{parsed.port}" if parsed.port and parsed.port not in (80, 443) else ""
-    authed = parsed._replace(netloc=f"{pat}@{parsed.hostname}{port}")
+    # GitLab requires "oauth2" as the username; GitHub accepts the PAT directly.
+    user = "oauth2" if _is_gitlab_url(repo_url) else pat
+    password = f":{pat}" if _is_gitlab_url(repo_url) else ""
+    authed = parsed._replace(netloc=f"{user}{password}@{parsed.hostname}{port}")
     return urlunparse(authed)

@@ -34,6 +34,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 from pydantic import BaseModel, ValidationError
 
@@ -149,9 +150,15 @@ class DeveloperInspectorAgent(BaseAgent):
     name = "developer_inspector"
 
     def __init__(self, llm: LLMClient | None = None) -> None:
+        from config.settings import get_settings
+        _settings          = get_settings()
         self._llm          = llm or LLMClient()
         self._repo_tracker = RepoTracker()
         self._cli          = CLIExecutor(timeout=30)
+        self._repos_dir    = Path(_settings.sandbox_repos_dir).expanduser()
+        self._github_pat   = _settings.github_pat
+        self._gitlab_pat   = _settings.gitlab_pat
+        self._repos_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Helpers: read-only shell commands ─────────────────────────────────────
 
@@ -242,16 +249,24 @@ class DeveloperInspectorAgent(BaseAgent):
         if repo_url:
             # Clone into sandbox dir if not already there.
             repo_name  = re.sub(r"[^\w\-]", "_", repo_url.split("/")[-1].removesuffix(".git"))
-            local_path = REPOS_BASE_DIR / repo_name
-            REPOS_BASE_DIR.mkdir(parents=True, exist_ok=True)
+            local_path = self._repos_dir / repo_name
+            self._repos_dir.mkdir(parents=True, exist_ok=True)
+
+            # Inject PAT for private HTTPS repos (GitLab or GitHub).
+            _pat     = self._gitlab_pat if _is_gitlab_url(repo_url) else self._github_pat
+            auth_url = _inject_pat_into_url(repo_url, _pat)
 
             if local_path.exists():
                 logger.info("Inspector: repo already exists, pulling. path=%s", local_path)
-                await self._run_cmd("git pull --quiet", cwd=local_path)
+                pull_out = await self._run_cmd(
+                    f"git pull {auth_url} --rebase --quiet", cwd=local_path
+                )
+                if "fatal" in pull_out.lower() or "error" in pull_out.lower():
+                    logger.warning("Inspector: git pull may have failed: %s", pull_out)
             else:
                 logger.info("Inspector: cloning %s → %s", repo_url, local_path)
                 result = await self._run_cmd(
-                    f"git clone --depth 50 {repo_url} {local_path}"
+                    f"git clone --depth 50 {auth_url} {local_path}"
                 )
                 if "fatal" in result.lower() or "error" in result.lower():
                     logger.warning("Inspector: clone may have failed: %s", result)
@@ -392,6 +407,39 @@ class DeveloperInspectorAgent(BaseAgent):
             )
 
         return task
+
+
+# ── Git URL helpers ───────────────────────────────────────────────────────────
+
+def _is_gitlab_url(repo_url: str) -> bool:
+    """Return True when *repo_url* points to a GitLab instance."""
+    return "gitlab." in repo_url.lower()
+
+
+def _inject_pat_into_url(repo_url: str, pat: str) -> str:
+    """
+    Embed a PAT into an HTTPS clone URL (works for GitHub and GitLab).
+
+    https://github.com/owner/repo.git
+      →  https://<PAT>@github.com/owner/repo.git
+
+    https://gitlab.com/owner/repo.git
+      →  https://oauth2:<PAT>@gitlab.com/owner/repo.git
+      (GitLab requires ``oauth2`` as the username for PAT auth.)
+
+    SSH URLs and empty PATs are returned unchanged.
+    """
+    if not pat:
+        return repo_url
+    parsed = urlparse(repo_url)
+    if parsed.scheme not in ("http", "https"):
+        return repo_url  # SSH – leave as-is
+    port = f":{parsed.port}" if parsed.port and parsed.port not in (80, 443) else ""
+    # GitLab requires "oauth2" as the username; GitHub accepts the PAT directly.
+    user     = "oauth2" if _is_gitlab_url(repo_url) else pat
+    password = f":{pat}" if _is_gitlab_url(repo_url) else ""
+    authed   = parsed._replace(netloc=f"{user}{password}@{parsed.hostname}{port}")
+    return urlunparse(authed)
 
 
 # ── Private gather helper (module-level to avoid 'self' closure issues) ────────

@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # Format: classic PAT with repo scope, or fine-grained PAT with Contents: RW.
     # Leave empty to rely on pre-configured SSH keys (no PAT auth).
     github_pat:       str = Field("", alias="GITHUB_PAT")
+    # GitLab Personal Access Token – used to authenticate git clone/push for
+    # private GitLab repositories.  The token should have at least `read_repository`
+    # scope (and `write_repository` if pushing is needed).
+    # Leave empty to rely on pre-configured SSH keys (no PAT auth).
+    gitlab_pat:       str = Field("", alias="GITLAB_PAT")
     # Identity written to git config inside each sandbox repo before committing.
     git_user_name:    str = Field("AdvanceAI Bot", alias="GIT_USER_NAME")
     git_user_email:   str = Field("bot@advanceai.local", alias="GIT_USER_EMAIL")
