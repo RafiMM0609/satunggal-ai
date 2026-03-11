@@ -356,7 +356,7 @@ class DeveloperInspectorAgent(BaseAgent):
             return local_path if local_path.exists() else None
 
         # No URL – try last known repo from tracker
-        repos = self._repo_tracker.list_repos()
+        repos = self._repo_tracker.list_all()
         if repos:
             latest = repos[-1]
             path   = Path(latest.get("local_path", ""))
