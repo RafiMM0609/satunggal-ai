@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes
 from config.settings import get_settings
 from src.orchestrator.main_loop import clear_session
 
-_DEPLOY_SCRIPT = Path(__file__).resolve().parents[3] / "helper_deploy.sh"
+_DEPLOY_SCRIPT = Path(__file__).resolve().parents[2] / "helper_deploy.sh"
 
 logger = logging.getLogger(__name__)
 
