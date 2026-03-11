@@ -22,6 +22,7 @@ class IntentCategory(str, Enum):
     RESEARCH           = "research"
     CONTENT_CREATION   = "content_creation"
     CODE_DEVELOPMENT   = "code_development"  # clone / edit / sandbox a repo
+    DOCUMENT_CREATION  = "document_creation" # buat dokumen teknis PDF/Word dari repo atau topik
     UNKNOWN            = "unknown"
 
 

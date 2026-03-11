@@ -18,17 +18,62 @@ Bot Telegram berbasis [python-telegram-bot](https://github.com/python-telegram-b
 ## Struktur Proyek
 
 ```
-telegram/
+advance_ai/
+├── config/
+│   ├── __init__.py
+│   └── settings.py         # Konfigurasi aplikasi
 ├── src/
-│   ├── config.py           # Load & validasi env vars
-│   ├── bot.py              # Rakit Application + daftarkan handler
-│   ├── webhook.py          # Setup & jalankan webhook server
-│   └── handlers/
-│       ├── command.py      # /start /help /ping
-│       └── message.py      # Teks, foto, fallback
-├── main.py                 # Entry point
-├── .env.example            # Template environment variables
-└── requirements.txt
+│   ├── agents/             # Modul AI agents
+│   │   ├── base_agent.py   # Base class untuk semua agent
+│   │   ├── llm_client.py   # Client untuk integrasi LLM
+│   │   ├── content_creator/    # Agent pembuat konten
+│   │   ├── developer/          # Agent developer
+│   │   ├── gatekeeper/         # Agent gatekeeper (dengan OpenRouter)
+│   │   ├── mandays_agent/      # Agent mandays calculator
+│   │   ├── researcher/         # Agent peneliti
+│   │   ├── responder/          # Agent responder
+│   │   ├── technical_writer/   # Agent pembuat dokumen teknis (PDF/Word)
+│   │   │   ├── __init__.py
+│   │   │   └── agent.py        # TechnicalWriterAgent: Markdown → pending_tools
+│   │   └── wbs_agent/          # Agent WBS (Work Breakdown Structure)
+│   ├── handlers/           # Handler untuk lalu lintas pesan
+│   │   ├── command.py      # Handle command dari user
+│   │   └── message.py      # Handle pesan biasa
+│   ├── interfaces/         # Interface ke berbagai platform
+│   │   ├── config.py       # Konfigurasi interface
+│   │   ├── rest_api.py     # REST API endpoints
+│   │   ├── telegram_bot.py # Integrasi Telegram bot
+│   │   └── webhook.py      # Webhook handler
+│   ├── memory/             # Memory & state management
+│   │   ├── history.py      # Riwayat percakapan
+│   │   ├── repo_tracker.py # Tracking repository
+│   │   └── state.py        # State management
+│   ├── orchestrator/       # Orkestrasi alur proses
+│   │   ├── main_loop.py    # Main event loop
+│   │   └── router.py       # Message router
+│   └── tools/              # Tools & utilities
+│       ├── base_tool.py    # Base class tool
+│       ├── cli_executor.py # Eksekusi CLI commands
+│       ├── code_search.py  # Pencarian kode
+│       ├── diagram_renderer.py     # Render blok Mermaid ke PNG (via mmdc)
+│       ├── document_generator.py   # Compile Markdown ke PDF (WeasyPrint) / Word (Pandoc)
+│       ├── git_manager.py  # Git management
+│       ├── mandays_generator.py    # Generate mandays estimation
+│       ├── sandbox_runner.py       # Sandbox untuk eksekusi aman
+│       ├── tavily_search.py        # Search API integration
+│       ├── wbs_generator.py        # Generate WBS
+│       ├── mandays/        # Submodule mandays
+│       └── wbs/            # Submodule WBS
+├── data/                   # Direktori data
+│   └── templates/          # Template dokumen (template.docx untuk Pandoc)
+├── main.py                 # Entry point aplikasi
+├── requirements.txt        # Python dependencies
+├── README.md               # Dokumentasi proyek
+├── RUN.md                  # Panduan menjalankan aplikasi
+├── START.md                # Panduan memulai
+├── APP_LOGIC_WORKFLOW.md   # Workflow logika aplikasi
+├── CAPABILITIES.md         # Daftar capabilities
+└── __init__.py
 ```
 
 ---

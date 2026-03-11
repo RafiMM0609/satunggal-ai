@@ -61,9 +61,12 @@ def _get_pipeline():
     from src.agents.mandays_agent.agent import MandaysAgent
     from src.agents.researcher.agent import ResearcherAgent
     from src.agents.responder.agent import ResponderAgent
+    from src.agents.technical_writer.agent import TechnicalWriterAgent
     from src.agents.wbs_agent.agent import WBSAgent
     from src.memory.history import ConversationHistory
     from src.orchestrator.router import AgentRouter
+    from src.tools.diagram_renderer import DiagramRendererTool
+    from src.tools.document_generator import DocumentGeneratorTool
     from src.tools.mandays_generator import MandaysGeneratorTool
     from src.tools.wbs_generator import WBSGeneratorTool
 
@@ -75,8 +78,10 @@ def _get_pipeline():
     # task.pending_tools).  Excel-builder tools are pure/deterministic
     # and run post-agent via pending_tools; tavily runs pre-agent.
     _tools = {
-        "wbs_generator":     WBSGeneratorTool(),
-        "mandays_generator": MandaysGeneratorTool(),
+        "wbs_generator":      WBSGeneratorTool(),
+        "mandays_generator":  MandaysGeneratorTool(),
+        "diagram_renderer":   DiagramRendererTool(),
+        "document_generator": DocumentGeneratorTool(),
     }
 
     # Tavily is optional – only registered when API key is available.
@@ -90,11 +95,14 @@ def _get_pipeline():
 
     # ── Agent registry ─────────────────────────────────────────────────────
     _agents = {
-        "responder":        ResponderAgent(_history, _llm),
-        "researcher":       ResearcherAgent(_history, _llm),
-        "content_creator":  ContentCreatorAgent(_history, _llm),
-        "wbs_agent":        WBSAgent(_llm),
-        "mandays_agent":    MandaysAgent(_llm),        "developer":        DeveloperAgent(_llm),    }
+        "responder":         ResponderAgent(_history, _llm),
+        "researcher":        ResearcherAgent(_history, _llm),
+        "content_creator":   ContentCreatorAgent(_history, _llm),
+        "wbs_agent":         WBSAgent(_llm),
+        "mandays_agent":     MandaysAgent(_llm),
+        "developer":         DeveloperAgent(_llm),
+        "technical_writer":  TechnicalWriterAgent(_history, _llm),
+    }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
 
@@ -152,6 +160,8 @@ async def process_message(session_id: str, user_text: str) -> "AgentTask":
             # Propagate critical keys to task.metadata so handlers can find them
             if "excel_path" in tool_output:
                 task.metadata["excel_path"] = tool_output["excel_path"]
+            if "document_path" in tool_output:
+                task.metadata["document_path"] = tool_output["document_path"]
 
             logger.info(
                 "Tool '%s' done for session=%s keys=%s",
@@ -184,6 +194,8 @@ async def process_message(session_id: str, user_text: str) -> "AgentTask":
             task.tool_results[tool_name] = tool_output
             if "excel_path" in tool_output:
                 task.metadata["excel_path"] = tool_output["excel_path"]
+            if "document_path" in tool_output:
+                task.metadata["document_path"] = tool_output["document_path"]
             logger.info(
                 "Post-agent tool '%s' done for session=%s keys=%s",
                 tool_name, session_id, list(tool_output.keys()),

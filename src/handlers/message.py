@@ -82,7 +82,7 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Send text reply (falls back to plain text if Markdown is malformed)
     await _safe_reply(message, reply)
 
-    # If agent produced an Excel file, send it as a document
+    # ── Kirim file Excel jika ada (WBS / mandays) ────────────────────────────
     excel_path = task.metadata.get("excel_path")
     if excel_path:
         try:
@@ -93,7 +93,7 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await message.reply_document(
                     document=f,
                     filename=excel_path.split("/")[-1],
-                    caption="📊 File Excel mandays siap digunakan.",
+                    caption="📊 File Excel siap digunakan.",
                     quote=True,
                 )
             logger.info("Sent Excel to user=%s path=%s", user.id, excel_path)
@@ -101,6 +101,34 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("Failed to send Excel to user=%s: %s", user.id, exc)
             await message.reply_text(
                 "⚠️ Gagal mengirim file Excel. Coba lagi nanti.", quote=True
+            )
+
+    # ── Kirim file dokumen jika ada (PDF / DOCX dari TechnicalWriterAgent) ───
+    document_path = task.metadata.get("document_path")
+    if document_path:
+        import os  # noqa: PLC0415
+        ext = os.path.splitext(document_path)[1].lower()
+        caption_map = {
+            ".pdf":  "📝 Dokumen teknis PDF siap.",
+            ".docx": "📝 Dokumen teknis Word siap.",
+        }
+        caption = caption_map.get(ext, "📝 Dokumen siap.")
+        try:
+            await context.bot.send_chat_action(
+                chat_id=message.chat_id, action="upload_document"
+            )
+            with open(document_path, "rb") as f:
+                await message.reply_document(
+                    document=f,
+                    filename=document_path.split("/")[-1],
+                    caption=caption,
+                    quote=True,
+                )
+            logger.info("Sent document to user=%s path=%s", user.id, document_path)
+        except Exception as exc:
+            logger.exception("Failed to send document to user=%s: %s", user.id, exc)
+            await message.reply_text(
+                "⚠️ Gagal mengirim file dokumen. Coba lagi nanti.", quote=True
             )
 
 

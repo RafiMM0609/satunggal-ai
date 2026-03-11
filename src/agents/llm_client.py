@@ -102,6 +102,29 @@ class LLMClient:
 
         return content.strip()
 
+    async def complete(
+        self,
+        system_prompt: str,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """
+        Send a system prompt + messages list and return the assistant's text reply.
+
+        Prepends the system_prompt as a {"role": "system"} message before the
+        conversation history, then delegates to chat().
+
+        Args:
+            system_prompt: Instruction context for the LLM.
+            messages:      List of {"role": ..., "content": ...} dicts (history + user).
+            model:         Override the default model.
+            max_tokens:    Override the default max_tokens.
+        """
+        full_messages = [{"role": "system", "content": system_prompt}, *messages]
+        return await self.chat(full_messages, model=model, max_tokens=max_tokens)
+
     async def aclose(self) -> None:
         await self._http.aclose()
 

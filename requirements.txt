@@ -22,3 +22,9 @@ tree-sitter-python>=0.23.0
 tree-sitter-javascript>=0.23.0
 tree-sitter-typescript>=0.23.0
 patch>=1.16
+
+# ── Document generation (Technical Writer Agent) ──────────────────────────────
+weasyprint>=62.0          # Markdown → PDF via HTML+CSS
+markdown>=3.7             # Markdown parser (dibutuhkan WeasyPrint pipeline)
+# pandoc          → install via sistem: sudo apt install pandoc / brew install pandoc
+# mermaid-cli    → install via npm:    npm install -g @mermaid-js/mermaid-cli
