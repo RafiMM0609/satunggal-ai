@@ -185,8 +185,12 @@ source "$VENV_DIR/bin/activate"
 PIP="$VENV_DIR/bin/pip"
 
 info "Menginstall Python dependencies dari requirements.txt ..."
-"$PIP" install --upgrade pip -q
-"$PIP" install -r requirements.txt -q
+"$PIP" install --upgrade pip -q || { error "Gagal upgrade pip."; exit 1; }
+if ! "$PIP" install -r requirements.txt; then
+    error "Gagal menginstall satu atau lebih package dari requirements.txt."
+    error "Cek output di atas untuk detail error."
+    exit 1
+fi
 success "Python dependencies terinstall."
 
 # ==============================================================================
