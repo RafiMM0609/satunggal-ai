@@ -76,6 +76,7 @@ def _get_pipeline():
     from src.agents.mandays_agent.agent import MandaysAgent
     from src.agents.researcher.agent import ResearcherAgent
     from src.agents.responder.agent import ResponderAgent
+    from src.agents.sysinfo_agent.agent import SysInfoAgent
     from src.agents.technical_writer.agent import TechnicalWriterAgent
     from src.agents.wbs_agent.agent import WBSAgent
     from src.memory.history import ConversationHistory
@@ -118,6 +119,7 @@ def _get_pipeline():
         "developer":            DeveloperAgent(_llm),
         "developer_inspector": DeveloperInspectorAgent(_llm),
         "technical_writer":    TechnicalWriterAgent(_history, _llm),
+        "sysinfo_agent":       SysInfoAgent(_history, _llm),
     }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()

@@ -35,6 +35,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - code_development   (user wants to clone a repo, edit/fix code using AI CLI, or run code in a Docker sandbox)
 - code_inspection    (user wants to INSPECT a repo, find bugs/issues/root causes, review code quality — read-only, NO code changes)
 - document_creation  (user wants to generate a technical document, PDF, or Word file — from a GitHub repo, topic, or data such as WBS/mandays output)
+- system_info        (user asks about server/host resource status: CPU usage, RAM, memory, storage, disk space, hardware info of this machine)
 - unknown
 
 Pre-agent tools the orchestrator can execute before the specialist agent:
@@ -71,6 +72,12 @@ Rules:
     - English: generate document, create technical doc, make a PDF, create Word document, document this repo, write technical documentation
     - Even if a repo URL is mentioned, if the primary intent is to produce a document (not to fix/edit code), use "document_creation"
     - Pre-agent tools: include "tavily_search" only if no repo URL is present and additional context from the web would help
+13. Use "system_info" when the user asks about the current resource usage or hardware specs of THIS running server/machine:
+    - Indonesian: berapa CPU, cek RAM, info memori, cek storage, disk penuh, berapa sisa disk, status server, resource server,
+      info hardware server, penggunaan CPU, penggunaan memori, berapa banyak RAM, lihat storage, cek resource
+    - English: check CPU, how much RAM, disk space, storage info, server resource, memory usage, CPU usage, hardware info server
+    - Key differentiator: user wants LIVE metrics of THIS machine. If user asks about cloud billing or a remote server by URL → general_inquiry.
+
 Example responses:
   {"intent": "data_analysis",    "confidence": 0.97, "tools": []}
   {"intent": "mandays_planning", "confidence": 0.95, "tools": []}
@@ -78,6 +85,7 @@ Example responses:
   {"intent": "code_development",  "confidence": 0.96, "tools": []}
   {"intent": "code_inspection",   "confidence": 0.95, "tools": []}
   {"intent": "document_creation", "confidence": 0.95, "tools": []}
+  {"intent": "system_info",       "confidence": 0.97, "tools": []}
   {"intent": "general_inquiry",   "confidence": 0.88, "tools": []}
 """
 
