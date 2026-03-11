@@ -86,6 +86,7 @@ class TavilySearchTool(BaseTool):
         self._client       = TavilyClient(api_key)
         self._search_depth = settings.tavily_search_depth
         self._max_results  = settings.tavily_max_results
+        self._time_range    = settings.tavily_time_range
 
     async def search(
         self,
@@ -107,8 +108,9 @@ class TavilySearchTool(BaseTool):
         """
         depth   = search_depth or self._search_depth
         n       = max_results  or self._max_results
+        time    = self._time_range
 
-        logger.info("TavilySearchTool.search query=%r depth=%s max=%d", query, depth, n)
+        logger.info("TavilySearchTool.search query=%r depth=%s max=%d time=%s", query, depth, n, time)
 
         loop = asyncio.get_event_loop()
         try:
@@ -118,6 +120,7 @@ class TavilySearchTool(BaseTool):
                     query        = query,
                     search_depth = depth,
                     max_results  = n,
+                    time_range   = time,
                     include_answer = True,
                 ),
             )

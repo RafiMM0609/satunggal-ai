@@ -127,6 +127,8 @@ class AgentTask:
 | `has_mandays_json` | MandaysAgent | Interface handler | Boolean flag |
 | `error` | `task.mark_failed()` | Interface handler | Pesan error |
 
+> **⚠️ Pengecualian DeveloperAgent:** DeveloperAgent **tidak** menyimpan state di `task.metadata` dan **tidak** menggunakan `task.pending_tools`. Agent ini mengelola seluruh workflow-nya secara internal melalui `CLIExecutor`, `SandboxRunner`, dan `GitManager` — bukan melalui pipeline orchestrator. Ini adalah satu-satunya pengecualian dari pola blackboard standar, karena tools tersebut bersifat stateful, sequential, dan berbagi konteks (repo path, credentials) yang tidak dapat dilewatkan melalui antarmuka tool biasa.
+
 ---
 
 ## 4. Dua Fase Eksekusi Tool
@@ -183,7 +185,10 @@ src/
 │   ├── researcher/agent.py     ← Membaca task.tool_results["tavily_search"]
 │   ├── content_creator/agent.py
 │   ├── wbs_agent/agent.py      ← LLM → JSON → task.pending_tools
-│   └── mandays_agent/agent.py  ← LLM → JSON → task.pending_tools
+│   ├── mandays_agent/agent.py  ← LLM → JSON → task.pending_tools
+│   └── developer/
+│       ├── __init__.py
+│       └── agent.py            ← DeveloperAgent: clone → edit → sandbox → push (self-contained)
 │
 ├── orchestrator/
 │   ├── main_loop.py            ← process_message() – controller utama
@@ -194,6 +199,9 @@ src/
 │   ├── tavily_search.py        ← Pre-agent: live web search
 │   ├── wbs_generator.py        ← Post-agent: build WBS Excel
 │   ├── mandays_generator.py    ← Post-agent: build Mandays Excel
+│   ├── cli_executor.py         ← Internal DeveloperAgent: async non-interactive shell runner
+│   ├── sandbox_runner.py       ← Internal DeveloperAgent: Docker build/run + traceback detection
+│   ├── git_manager.py          ← Internal DeveloperAgent: git commit/push with PAT auth
 │   ├── wbs/
 │   │   ├── generate_wbs.py     ← Core Excel rendering logic (WBS)
 │   │   └── extract_wbs.py      ← Excel → JSON (standalone utility)
@@ -203,7 +211,8 @@ src/
 │
 ├── memory/
 │   ├── state.py                ← AgentTask dataclass (blackboard)
-│   └── history.py              ← ConversationHistory (in-memory)
+│   ├── history.py              ← ConversationHistory (in-memory)
+│   └── repo_tracker.py         ← RepoTracker: SQLite registry repo yang pernah di-clone (data/repos.db)
 │
 ├── interfaces/
 │   ├── telegram_bot.py
@@ -419,6 +428,8 @@ AgentTask (setelah pipeline selesai):
 ✅ Nama tool di pending_tools / intent_result.tools harus identik dengan key di _tools dict
 ```
 
+> **⚠️ Pengecualian DeveloperAgent:** Aturan "orchestrator sebagai controller" **tidak berlaku** untuk DeveloperAgent. Agent ini memiliki internal tools sendiri (`CLIExecutor`, `SandboxRunner`, `GitManager`) yang dipanggil langsung di dalam `agent.run()` karena eksekusinya bersifat stateful dan sequential (clone → edit → sandbox → push), bukan stateless/parallel seperti tool standar. Ini adalah desain yang disengaja, bukan pelanggaran pola.
+
 ---
 
 ## 11. Logging & Debugging
@@ -466,6 +477,21 @@ INFO  Tool 'tavily_search' done for session=6478491074 keys=['context_text', 're
 INFO  Router: session=6478491074 intent=research → agent=researcher
 INFO  Agent done: session=6478491074 agent=researcher pending_tools=[]
 INFO  pipeline done | session=6478491074 intent=research agent=researcher status=done
+```
+
+### Contoh Log Skenario Code Development (DeveloperAgent)
+
+```
+INFO  Intent: session=6478491074 intent=code_development confidence=0.96 tools=[]
+INFO  Router: session=6478491074 intent=code_development → agent=developer
+INFO  DeveloperAgent: LLM-direct mode active (no claude CLI found; using OpenRouter)
+INFO  DeveloperAgent: cloning https://github.com/owner/repo.git → /home/user/sandbox_repos/owner-repo
+INFO  DeveloperAgent: edit attempt 1/3
+INFO  DeveloperAgent: LLM-direct applied 2 file patch(es)
+INFO  CLIExecutor.run cwd=/home/user/sandbox_repos/owner-repo cmd=docker compose up --build --abort-on-container-exit
+INFO  DeveloperAgent: sandbox green on attempt 1
+INFO  GitManager: pushed commit=a3f1c9b to https://***@github.com/owner/repo.git
+INFO  pipeline done | session=6478491074 intent=code_development agent=developer status=done
 ```
 
 ### Tool Tidak Terdaftar

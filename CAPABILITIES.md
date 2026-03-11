@@ -23,7 +23,8 @@ User (Telegram / REST API)
         ├── ResearcherAgent     → riset mendalam + Tavily web search
         ├── ContentCreatorAgent → pembuatan konten platform (LinkedIn, dll)
         ├── WBSAgent            → WBS Gantt chart + export Excel
-        └── MandaysAgent        → estimasi mandays + export Excel
+        ├── MandaysAgent        → estimasi mandays + export Excel
+        └── DeveloperAgent      → clone repo → edit kode via LLM → Docker sandbox
               │
               ▼
         Post-agent Tool Loop    ← jalankan tools yang diminta agent (pending_tools)
@@ -77,6 +78,7 @@ Bot secara otomatis mendeteksi maksud pesan pengguna dan meneruskannya ke agent 
 | `content_creation` | Buat konten untuk platform digital | ContentCreatorAgent | — |
 | `data_analysis` | WBS / Gantt chart proyek | WBSAgent | — |
 | `mandays_planning` | Estimasi mandays, effort, alokasi resource | MandaysAgent | — |
+| `code_development` | Clone repo, edit kode via AI, jalankan di Docker sandbox | DeveloperAgent | — |
 
 > **Catatan `research`:** Hanya dipicu oleh kata kunci investigatif eksplisit (riset, selidiki, deep dive, dll).  
 > Pertanyaan teknis biasa tanpa kata kunci tersebut → `technical_support` → ResponderAgent.
@@ -117,6 +119,39 @@ Bot secara otomatis mendeteksi maksud pesan pengguna dan meneruskannya ke agent 
 - Mendukung 13 role standar: `SA`, `TL`, `BA`, `SM`, `UI`, `DBA`, `BE1`, `BE2`, `FE1`, `FE2`, `QA`, `DevOps`, `TW`.
 - Dipicu oleh intent `mandays_planning`.
 
+#### DeveloperAgent
+- **Senior Developer Orchestrator** – mengeksekusi tugas coding end-to-end dari pesan pengguna.
+- Dipicu oleh intent `code_development` (kata kunci: clone repo, perbaiki kode, tambah fitur, jalankan di sandbox, daftar repo).
+
+**Alur kerja internal DeveloperAgent:**
+
+```
+1. Parse instruksi  → LLM ekstrak repo_url + task dari pesan pengguna
+2. Clone / Pull     → git clone (repo baru) atau git pull (sudah ada)
+                      · Inject GITHUB_PAT ke HTTPS URL otomatis
+                      · Simpan ke RepoTracker (SQLite)
+3. Environment      → Cek Dockerfile & docker-compose.yml
+                      · Jika tidak ada → generate fallback otomatis
+4. Edit Kode        → Mode LLM-direct (primary):
+                        · Scan struktur repo (find .)
+                        · Grep file relevan berdasarkan keyword task
+                        · Baca isi file (max 80 KB)
+                        · Kirim ke OpenRouter → JSON patch
+                        · Tulis file ke disk
+                      Mode claude CLI (opsional, jika claude terinstall):
+                        · claude -p "<task>" --allowedTools "Read,Edit,Write,Bash"
+5. Verifikasi       → docker compose up --build --abort-on-container-exit
+                      · Deteksi Python traceback di log
+                      · Jika gagal → kirim error log ke LLM → retry (max 3x)
+6. Commit & Push    → git add -A → git commit → git push (dengan PAT auth)
+7. Report           → Summary / Files Changed / Commit Message / Docker Status / Push Status
+```
+
+**Catatan penting:**
+- `gh copilot suggest` **tidak digunakan** karena hanya menyarankan perintah shell interaktif, bukan mengedit file.
+- Semua logika tool (CLIExecutor, SandboxRunner, GitManager) dikelola **internal** di dalam agent — tidak melalui pipeline orchestrator.
+- Jika user mengirim pesan tanpa repo URL (contoh: "tampilkan daftar repo"), agent menampilkan semua repo dari SQLite tracker.
+
 ---
 
 ### 4. Tools Internal
@@ -129,7 +164,16 @@ Semua tools merupakan subclass dari `BaseTool` dan hanya dipanggil oleh **orches
 | `WBSGeneratorTool` | Post-agent | Setelah WBSAgent selesai | Build Excel Gantt chart dari JSON di `task.metadata["wbs_json_data"]` |
 | `MandaysGeneratorTool` | Post-agent | Setelah MandaysAgent selesai | Build Excel mandays dari JSON di `task.metadata["mandays_json_data"]` |
 
+Tools internal DeveloperAgent (dikelola langsung oleh agent, **tidak** melalui pipeline orchestrator):
+
+| Tool | File | Fungsi |
+|------|------|--------|
+| `CLIExecutor` | `src/tools/cli_executor.py` | Jalankan perintah shell non-interaktif dengan timeout 5 menit, capture stdout+stderr |
+| `SandboxRunner` | `src/tools/sandbox_runner.py` | Build & run Docker container; generate Dockerfile/compose fallback jika tidak ada; deteksi traceback |
+| `GitManager` | `src/tools/git_manager.py` | Konfigurasi identitas git, inject PAT ke URL, `git add -A → commit → push` |
+
 Tools utility (standalone, tidak dalam pipeline):
+
 | File | Fungsi |
 |------|--------|
 | `src/tools/wbs/extract_wbs.py` | Parse Excel WBS → JSON (untuk reverse engineering) |
@@ -153,6 +197,7 @@ Tools utility (standalone, tidak dalam pipeline):
 | File Excel Gantt | WBSAgent + WBSGeneratorTool | `.xlsx` dikirim via Telegram |
 | File Excel Mandays | MandaysAgent + MandaysGeneratorTool | `.xlsx` dikirim via Telegram |
 | Draft konten | ContentCreatorAgent | Teks terstruktur (hook/body/cta/hashtags) |
+| Laporan coding | DeveloperAgent | Teks: file changed, commit hash, sandbox status, push URL |
 
 ---
 
@@ -207,6 +252,13 @@ Tools utility (standalone, tidak dalam pipeline):
 | `TAVILY_API_KEY` | API key Tavily (opsional – research intent) |
 | `WEBHOOK_URL` | URL publik untuk Telegram webhook (opsional) |
 | `PORT` | Port server (default: 8000) |
+| `GITHUB_PAT` | Personal Access Token GitHub (scope: `repo`). Kosong = pakai SSH key |
+| `GIT_USER_NAME` | Nama penulis commit (default: `AdvanceAI Bot`) |
+| `GIT_USER_EMAIL` | Email penulis commit (default: `bot@advanceai.local`) |
+| `SANDBOX_REPOS_DIR` | Direktori clone repo lokal (default: `~/sandbox_repos`) |
+| `SANDBOX_PYTHON_IMAGE` | Docker image fallback Dockerfile (default: `python:3.11-slim`) |
+| `SANDBOX_TIMEOUT` | Timeout per perintah Docker dalam detik (default: `300`) |
+| `SANDBOX_MAX_RETRIES` | Maks iterasi retry sandbox jika container gagal (default: `3`) |
 
 ---
 
@@ -231,15 +283,17 @@ Tools utility (standalone, tidak dalam pipeline):
 User (Telegram / REST API)
         │
         ▼
-  GatekeeperAgent        ← klasifikasi intent
+  GatekeeperAgent          ← klasifikasi intent
         │
         ▼
-   AgentRouter           ← pilih agent yang sesuai
+   AgentRouter             ← pilih agent yang sesuai
         │
-        ├── ResponderAgent     → percakapan umum
-        ├── ResearcherAgent    → riset & teknis
-        ├── WBSAgent           → WBS & perencanaan proyek
-        └── MandaysAgent       → estimasi mandays & alokasi resource
+        ├── ResponderAgent      → percakapan umum
+        ├── ResearcherAgent     → riset mendalam + Tavily web search
+        ├── ContentCreatorAgent → pembuatan konten platform (LinkedIn, dll)
+        ├── WBSAgent            → WBS Gantt chart + export Excel
+        ├── MandaysAgent        → estimasi mandays + export Excel
+        └── DeveloperAgent      → clone repo → edit kode via LLM → Docker sandbox
 ```
 
 Bot menggunakan sistem **multi-agent** berbasis LLM (via OpenRouter). Setiap pesan diklasifikasikan terlebih dahulu oleh GatekeeperAgent, lalu diteruskan ke agent spesialis yang paling sesuai.
@@ -316,12 +370,22 @@ Bot secara otomatis mendeteksi maksud pesan pengguna dan meneruskannya ke agent 
 
 ### 4. Tools Internal
 
-| Tool | Fungsi |
-|------|--------|
-| `generate_mandays.py` | Generate Excel mandays plan dari JSON dengan styling lengkap (header, warna sprint, totals) – digunakan oleh **WBSAgent** dan **MandaysAgent** |
-| `generate_wbs.py` | Generate Excel WBS Gantt chart dari JSON dengan layout timeline per hari kerja – digunakan oleh **WBSAgent** |
-| `extract_wbs.py` | Parse file Excel WBS yang sudah ada ke format JSON |
-| `extract_mandays.py` | Parse file Excel mandays yang sudah ada ke format JSON |
+Tools yang dipanggil oleh **orchestrator** (subclass `BaseTool`):
+
+| Tool | Tipe | Kapan Dijalankan | Fungsi |
+|------|------|------------------|--------|
+| `TavilySearchTool` | Pre-agent | Sebelum ResearcherAgent | Live web search, hasilnya masuk `task.tool_results["tavily_search"]` |
+| `WBSGeneratorTool` | Post-agent | Setelah WBSAgent selesai | Build Excel Gantt chart dari JSON di `task.metadata["wbs_json_data"]` |
+| `MandaysGeneratorTool` | Post-agent | Setelah MandaysAgent selesai | Build Excel mandays dari JSON di `task.metadata["mandays_json_data"]` |
+
+Tools internal **DeveloperAgent** (dikelola langsung oleh agent, **tidak** melalui pipeline orchestrator):
+
+| Tool | File | Fungsi |
+|------|------|--------|
+| `CLIExecutor` | `src/tools/cli_executor.py` | Jalankan perintah shell non-interaktif (timeout 5 mnt), capture stdout+stderr |
+| `SandboxRunner` | `src/tools/sandbox_runner.py` | Build & run Docker container; generate Dockerfile/compose fallback; deteksi traceback |
+| `GitManager` | `src/tools/git_manager.py` | Konfigurasi identitas git, inject GITHUB_PAT ke URL, `git add -A → commit → push` |
+| `RepoTracker` | `src/memory/repo_tracker.py` | SQLite registry repo yang pernah di-clone (data/repos.db) |
 
 ---
 
@@ -338,6 +402,7 @@ Bot secara otomatis mendeteksi maksud pesan pengguna dan meneruskannya ke agent 
 - **Teks Markdown** – semua reply teks menggunakan format Markdown via Telegram.
 - **File Excel (Gantt)** – WBSAgent mengirim file `.xlsx` berformat Gantt chart (timeline per hari kerja, sprint header, sel aktif berwarna).
 - **File Excel (Mandays)** – MandaysAgent mengirim file `.xlsx` berformat tabel mandays per role per sprint dengan grand total.
+- **Laporan Coding** – DeveloperAgent mengirim ringkasan teks: file yang diubah, commit hash, status sandbox Docker, dan URL push.
 
 ---
 

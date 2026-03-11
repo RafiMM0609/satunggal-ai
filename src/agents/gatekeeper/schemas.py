@@ -21,6 +21,7 @@ class IntentCategory(str, Enum):
     IMAGE_QUERY        = "image_query"
     RESEARCH           = "research"
     CONTENT_CREATION   = "content_creation"
+    CODE_DEVELOPMENT   = "code_development"  # clone / edit / sandbox a repo
     UNKNOWN            = "unknown"
 
 

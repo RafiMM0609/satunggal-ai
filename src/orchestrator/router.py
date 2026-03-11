@@ -33,10 +33,11 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.UNKNOWN:           "responder",
     IntentCategory.TECHNICAL_SUPPORT: "responder",
     IntentCategory.IMAGE_QUERY:       "responder",
-    IntentCategory.RESEARCH:          "researcher",   #← only intent with live Tavily access
+    IntentCategory.RESEARCH:          "researcher",      #← only intent with live Tavily access
     IntentCategory.CONTENT_CREATION:  "content_creator",
     IntentCategory.DATA_ANALYSIS:     "wbs_agent",
     IntentCategory.MANDAYS_PLANNING:  "mandays_agent",
+    IntentCategory.CODE_DEVELOPMENT:  "developer",       #← clone / AI-edit / sandbox
 }
 
 

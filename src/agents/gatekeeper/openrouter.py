@@ -32,6 +32,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - image_query
 - research           (user explicitly requests deep research or investigation using live data)
 - content_creation   (user wants to create, write, or draft content for a platform such as LinkedIn, Twitter, blog, etc.)
+- code_development   (user wants to clone a repo, edit/fix code using AI CLI, or run code in a Docker sandbox)
 - unknown
 
 Pre-agent tools the orchestrator can execute before the specialist agent:
@@ -53,10 +54,14 @@ Rules:
 9. Use "content_creation" when the user asks to create, write, draft, or generate content for social media or publishing, such as:
    - Indonesian: buat konten, tulis artikel, buat postingan, buat draft, konten LinkedIn, posting LinkedIn, tulis konten, rangkum untuk postingan
    - English: create content, write post, draft LinkedIn, make a post, write article, create draft, generate content
+10. Use "code_development" when the user mentions cloning a repo/GitHub URL, fixing/editing code with AI CLI (Copilot, Claude), running code in Docker/sandbox, or listing cloned repos:
+    - Indonesian: clone repo, kloning, perbaiki kode di repo, jalankan di sandbox, daftar repo, edit kode, tambah fitur ke repo
+    - English: clone repo, fix code in repo, run in docker sandbox, list cloned repos, edit this repo, add feature to repo
 Example responses:
   {"intent": "data_analysis",    "confidence": 0.97, "tools": []}
   {"intent": "mandays_planning", "confidence": 0.95, "tools": []}
   {"intent": "research",         "confidence": 0.91, "tools": ["tavily_search"]}
+  {"intent": "code_development", "confidence": 0.96, "tools": []}
   {"intent": "general_inquiry",  "confidence": 0.88, "tools": []}
 """
 

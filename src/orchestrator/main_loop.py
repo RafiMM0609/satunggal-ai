@@ -55,6 +55,7 @@ def _get_pipeline():
         return _history, _agents, _router, _gatekeeper, _tools
 
     from src.agents.content_creator.agent import ContentCreatorAgent
+    from src.agents.developer.agent import DeveloperAgent
     from src.agents.gatekeeper.agent import GatekeeperAgent
     from src.agents.llm_client import LLMClient
     from src.agents.mandays_agent.agent import MandaysAgent
@@ -93,8 +94,7 @@ def _get_pipeline():
         "researcher":       ResearcherAgent(_history, _llm),
         "content_creator":  ContentCreatorAgent(_history, _llm),
         "wbs_agent":        WBSAgent(_llm),
-        "mandays_agent":    MandaysAgent(_llm),
-    }
+        "mandays_agent":    MandaysAgent(_llm),        "developer":        DeveloperAgent(_llm),    }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
 
