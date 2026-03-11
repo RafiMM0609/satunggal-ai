@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     git_user_name:    str = Field("AdvanceAI Bot", alias="GIT_USER_NAME")
     git_user_email:   str = Field("bot@advanceai.local", alias="GIT_USER_EMAIL")
 
+    # ── Admin ─────────────────────────────────────────────────────────────────
+    # Telegram user_id yang boleh menjalankan /deploy. Kosongkan untuk disable.
+    admin_user_id: int = Field(0, alias="ADMIN_USER_ID")
+
     # ── App Metadata ──────────────────────────────────────────────────────────
     app_name: str = Field("AdvanceAI", alias="APP_NAME")
     app_url:  str = Field("https://example.com", alias="APP_URL")

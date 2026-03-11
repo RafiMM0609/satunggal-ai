@@ -213,24 +213,72 @@ class DeveloperInspectorAgent(BaseAgent):
 
         Strategy:
           1. Try a simple `git checkout <branch>`.
-          2. If the branch is not found locally, fetch all remotes and retry
+          2. If checkout fails due to conflict/unmerged state, abort any
+             in-progress rebase/merge and reset hard, then retry.
+          3. If branch already exists locally but checkout still fails,
+             force-checkout it.
+          4. If the branch is not found locally, fetch all remotes and retry
              as a tracking branch (`-b <branch> origin/<branch>`).
+          5. If `-b` fails because the branch now exists locally (race), fall
+             back to a plain checkout.
         """
         cli = CLIExecutor(timeout=30)
+
+        # ── Attempt 1: plain checkout ──────────────────────────────────────
         result = await cli.run(f"git checkout {branch}", work_dir=repo_path)
         if result.succeeded:
             logger.info("Inspector: checked out branch '%s'", branch)
             return
-        # Branch missing locally – expand refspec, fetch all, then retry.
+
+        stderr = (result.stdout or "") + (result.stderr or "")
+
+        # ── Attempt 2: recover from conflict / unmerged-files state ───────
+        if any(kw in stderr.lower() for kw in ("unmerged", "conflict", "merge", "rebase")):
+            logger.warning(
+                "Inspector: checkout blocked by dirty state – recovering: %s", stderr[:200]
+            )
+            await cli.run("git rebase --abort", work_dir=repo_path)
+            await cli.run("git merge --abort",  work_dir=repo_path)
+            await cli.run("git reset --hard HEAD", work_dir=repo_path)
+            result = await cli.run(f"git checkout {branch}", work_dir=repo_path)
+            if result.succeeded:
+                logger.info("Inspector: checked out branch '%s' after state recovery", branch)
+                return
+            stderr = (result.stdout or "") + (result.stderr or "")
+
+        # ── Attempt 3: branch exists locally but checkout still failed ────
+        branch_check = await cli.run(f"git branch --list {branch}", work_dir=repo_path)
+        if branch in (branch_check.stdout or ""):
+            # Exists locally – force-checkout to discard any local changes.
+            result = await cli.run(f"git checkout -f {branch}", work_dir=repo_path)
+            if result.succeeded:
+                logger.info("Inspector: force-checked out existing branch '%s'", branch)
+                return
+            stderr = (result.stdout or "") + (result.stderr or "")
+
+        # ── Attempt 4: branch missing locally – fetch all remotes ─────────
         await cli.run("git remote set-branches origin '*'", work_dir=repo_path)
         await cli.run("git fetch --all --prune", work_dir=repo_path)
-        result = await cli.run(f"git checkout -b {branch} origin/{branch}", work_dir=repo_path)
-        if not result.succeeded:
-            raise RuntimeError(
-                f"Branch '{branch}' tidak ditemukan di lokal maupun remote:\n"
-                f"{(result.stdout or '') + (result.stderr or '')[:400]}"
-            )
-        logger.info("Inspector: checked out remote branch '%s'", branch)
+        result = await cli.run(
+            f"git checkout -b {branch} origin/{branch}", work_dir=repo_path
+        )
+        if result.succeeded:
+            logger.info("Inspector: checked out remote branch '%s'", branch)
+            return
+
+        stderr = (result.stdout or "") + (result.stderr or "")
+
+        # ── Attempt 5: '-b' failed because branch already exists locally ──
+        if "already exists" in stderr:
+            result = await cli.run(f"git checkout -f {branch}", work_dir=repo_path)
+            if result.succeeded:
+                logger.info("Inspector: checked out (already-local) branch '%s'", branch)
+                return
+            stderr = (result.stdout or "") + (result.stderr or "")
+
+        raise RuntimeError(
+            f"Branch '{branch}' tidak dapat di-checkout:\n{stderr[:400]}"
+        )
     async def _get_dir_tree(self, repo_path: Path) -> str:
         """Return a pruned directory listing."""
         out = await self._run_cmd(
@@ -336,6 +384,13 @@ class DeveloperInspectorAgent(BaseAgent):
                 )
                 if "fatal" in pull_out.lower() or "error" in pull_out.lower():
                     logger.warning("Inspector: git pull may have failed: %s", pull_out)
+                    # Recover from conflict / unmerged-files state so subsequent
+                    # git commands (checkout, etc.) are not blocked.
+                    if "unmerged" in pull_out.lower() or "conflict" in pull_out.lower() or "rebase" in pull_out.lower():
+                        logger.info("Inspector: recovering from conflict/rebase state")
+                        await self._run_cmd("git rebase --abort", cwd=local_path)
+                        await self._run_cmd("git merge --abort", cwd=local_path)
+                        await self._run_cmd("git reset --hard HEAD", cwd=local_path)
             else:
                 logger.info("Inspector: cloning %s → %s", repo_url, local_path)
                 # --no-single-branch ensures ALL remote branches are fetched,
