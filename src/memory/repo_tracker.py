@@ -130,6 +130,12 @@ class RepoTracker:
             ).fetchone()
             return int(row["id"])
 
+    def delete_by_url(self, repo_url: str) -> None:
+        """Delete the record for the given URL if it exists."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM local_repos WHERE repo_url = ?", (repo_url,))
+        logger.info("RepoTracker: deleted record for %s", repo_url)
+
     def update_status(
         self,
         repo_url:    str,
