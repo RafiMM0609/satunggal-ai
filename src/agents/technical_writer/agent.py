@@ -316,7 +316,7 @@ class TechnicalWriterAgent(BaseAgent):
             if branch_choice is not None:
                 del _tw_pending_confirmations[task.session_id]
                 repo_path = Path(pending["repo_path"])
-                await self._checkout_branch(repo_path, branch_choice)
+                await self._checkout_branch(repo_path, branch_choice, repo_url=pending["repo_url"])
                 return await self._build_document(
                     task,
                     repo_url=pending["repo_url"],
@@ -352,7 +352,7 @@ class TechnicalWriterAgent(BaseAgent):
             # ── Branch selection ───────────────────────────────────────────────
             branch = _extract_branch(task.user_input)
             if branch:
-                await self._checkout_branch(repo_path, branch)
+                await self._checkout_branch(repo_path, branch, repo_url=repo_url)
                 return await self._build_document(task, repo_url, repo_path, branch)
             else:
                 detected_branch = await self._get_current_branch(repo_path)
@@ -393,7 +393,18 @@ class TechnicalWriterAgent(BaseAgent):
             cli_repo = CLIExecutor(work_dir=repo_path, timeout=120)
             stash = await cli_repo.run("git stash --include-untracked")
             stashed = stash.succeeded and "No local changes to save" not in (stash.stdout or "")
-            await cli_repo.run(f"git pull {auth_url} HEAD --rebase")
+            if not stash.succeeded:
+                logger.warning(
+                    "TechnicalWriterAgent: git stash gagal (exit=%d): %s",
+                    stash.returncode, stash.stderr,
+                )
+            await cli_repo.run(f"git remote set-url origin {auth_url}")
+            pull = await cli_repo.run("git pull --rebase")
+            if not pull.succeeded:
+                logger.warning(
+                    "TechnicalWriterAgent: git pull gagal (exit=%d): %s",
+                    pull.returncode, pull.stderr,
+                )
             if stashed:
                 await cli_repo.run("git stash pop")
         else:
@@ -416,24 +427,64 @@ class TechnicalWriterAgent(BaseAgent):
         result = await cli.run("git rev-parse --abbrev-ref HEAD")
         return (result.stdout or "").strip() or "main"
 
-    async def _checkout_branch(self, repo_path: Path, branch: str) -> None:
+    async def _checkout_branch(self, repo_path: Path, branch: str, repo_url: str = "") -> None:
         """
         Checkout branch yang diminta.
-        Jika branch tidak ada di lokal, fetch remote lalu tracking checkout.
+        Jika branch tidak ada di lokal, fetch remote (dengan autentikasi) lalu
+        buat tracking branch. Jika branch sudah ada lokal tapi berbeda dengan
+        remote, lakukan force-reset ke remote.
         """
-        cli    = CLIExecutor(work_dir=repo_path, timeout=30)
+        cli = CLIExecutor(work_dir=repo_path, timeout=60)
+
+        # ── Langkah 1: coba checkout langsung ────────────────────────────────
         result = await cli.run(f"git checkout {branch}")
         if result.succeeded:
             logger.info("TechnicalWriterAgent: checked out branch '%s'", branch)
             return
+
+        # ── Langkah 2: perbarui remote URL dengan kredensial, lalu fetch ─────
+        if repo_url:
+            _pat     = self._gitlab_pat if _is_gitlab_url(repo_url) else self._github_pat
+            auth_url = _inject_pat_into_url(repo_url, _pat)
+            set_url  = await cli.run(f"git remote set-url origin {auth_url}")
+            if not set_url.succeeded:
+                logger.warning(
+                    "TechnicalWriterAgent: gagal set remote URL (exit=%d): %s",
+                    set_url.returncode, set_url.stderr,
+                )
+
         await cli.run("git remote set-branches origin '*'")
-        await cli.run("git fetch --all --prune")
-        # Coba checkout biasa dulu (branch mungkin sudah ada di lokal setelah fetch)
+        fetch = await cli.run("git fetch --all --prune")
+        if not fetch.succeeded:
+            logger.warning(
+                "TechnicalWriterAgent: git fetch gagal (exit=%d): %s",
+                fetch.returncode, fetch.stderr,
+            )
+
+        # ── Langkah 3: coba checkout setelah fetch ────────────────────────────
         result = await cli.run(f"git checkout {branch}")
         if result.succeeded:
             logger.info("TechnicalWriterAgent: checked out branch '%s' after fetch", branch)
             return
-        # Branch belum ada di lokal, buat tracking branch dari remote
+
+        # ── Langkah 4: jika branch lokal sudah ada, force-reset ke remote ────
+        local_exists = await cli.run(
+            f"git show-ref --verify --quiet refs/heads/{branch}"
+        )
+        if local_exists.succeeded:
+            result = await cli.run(f"git checkout -B {branch} origin/{branch}")
+            if result.succeeded:
+                logger.info(
+                    "TechnicalWriterAgent: force-reset branch '%s' ke origin/%s",
+                    branch, branch,
+                )
+                return
+            logger.warning(
+                "TechnicalWriterAgent: force-reset branch gagal (exit=%d): %s",
+                result.returncode, result.stderr,
+            )
+
+        # ── Langkah 5: buat tracking branch baru dari remote ─────────────────
         result = await cli.run(f"git checkout -b {branch} origin/{branch}")
         if not result.succeeded:
             raise RuntimeError(
