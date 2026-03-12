@@ -82,7 +82,8 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
     (
         QAIntent.API_ENDPOINTS,
         [
-            r"api.apa", r"endpoint.apa", r"route.apa", r"ada.api",
+            # match various spellings and spacing for 'endpoint' / 'end poin'
+            r"api.apa", r"endpoint.apa", r"end.?point", r"end.?poin", r"route.apa", r"ada.api",
             r"list.api", r"daftar.api", r"daftar.endpoint", r"ada.endpoint",
             r"what.api", r"what.endpoint", r"list.*endpoint", r"list.*route",
             r"available.*api", r"available.*endpoint",
@@ -177,11 +178,27 @@ def classify_intent(user_input: str) -> QAIntent:
     """
     text = user_input.lower().strip()
 
-    # Error/bug trigger → selalu inspeksi penuh
-    for pat in _INSPECTION_TRIGGERS:
-        if re.search(pat, text):
-            logger.debug("QA classify: FULL_INSPECTION triggered by %r", pat)
-            return QAIntent.FULL_INSPECTION
+    # Jika user meminta penjelasan dan menyertakan path spesifik (mis. "/upload"),
+    # anggap ini permintaan `SPECIFIC_SYMBOL` dan beri prioritas sebelum pattern
+    # Q/A umum seperti "ada api apa".
+    if re.search(r"(?:jelaskan|explain|apa.itu|what.is|describe)", text) and re.search(r"(?:^|\s)/[a-z0-9_\-/]+", text):
+        logger.debug("QA classify: specific symbol detected (path present) -> SPECIFIC_SYMBOL")
+        return QAIntent.SPECIFIC_SYMBOL
+
+    # If user explicitly requests Q/A mode ("qna", "q/a", "use qna"),
+    # prefer matching Q/A intents first and fall back to a SPECIFIC_SYMBOL
+    # Q/A intent so the agent runs in Q/A mode instead of forcing full
+    # inspection when words like "error" might also be present.
+    if re.search(r"\b(qna|q\/a|q and a|q&a|qna mode|q\/a mode|use qna|use q\/a)\b", text):
+        for intent, patterns, neg_patterns in _INTENT_RULES:
+            for pat in patterns:
+                if re.search(pat, text):
+                    if any(re.search(n, text) for n in neg_patterns):
+                        continue
+                    logger.debug("QA classify: explicit Q/A override -> %s matched by %r", intent, pat)
+                    return intent
+        logger.debug("QA classify: explicit Q/A override but no topic matched -> SPECIFIC_SYMBOL")
+        return QAIntent.SPECIFIC_SYMBOL
 
     # Match topik Q/A berdasarkan urutan prioritas
     for intent, patterns, neg_patterns in _INTENT_RULES:
@@ -192,6 +209,12 @@ def classify_intent(user_input: str) -> QAIntent:
                     continue
                 logger.debug("QA classify: %s matched by %r", intent, pat)
                 return intent
+
+    # Error/bug trigger → inspeksi penuh
+    for pat in _INSPECTION_TRIGGERS:
+        if re.search(pat, text):
+            logger.debug("QA classify: FULL_INSPECTION triggered by %r", pat)
+            return QAIntent.FULL_INSPECTION
 
     # Default: inspeksi penuh jika tidak ada Q/A pattern yang cocok
     logger.debug("QA classify: no Q/A pattern matched → FULL_INSPECTION")
@@ -266,8 +289,8 @@ _ROUTE_PATTERNS = [
     r"(?:app|router)\.(get|post|put|patch|delete|options|use)\s*\(\s*['\"]([^'\"]+)['\"]",
     # Laravel/Symphony style: @Route("/path")
     r"@Route\s*\(['\"]([^'\"]+)['\"]",
-    # Go Gin/Mux: r.GET("/path", ...) or mux.Handle("/path", ...)
-    r"r\.(GET|POST|PUT|PATCH|DELETE|OPTIONS)\s*\(\s*\"([^\"]+)\"",
+    # Go Gin/Mux/Stdlib: r.GET("/path", ...) or router.HandleFunc("/path", ...) or http.HandleFunc("/path", ...)
+    r"(?:r|router|mux|http)\.(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HandleFunc|Handle)\s*\(\s*\"([^\"]+)\"",
     # Spring Boot: @RequestMapping / @GetMapping etc.
     r"@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(?['\"]?([^'\")\s]+)",
 ]
@@ -328,7 +351,8 @@ async def extract_api_endpoints(repo_path: Path) -> str:
                 if re.search(r"@(?:app|router|api)\.(get|post|put|patch|delete)|"
                              r"(?:app|router)\.(get|post|put|patch|delete)|"
                              r"path\s*\(|re_path\s*\(|r\.(GET|POST|PUT|PATCH|DELETE)|"
-                             r"@(?:Request|Get|Post|Put|Delete|Patch)Mapping",
+                             r"@(?:Request|Get|Post|Put|Delete|Patch)Mapping|"
+                             r"(?:router|r|mux|http)\.(?:GET|POST|PUT|PATCH|DELETE|HandleFunc|Handle)",
                              line, re.IGNORECASE)
             ][:30]
             if route_lines:
