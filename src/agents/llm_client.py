@@ -32,20 +32,28 @@ class LLMClient:
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
     ) -> str:
         """
         Send a messages list and return the assistant's text reply.
 
         Args:
-            messages:   List of {"role": ..., "content": ...} dicts.
-            model:      Override the default model.
-            max_tokens: Override the default max_tokens.
+            messages:    List of {"role": ..., "content": ...} dicts.
+            model:       Override the default model.
+            max_tokens:  Override the default max_tokens.
+            temperature: Sampling temperature (lower = more deterministic).
+            top_p:       Nucleus sampling threshold.
         """
-        payload = {
+        payload: dict = {
             "model":      model      or self._settings.openrouter_model,
             "max_tokens": max_tokens or self._settings.openrouter_max_tokens,
             "messages":   messages,
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
         logger.debug("LLMClient.chat → model=%s, messages_count=%d", payload["model"], len(messages))
         try:
             response = await self._http.post("/chat/completions", json=payload)
@@ -109,6 +117,8 @@ class LLMClient:
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
     ) -> str:
         """
         Send a system prompt + messages list and return the assistant's text reply.
@@ -121,9 +131,17 @@ class LLMClient:
             messages:      List of {"role": ..., "content": ...} dicts (history + user).
             model:         Override the default model.
             max_tokens:    Override the default max_tokens.
+            temperature:   Sampling temperature (lower = more deterministic).
+            top_p:         Nucleus sampling threshold.
         """
         full_messages = [{"role": "system", "content": system_prompt}, *messages]
-        return await self.chat(full_messages, model=model, max_tokens=max_tokens)
+        return await self.chat(
+            full_messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
 
     async def aclose(self) -> None:
         await self._http.aclose()

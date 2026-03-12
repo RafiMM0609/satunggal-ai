@@ -29,9 +29,11 @@ Batasan penting:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -54,10 +56,21 @@ logger = logging.getLogger(__name__)
 
 REPOS_BASE_DIR      = Path.home() / "sandbox_repos"
 MAX_FILE_BYTES      = 40_000   # max bytes per file snippet sent to LLM
-MAX_GREP_LINES      = 60       # max lines from grep output per pattern
-MAX_LOG_LINES       = 30       # max git log lines
-MAX_DIFF_LINES      = 80       # max git diff lines
-MAX_LS_LINES        = 120      # max lines from directory listing
+MAX_GREP_LINES      = 80       # max lines from grep output per pattern
+MAX_LOG_LINES       = 50       # max git log lines
+MAX_DIFF_LINES      = 120      # max git diff lines
+MAX_LS_LINES        = 150      # max lines from directory listing
+
+# RAG: how many top-relevant source files to read in full.
+MAX_RELEVANT_FILES  = 6
+
+# LLM sampling parameters – low temperature for determinism, less hallucination.
+INSPECTOR_TEMPERATURE = 0.15
+INSPECTOR_TOP_P       = 0.90
+
+# Critic (second-pass) uses even lower temperature for strict fact-checking.
+CRITIC_TEMPERATURE    = 0.10
+CRITIC_TOP_P          = 0.85
 
 _SKIP_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",
@@ -74,7 +87,25 @@ Identitasmu:
 - Kamu membaca dan MENGANALISIS kode, tapi kamu TIDAK menulis, mengedit, \
   atau mengeksekusi kode apapun.
 - Kamu seperti seorang detektif teknis: mengumpulkan bukti, mengidentifikasi \
-  akar masalah, dan memberikan rekomendasi yang akurat.
+  akar masalah, dan memberikan rekomendasi yang akurat berdasarkan FAKTA.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️  ATURAN KRITIS – ANTI-HALUSINASI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. **DILARANG KERAS** membuat klaim tanpa bukti dari data yang diberikan.
+2. Setiap temuan HARUS disertai kutipan langsung (exact quote) dari \
+file/log/diff yang ada dalam evidence.
+3. Tulis **[PERLU VERIFIKASI]** jika kamu menduga adanya masalah tapi tidak ada bukti \
+langsung dalam data yang diberikan.
+4. Tulis **[DATA TIDAK CUKUP]** jika data tidak memungkinkan diagnosis akurat \
+daripada menebak-nebak.
+5. **JANGAN** mengasumsikan struktur kode, naming convention, atau bug yang tidak \
+terlihat dalam evidence.
+6. Jika ada ketidakpastian, nyatakan tingkat kepercayaan:
+   - 🟢 **[CONFIRMED]** – bukti kuat, dikutip langsung dari kode/log.
+   - 🟡 **[LIKELY]** – indikasi kuat tapi perlu verifikasi tambahan.
+   - 🔴 **[UNVERIFIED]** – dugaan tanpa bukti langsung; harus diverifikasi developer.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Tugasmu adalah menghasilkan Laporan Inspeksi Repositori yang mencakup:
 
@@ -83,40 +114,88 @@ Tugasmu adalah menghasilkan Laporan Inspeksi Repositori yang mencakup:
 ## 📋 LAPORAN INSPEKSI REPOSITORI
 
 ### 1. Ringkasan Eksekutif
-Jelaskan secara singkat apa yang ditemukan dalam inspeksi ini (2-4 kalimat).
+Jelaskan secara singkat apa yang ditemukan (2-4 kalimat). Nyatakan secara jelasnya \
+apa yang SUDAH DIVERIFIKASI vs yang MASIH DUGAAN.
 
 ### 2. Struktur Proyek
-Deskripsikan arsitektur dan organisasi kode yang ditemukan.
+Deskripsikan arsitektur dan organisasi kode **berdasarkan directory tree yang diberikan**. \
+Hanya deskripsikan yang TERLIHAT dalam data.
 
 ### 3. 🔍 Temuan Masalah
-Daftar semua masalah yang teridentifikasi, dengan tingkat keparahan:
+Daftar semua masalah teridentifikasi dengan tingkat keparahan:
 - 🔴 **KRITIS**: Masalah yang menyebabkan sistem tidak berfungsi.
-- 🟡 **SEDANG**: Masalah yang degradasi performa atau fungsionalitas.
-- 🟢 **RINGAN**: Masalah kode yang perlu diperbaiki tapi tidak urgently.
+- 🟡 **SEDANG**: Degradasi performa atau fungsionalitas.
+- 🟢 **RINGAN**: Masalah kode yang tidak urgent.
 
-Untuk setiap masalah, sertakan:
-  - **Lokasi**: File dan baris yang relevan (jika diketahui).
-  - **Deskripsi**: Apa yang salah.
-  - **Bukti**: Cuplikan kode atau log yang mendukung temuan.
+Untuk setiap masalah, sertakan wajib:
+  - **Lokasi**: Nama file dan nomor baris (exact, bukan perkiraan).
+  - **Bukti** (WAJIB): Cuplikan kode/log yang dikutip PERSIS dari evidence. \
+Jika tidak ada kutipan, tambahkan tanda 🔴 **[UNVERIFIED]**.
+  - **Deskripsi**: Apa yang salah dan mengapa ini masalah.
+  - **Kepercayaan**: 🟢 CONFIRMED / 🟡 LIKELY / 🔴 UNVERIFIED.
 
 ### 4. 🎯 Analisis Akar Masalah (Root Cause)
-Jelaskan mengapa masalah ini terjadi secara teknis dan mendalam.
+Jelaskan mengapa masalah ini terjadi secara teknis dan mendalam, dengan merujuk \
+pada bukti spesifik dari kode.
 
 ### 5. 💡 Rekomendasi Perbaikan
-Daftar langkah-langkah perbaikan yang spesifik dan actionable, \
-diurutkan berdasarkan prioritas. Sertakan contoh kode yang HARUS diperbaiki \
-oleh developer (bukan oleh kamu).
+Langkah perbaikan spesifik dan actionable, diurutkan berdasarkan prioritas.
+- Sertakan nama file dan fungsi yang perlu diubah (bukan secara umum).
+- Berikan pseudocode atau contoh pattern yang harus diterapkan developer.
+- Hanya rekomendasikan perubahan yang didukung oleh temuan nyata.
 
-### 6. Risiko Jika Tidak Diperbaiki
-Jelaskan dampak potensial jika masalah dibiarkan.
+### 6. ⚠️ Risiko Jika Tidak Diperbaiki
+Dampak potensial jika masalah dibiarkan (berbasis temuan yang CONFIRMED).
+
+### 7. 📊 Ringkasan Kepercayaan
+| Temuan | Status | Dasar Bukti |
+|--------|--------|-------------|
+(Tabel semua temuan dengan status CONFIRMED/LIKELY/UNVERIFIED)
 
 ---
 
-**Aturan:**
+**Aturan Format:**
 1. Gunakan bahasa yang sama dengan pengguna (Indonesia atau Inggris).
-2. Jujur: jika data tidak cukup untuk diagnosis akurat, katakan demikian.
-3. Spesifik: tunjuk file, baris, dan function yang bermasalah.
-4. Profesional: bersifat objektif, hindari menyalahkan developer.
+2. Jujur: jika data tidak cukup, katakan demikian — jangan mengarang.
+3. Spesifik: kutip file, baris, dan nama fungsi dengan tepat.
+4. Profesional: objektif, berbasis data, hindari menyalahkan developer.
+"""
+
+# ── Critic (second-pass verification) prompt ─────────────────────────────────
+
+_CRITIC_SYSTEM_PROMPT = """\
+Kamu adalah **Reviewer Laporan Inspeksi Kode** yang tugasnya mem-verifikasi \
+setiap klaim dalam laporan inspeksi terhadap evidence yang diberikan.
+
+Tugasmu:
+1. Baca setiap temuan dalam Laporan Inspeksi.
+2. Periksa apakah temuan tersebut didukung oleh kutipan langsung dalam evidence.
+3. Perbarui status kepercayaan setiap temuan:
+   - 🟢 **[CONFIRMED]** jika ada kutipan langsung dari kode/log.
+   - 🟡 **[LIKELY]** jika ada indikasi kuat tapi tidak dikutip langsung.
+   - 🔴 **[UNVERIFIED]** jika tidak ada bukti dalam evidence.
+4. Hapus atau tandai klaim yang tidak bisa diverifikasi.
+5. Pertahankan semua temuan yang valid, tambahkan kutipan yang terlewat jika ada dalam evidence.
+6. Tambahkan catatan reviewer di awal laporan: berapa temuan CONFIRMED, LIKELY, UNVERIFIED.
+
+Jangan ubah gaya penulisan laporan. Kembalikan laporan lengkap yang sudah diverifikasi.
+"""
+
+_CRITIC_USER_TEMPLATE = """\
+## LAPORAN INSPEKSI (perlu diverifikasi)
+
+{report}
+
+---
+
+## EVIDENCE YANG TERSEDIA
+
+{evidence}
+
+---
+
+Verifikasi setiap temuan dalam laporan terhadap evidence di atas. \
+Perbarui status [CONFIRMED/LIKELY/UNVERIFIED] dan tambahkan/perbaiki kutipan bukti.
 """
 
 # ── Extract prompt ─────────────────────────────────────────────────────────────
@@ -308,12 +387,31 @@ class DeveloperInspectorAgent(BaseAgent):
             return "(no keywords specified)"
         pattern = "|".join(re.escape(k) for k in keywords[:5])
         out = await self._run_cmd(
-            f"grep -rn --include='*.py' --include='*.js' --include='*.ts' "
+            f"grep -rn "
+            f"--include='*.py' --include='*.js' --include='*.ts' "
             f"--include='*.go' --include='*.java' --include='*.rb' "
+            f"--include='*.php' --include='*.cs' --include='*.rs' "
+            f"--include='*.vue' --include='*.tsx' --include='*.jsx' "
             f"-E '{pattern}' . 2>/dev/null | head -{MAX_GREP_LINES}",
             cwd=repo_path,
         )
         return out or f"(no matches for: {', '.join(keywords)})"
+
+    async def _grep_error_patterns(self, repo_path: Path) -> str:
+        """Grep for generic error/exception patterns across common source files."""
+        error_pattern = (
+            r"(Exception|Error|Traceback|panic:|FATAL|CRITICAL"
+            r"|undefined is not|cannot read property|NullPointerException"
+            r"|segfault|SIGSEGV|stack overflow|out of memory)"
+        )
+        out = await self._run_cmd(
+            f"grep -rn "
+            f"--include='*.py' --include='*.js' --include='*.ts' "
+            f"--include='*.go' --include='*.java' --include='*.rs' "
+            f"-iE '{error_pattern}' . 2>/dev/null | head -{MAX_GREP_LINES}",
+            cwd=repo_path,
+        )
+        return out or "(no generic error patterns found)"
 
     async def _read_key_files(self, repo_path: Path) -> str:
         """Read common entry-point and config files if they exist."""
@@ -345,7 +443,86 @@ class DeveloperInspectorAgent(BaseAgent):
             cwd=repo_path,
         )
         return out or "(no log files found)"
+    async def _read_relevant_files(self, repo_path: Path, problem: str) -> str:
+        """
+        RAG step: index the repo with AST/TF-IDF ranking and read the top-N
+        source files most relevant to the reported problem.
 
+        Falls back gracefully if code_search dependencies are not available.
+        """
+        try:
+            from src.tools.code_search import build_ast_index, rank_files_by_relevance
+        except ImportError:
+            logger.warning("Inspector: code_search not available; skipping RAG step")
+            return "(code_search unavailable)"
+
+        if not problem:
+            return "(no problem description for relevance ranking)"
+
+        try:
+            logger.info("Inspector: building AST index for RAG at %s", repo_path)
+            t0 = time.monotonic()
+            symbol_index = build_ast_index(repo_path)
+            candidates   = list(symbol_index.keys())
+
+            if not candidates:
+                return "(no indexable source files found)"
+
+            ranked  = rank_files_by_relevance(candidates, symbol_index, problem)
+            top_n   = ranked[:MAX_RELEVANT_FILES]
+            elapsed = time.monotonic() - t0
+            logger.info(
+                "Inspector: RAG indexed %d files in %.2fs; top %d selected",
+                len(candidates), elapsed, len(top_n),
+            )
+
+            snippets: list[str] = []
+            for rel_path in top_n:
+                abs_path = repo_path / rel_path
+                try:
+                    text = abs_path.read_text(errors="replace")[:MAX_FILE_BYTES]
+                    snippets.append(
+                        f"### 📄 {rel_path} (relevant to problem)\n"
+                        f"```\n{text}\n```"
+                    )
+                except OSError as exc:
+                    logger.debug("Inspector: could not read %s: %s", rel_path, exc)
+
+            return (
+                "\n\n".join(snippets)
+                if snippets
+                else "(no relevant files could be read)"
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Inspector: RAG step failed: %s", exc)
+            return f"(RAG error: {exc})"
+
+    async def _verify_report(self, report: str, evidence_text: str) -> str:
+        """
+        Critic second-pass: ask the LLM to cross-check every finding in the
+        initial report against the raw evidence and update confidence labels.
+
+        Uses a very low temperature (CRITIC_TEMPERATURE) for strict fact-checking.
+        """
+        logger.info("Inspector: running critic verification pass")
+        critic_user = _CRITIC_USER_TEMPLATE.format(
+            report=report,
+            evidence=evidence_text[:60_000],  # cap to avoid context overflow
+        )
+        try:
+            verified = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _CRITIC_SYSTEM_PROMPT},
+                    {"role": "user",   "content": critic_user},
+                ],
+                temperature=CRITIC_TEMPERATURE,
+                top_p=CRITIC_TOP_P,
+            )
+            return verified.strip() or report
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Inspector: critic pass failed (%s); using initial report", exc)
+            return report
     # ── Repo resolution ────────────────────────────────────────────────────────
 
     async def _resolve_repo(self, repo_url: str) -> Path | None:
@@ -414,8 +591,10 @@ class DeveloperInspectorAgent(BaseAgent):
         repos = self._repo_tracker.list_all()
         if repos:
             latest = repos[-1]
-            path   = Path(latest.get("local_path", ""))
-            if path.exists():
+            # list_all() returns RepoRecord dataclass objects, not dicts –
+            # access the attribute directly instead of calling .get().
+            path = Path(latest.local_path) if latest.local_path else None
+            if path and path.exists():
                 logger.info("Inspector: no URL given, using tracked repo=%s", path)
                 return path
         return None
@@ -441,17 +620,35 @@ class DeveloperInspectorAgent(BaseAgent):
             logger.warning("Inspector: failed to parse extraction JSON: %s", exc)
             return InspectionRequest(problem=user_input)
 
+    def _build_evidence_text(self, evidence: dict[str, str]) -> str:
+        """Serialize evidence dict into a markdown string for LLM consumption."""
+        return "\n\n".join(
+            f"## {title}\n{content}"
+            for title, content in evidence.items()
+            if content.strip()
+        )
+
     async def _run_inspection_llm(
         self,
         user_input: str,
         problem:    str,
         evidence:   dict[str, str],
     ) -> str:
-        """Send all gathered evidence to the LLM for analysis."""
-        evidence_text = "\n\n".join(
-            f"## {title}\n{content}"
-            for title, content in evidence.items()
-            if content.strip()
+        """
+        Phase 1 – Generate initial report.
+        Phase 2 – Critic pass: verify every finding against raw evidence.
+        """
+        evidence_text = self._build_evidence_text(evidence)
+
+        # Log evidence sizes for telemetry
+        for title, content in evidence.items():
+            logger.debug(
+                "Inspector evidence '%s': %d chars",
+                title, len(content),
+            )
+        logger.info(
+            "Inspector: sending %d evidence sections (%d total chars) to LLM",
+            len(evidence), len(evidence_text),
         )
 
         user_msg = (
@@ -461,13 +658,23 @@ class DeveloperInspectorAgent(BaseAgent):
             f"**Hasil pengumpulan data dari repositori:**\n\n{evidence_text}"
         )
 
-        response = await self._llm.chat(
+        t0 = time.monotonic()
+        initial_report = await self._llm.chat(
             messages=[
-                {"role": "system",  "content": _SYSTEM_PROMPT},
-                {"role": "user",    "content": user_msg},
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user",   "content": user_msg},
             ],
+            temperature=INSPECTOR_TEMPERATURE,
+            top_p=INSPECTOR_TOP_P,
         )
-        return response.strip()
+        logger.info(
+            "Inspector: initial report generated in %.2fs (%d chars)",
+            time.monotonic() - t0, len(initial_report),
+        )
+
+        # Phase 2: critic verification
+        verified_report = await self._verify_report(initial_report.strip(), evidence_text)
+        return verified_report
 
     # ── Main run ───────────────────────────────────────────────────────────────
 
@@ -569,24 +776,38 @@ class DeveloperInspectorAgent(BaseAgent):
         the first turn (branch explicit) and on the confirmation turn.
         """
         try:
-            logger.info("Inspector: inspecting repo at %s (branch=%s)", repo_path, req.branch)
+            logger.info(
+                "Inspector: inspecting repo at %s (branch=%s)",
+                repo_path, req.branch,
+            )
+            t_start = time.monotonic()
 
             (
                 dir_tree,
                 git_log,
                 git_diff,
                 grep_result,
+                grep_errors,
                 key_files,
                 error_logs,
-            ) = await _gather_evidence(self, repo_path, req.keywords)
+                relevant_files,
+            ) = await _gather_evidence(self, repo_path, req.keywords, req.problem)
+
+            t_gather = time.monotonic()
+            logger.info(
+                "Inspector: evidence gathered in %.2fs",
+                t_gather - t_start,
+            )
 
             evidence = {
-                "Struktur Direktori":   dir_tree,
-                "Git Log (terbaru)":    git_log,
-                "Git Diff (terakhir)":  git_diff,
-                "Grep Keyword Masalah": grep_result,
-                "File Kunci":           key_files,
-                "Log & Error Files":    error_logs,
+                "Struktur Direktori":           dir_tree,
+                "Git Log (terbaru)":            git_log,
+                "Git Diff (terakhir)":          git_diff,
+                "Grep Keyword Masalah":         grep_result,
+                "Grep Pola Error Umum":         grep_errors,
+                "File Kunci":                   key_files,
+                "Log & Error Files":            error_logs,
+                "File Relevan (RAG/TF-IDF)":    relevant_files,
             }
 
             report = await self._run_inspection_llm(
@@ -594,8 +815,23 @@ class DeveloperInspectorAgent(BaseAgent):
                 req.problem or "",
                 evidence,
             )
+
+            t_total = time.monotonic() - t_start
+            logger.info(
+                "Inspector: inspection complete in %.2fs total "
+                "(gather=%.2fs, llm=%.2fs)",
+                t_total,
+                t_gather - t_start,
+                t_total - (t_gather - t_start),
+            )
+
             branch_header = f"🌿 **Branch:** `{req.branch}`\n\n" if req.branch else ""
-            task.mark_done(branch_header + report)
+            perf_footer = (
+                f"\n\n---\n"
+                f"\u23f1\ufe0f *Inspeksi selesai dalam {t_total:.1f}s "
+                f"(pengumpulan data: {t_gather - t_start:.1f}s)*"
+            )
+            task.mark_done(branch_header + report + perf_footer)
 
         except Exception as exc:
             logger.exception("Inspector._run_inspection_task: error: %s", exc)
@@ -619,15 +855,21 @@ async def _gather_evidence(
     agent:     "DeveloperInspectorAgent",
     repo_path: Path,
     keywords:  list[str],
-) -> tuple[str, str, str, str, str, str]:
-    """Run all read-only inspection commands concurrently."""
-    import asyncio
+    problem:   str = "",
+) -> tuple[str, str, str, str, str, str, str, str]:
+    """
+    Run all read-only inspection commands concurrently, then run RAG sequentially.
 
-    results = await asyncio.gather(
+    Returns an 8-tuple:
+        (dir_tree, git_log, git_diff, grep_keywords, grep_errors,
+         key_files, error_logs, relevant_files)
+    """
+    parallel_results = await asyncio.gather(
         agent._get_dir_tree(repo_path),
         agent._get_git_log(repo_path),
         agent._get_git_diff(repo_path),
         agent._grep_keywords(repo_path, keywords),
+        agent._grep_error_patterns(repo_path),
         agent._read_key_files(repo_path),
         agent._find_error_logs(repo_path),
         return_exceptions=True,
@@ -639,11 +881,16 @@ async def _gather_evidence(
             return f"(error: {r})"
         return str(r) if r else fallback
 
+    # RAG step runs after parallel commands (needs repo path to be intact).
+    relevant_files = await agent._read_relevant_files(repo_path, problem)
+
     return (
-        _safe(results[0], "(no dir tree)"),
-        _safe(results[1], "(no git log)"),
-        _safe(results[2], "(no diff)"),
-        _safe(results[3], "(no grep result)"),
-        _safe(results[4], "(no key files)"),
-        _safe(results[5], "(no log files)"),
+        _safe(parallel_results[0], "(no dir tree)"),
+        _safe(parallel_results[1], "(no git log)"),
+        _safe(parallel_results[2], "(no diff)"),
+        _safe(parallel_results[3], "(no grep result)"),
+        _safe(parallel_results[4], "(no error patterns)"),
+        _safe(parallel_results[5], "(no key files)"),
+        _safe(parallel_results[6], "(no log files)"),
+        relevant_files,
     )
