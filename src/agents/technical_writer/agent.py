@@ -1,21 +1,24 @@
 """
 TechnicalWriterAgent – menghasilkan dokumen teknis profesional dalam format Markdown.
 
-Alur 2-arah (bidirectional) antara agent dan orkestrator:
+Alur dengan strategi chunking (untuk repo berskala besar):
 
 Round 1 — Konteks (jika ada repo URL):
   ┌─────────────────────────────────────────────────────────────────────┐
-  │  User: "buat dokumen PDF untuk repo github.com/xxx/yyy"            │
+  │  User: "buat dokumen DOCX untuk repo github.com/xxx/yyy"           │
   │  Gatekeeper → intent = document_creation                           │
   │  Orchestrator → TechnicalWriterAgent.run(task)                     │
-  │  Agent: clone/pull repo → baca struktur + file kunci              │
-  │  Agent: bangun repo_context string                                  │
+  │  Agent: clone/pull repo → konfirmasi branch                        │
   └─────────────────────────────────────────────────────────────────────┘
 
-Round 2 — Penulisan dokumen (LLM dengan konteks lengkap):
+Round 2 — Penulisan dokumen (strategi chunking):
   ┌─────────────────────────────────────────────────────────────────────┐
-  │  Agent: panggil LLM dengan system_prompt + repo_context + request  │
-  │  LLM → Markdown lengkap dengan diagram Mermaid                     │
+  │  Agent: kumpulkan SEMUA file repo (bukan hanya file kunci)         │
+  │  Agent: bagi file menjadi chunks (~8 KB per chunk)                 │
+  │  Untuk setiap chunk:                                               │
+  │    LLM → section Markdown untuk file-file dalam chunk              │
+  │    Append ke file draft .md sementara (tahan crash)                │
+  │  Setelah semua chunk: LLM synthesize draft → dokumen final         │
   │  Agent: simpan ke task.metadata["document_markdown"]               │
   │  Agent: tambah pending_tools = ["diagram_renderer","doc_generator"]│
   └─────────────────────────────────────────────────────────────────────┘
@@ -24,9 +27,17 @@ Round 3 — Kompilasi (orchestrator menjalankan tools):
   ┌─────────────────────────────────────────────────────────────────────┐
   │  DiagramRendererTool  → render blok Mermaid → PNG                  │
   │  DocumentGeneratorTool → Markdown + PNG → PDF/DOCX                 │
-  │  Orchestrator → task.metadata["document_path"] = "/tmp/.../doc.pdf"│
+  │  Orchestrator → task.metadata["document_path"] = "/tmp/.../doc.docx"│
   │  Responder → kirim file ke Telegram                                │
   └─────────────────────────────────────────────────────────────────────┘
+
+Keunggulan strategi chunking:
+  - Hemat memori (RAM): hanya satu chunk yang ada di LLM context setiap saat.
+  - Mengatasi batas context window LLM: setiap LLM call kecil dan terfokus.
+  - Tahan crash: progres tersimpan bertahap di file draft .md sementara.
+  - Tidak ada informasi yang hilang akibat pemotongan paksa.
+
+Tanpa repo URL: fallback ke single-pass LLM call (pertanyaan langsung).
 """
 
 from __future__ import annotations
@@ -34,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -100,6 +112,43 @@ _KEY_FILES = [
 # Batas ukuran konten repo yang dikirim ke LLM
 _MAX_CONTEXT_CHARS = 12_000
 
+# ── Chunking constants ─────────────────────────────────────────────────────────
+
+# Ukuran maksimum konten per chunk yang dikirim ke LLM (dalam karakter)
+_CHUNK_SIZE_CHARS = 8_000
+
+# Jumlah maksimum file yang dikumpulkan dari repo untuk dokumentasi
+_MAX_REPO_FILES = 200
+
+# Maksimum token output LLM per section/chunk
+_SECTION_MAX_TOKENS = 2_048
+
+# Maksimum ukuran draft content yang dikirim ke LLM saat synthesis (dalam karakter)
+_MAX_DRAFT_SYNTHESIS_CHARS = 30_000
+
+# Maksimum ukuran konten satu file yang disertakan per chunk (dalam karakter)
+_MAX_FILE_CONTENT_CHARS = 4_000
+
+# Minimum ukuran konten file agar diikutsertakan (file terlalu pendek diabaikan)
+_MIN_FILE_CONTENT_CHARS = 10
+
+# Ekstensi file teks/kode yang akan diproses (ekstensi biner dilewati)
+_TEXT_EXTENSIONS: frozenset[str] = frozenset({
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs", ".cpp", ".c",
+    ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt", ".scala", ".r",
+    ".md", ".rst", ".txt", ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg",
+    ".sh", ".bash", ".zsh", ".sql", ".graphql", ".proto",
+    ".xml", ".html", ".css", ".scss", ".sass", ".less", ".vue", ".svelte",
+    ".tf", ".hcl",
+})
+
+# Direktori/file yang dilewati saat mengumpulkan file repo
+_SKIP_DIR_NAMES: frozenset[str] = frozenset({
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "env",
+    "dist", "build", ".idea", ".vscode", "coverage", ".nyc_output",
+    ".pytest_cache", ".mypy_cache", ".tox",
+})
+
 # ── System prompts ─────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT_BASE = """\
@@ -141,6 +190,96 @@ yang tidak ada di kode.
 
 {repo_context}
 """
+
+# ── Chunking system prompts ────────────────────────────────────────────────────
+
+_CHUNK_ANALYSIS_PROMPT = """\
+Kamu adalah **Senior Technical Writer** yang sedang mendokumentasikan repositori \
+kode secara bertahap, satu kelompok file per iterasi.
+
+KONTEKS:
+- Repositori: {repo_url}
+- Sedang memproses chunk {chunk_num} dari {total_chunks}
+
+TUGASMU:
+Buat dokumentasi Markdown yang ringkas dan informatif untuk file-file yang diberikan.
+
+Untuk setiap file, dokumentasikan:
+- Tujuan/fungsi file tersebut
+- Fungsi, kelas, atau komponen utama beserta deskripsi singkatnya
+- Dependensi atau import penting yang perlu diketahui
+
+ATURAN:
+1. Gunakan heading `## nama/file.ext` untuk setiap file
+2. Gunakan sub-heading `### NamaFungsi / NamaKelas` untuk komponen utama
+3. Sertakan diagram Mermaid HANYA jika ada alur proses yang jelas dan signifikan
+4. Jangan mengarang informasi yang tidak ada di kode
+5. Jangan menyertakan blok kode yang terlalu panjang — cukup deskripsikan
+6. Gunakan bahasa Indonesia
+7. HANYA kembalikan konten Markdown
+
+FILE-FILE YANG PERLU DIDOKUMENTASIKAN:
+{chunk_content}
+"""
+
+_FINAL_SYNTHESIS_PROMPT = """\
+{base}
+
+INSTRUKSI TAMBAHAN – SINTESIS DOKUMEN FINAL:
+Kamu diberikan draft dokumentasi yang telah dikumpulkan secara bertahap (chunked) \
+dari seluruh file dalam repositori.
+Tugasmu adalah menyusun dokumen teknis final yang kohesif dan profesional.
+
+PANDUAN SINTESIS:
+1. Buat **Daftar Isi** (Table of Contents) di bagian awal dengan tautan Markdown
+2. Tulis bagian **Ringkasan Eksekutif** yang merangkum tujuan dan fungsi utama sistem
+3. Tulis bagian **Arsitektur Sistem** dengan diagram Mermaid yang menggambarkan \
+komponen-komponen utama dan hubungannya
+4. Kelompokkan section-section terkait menjadi bab-bab yang terstruktur logis
+5. Hapus duplikasi informasi dan selaraskan terminologi
+6. Pastikan konsistensi gaya bahasa di seluruh dokumen
+7. HANYA kembalikan konten Markdown final — tanpa pembungkus backtick tambahan
+
+DRAFT DOKUMENTASI (dari seluruh chunk):
+{draft_content}
+"""
+
+
+# ── Chunking helper functions ─────────────────────────────────────────────────
+
+def _get_draft_md_path(session_id: str) -> Path:
+    """Kembalikan path file draft .md sementara untuk session ini."""
+    draft_dir = Path(tempfile.gettempdir()) / "advance_ai_docs" / session_id
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    return draft_dir / "draft.md"
+
+
+def _split_files_into_chunks(
+    files: list[tuple[str, str]],
+    chunk_size: int = _CHUNK_SIZE_CHARS,
+) -> list[list[tuple[str, str]]]:
+    """
+    Bagi list of (filename, content) menjadi chunks berdasarkan total ukuran konten.
+    Setiap chunk tidak melebihi chunk_size karakter.
+    """
+    chunks: list[list[tuple[str, str]]] = []
+    current_chunk: list[tuple[str, str]] = []
+    current_size = 0
+
+    for fname, content in files:
+        entry_size = len(fname) + len(content)
+        # Jika menambahkan entry ini akan melampaui batas dan chunk tidak kosong, simpan chunk
+        if current_chunk and current_size + entry_size > chunk_size:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_size = 0
+        current_chunk.append((fname, content))
+        current_size += entry_size
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
 
 
 class TechnicalWriterAgent(BaseAgent):
@@ -307,41 +446,29 @@ class TechnicalWriterAgent(BaseAgent):
         branch:    Optional[str],
     ) -> AgentTask:
         """
-        Baca konteks repo (jika ada), panggil LLM, daftarkan pending tools.
+        Titik masuk utama untuk pembuatan dokumen.
+
+        Jika repo tersedia, gunakan strategi chunking (memori hemat, aman untuk
+        repo berskala besar).  Tanpa repo, lakukan single-pass LLM call.
+
         Dapat dipanggil dari run() langsung (branch eksplisit) maupun dari
         alur konfirmasi (setelah user balas).
         """
         output_format = task.metadata.get("output_format") or _detect_format(task.user_input)
         task.metadata["output_format"] = output_format
 
-        # ── Kumpulkan konteks repo ─────────────────────────────────────────────
-        repo_context: Optional[str] = None
+        # ── Gunakan strategi chunking jika repo tersedia ───────────────────────
         if repo_url and repo_path:
-            task.agent_trace.append(f"technical_writer → gathering repo context: {repo_url}")
-            repo_context = await self._gather_repo_context(repo_url, repo_path, task)
-            if repo_context:
-                task.metadata["repo_context_chars"] = len(repo_context)
-                logger.info(
-                    "TechnicalWriterAgent: konteks repo %d chars. session=%s",
-                    len(repo_context), task.session_id,
-                )
+            return await self._chunked_document_generation(task, repo_url, repo_path, branch)
 
-        # ── Bangun system prompt ───────────────────────────────────────────────
-        if repo_context:
-            system_prompt = _SYSTEM_PROMPT_WITH_REPO.format(
-                base=_SYSTEM_PROMPT_BASE,
-                repo_context=repo_context,
-            )
-        else:
-            system_prompt = _SYSTEM_PROMPT_BASE
+        # ── No-repo: single-pass (tanpa konteks repo) ─────────────────────────
+        system_prompt = _SYSTEM_PROMPT_BASE
 
-        # ── Bangun messages ────────────────────────────────────────────────────
         messages = self._history.get_as_llm_messages(task.session_id)
         if not messages or messages[-1].get("role") != "user":
             messages.append({"role": "user", "content": task.user_input})
 
-        # ── Panggil LLM ────────────────────────────────────────────────────────
-        task.agent_trace.append("technical_writer → calling LLM for document draft")
+        task.agent_trace.append("technical_writer → calling LLM for document draft (no repo)")
         try:
             markdown_doc = await self._llm.complete(
                 system_prompt=system_prompt,
@@ -353,7 +480,6 @@ class TechnicalWriterAgent(BaseAgent):
             task.mark_failed(f"LLM error: {exc}")
             return task
 
-        # ── Simpan markdown ────────────────────────────────────────────────────
         if markdown_doc.count("```") % 2 != 0:
             logger.warning(
                 "TechnicalWriterAgent: response LLM kemungkinan terpotong. session=%s",
@@ -365,27 +491,353 @@ class TechnicalWriterAgent(BaseAgent):
             f"technical_writer → markdown generated ({len(markdown_doc)} chars)"
         )
 
-        # ── Daftarkan tools ────────────────────────────────────────────────────
         task.pending_tools.extend(["diagram_renderer", "document_generator"])
 
-        # ── Mark done ──────────────────────────────────────────────────────────
-        fmt_label   = output_format.upper() if output_format else "PDF"
-        branch_note = f" branch `{branch}`" if branch else ""
-        repo_note   = f" dari repo `{repo_url}`{branch_note}" if repo_url else ""
+        fmt_label = output_format.upper() if output_format else "PDF"
         reply = (
-            f"✅ Dokumen teknis{repo_note} berhasil disusun.\n"
+            f"✅ Dokumen teknis berhasil disusun.\n"
             f"Sedang mengompilasi ke **{fmt_label}** — file akan dikirim sebentar lagi."
         )
         task.mark_done(reply)
         self._history.add(task.session_id, "assistant", reply)
 
         logger.info(
-            "TechnicalWriterAgent: done session=%s pending_tools=%s",
+            "TechnicalWriterAgent: done (no-repo) session=%s pending_tools=%s",
             task.session_id, task.pending_tools,
         )
         return task
 
-    # ── Gather repo context ───────────────────────────────────────────────────
+    # ── Chunked document generation ───────────────────────────────────────────
+
+    async def _chunked_document_generation(
+        self,
+        task:      AgentTask,
+        repo_url:  str,
+        repo_path: Path,
+        branch:    Optional[str],
+    ) -> AgentTask:
+        """
+        Hasilkan dokumen teknis menggunakan strategi chunking bertahap:
+
+        1. Kumpulkan semua file repo (bukan hanya file kunci).
+        2. Bagi menjadi chunks berdasarkan ukuran konten.
+        3. Untuk setiap chunk: panggil LLM → hasilkan section Markdown.
+        4. Append setiap section ke file draft .md sementara (tahan crash).
+        5. Setelah semua chunk selesai, synthesize menjadi dokumen final.
+        6. Daftarkan diagram_renderer & document_generator ke pending_tools.
+
+        Strategi ini memastikan:
+        - Hemat memori: hanya satu chunk yang ada di memori LLM setiap saat.
+        - Toleran crash: progres tersimpan di file draft .md.
+        - Tidak ada informasi yang hilang akibat batas konteks LLM.
+        """
+        output_format = task.metadata.get("output_format", "docx")
+        task.metadata["output_format"] = output_format
+
+        # 1. Kumpulkan semua file
+        files = await self._gather_all_repo_files(repo_url, repo_path, task)
+
+        if not files:
+            # Fallback ke pendekatan lama berbasis file kunci
+            logger.warning(
+                "TechnicalWriterAgent: tidak ada file terkumpul, fallback ke key-files. session=%s",
+                task.session_id,
+            )
+            return await self._build_document_from_key_files(task, repo_url, repo_path, branch)
+
+        # 2. Bagi menjadi chunks
+        chunks = _split_files_into_chunks(files)
+        total_chunks = len(chunks)
+        logger.info(
+            "TechnicalWriterAgent: %d files → %d chunks. session=%s",
+            len(files), total_chunks, task.session_id,
+        )
+        task.agent_trace.append(
+            f"technical_writer → chunked mode: {len(files)} files, {total_chunks} chunks"
+        )
+
+        # 3. Buat file draft .md sementara
+        draft_path = _get_draft_md_path(task.session_id)
+        task.metadata["draft_md_path"] = str(draft_path)
+        branch_note = f" (branch: {branch})" if branch else ""
+        with open(draft_path, "w", encoding="utf-8") as f:
+            f.write(f"# Draft Dokumentasi: {repo_url}{branch_note}\n\n")
+
+        # 4. Proses setiap chunk → append ke draft
+        for i, chunk in enumerate(chunks, start=1):
+            logger.info(
+                "TechnicalWriterAgent: processing chunk %d/%d. session=%s",
+                i, total_chunks, task.session_id,
+            )
+            section_md = await self._generate_section_for_chunk(
+                chunk, repo_url, i, total_chunks
+            )
+            with open(draft_path, "a", encoding="utf-8") as f:
+                f.write(f"\n\n<!-- CHUNK {i}/{total_chunks} -->\n\n")
+                f.write(section_md)
+            task.agent_trace.append(f"technical_writer → chunk {i}/{total_chunks} selesai")
+
+        # 5. Baca draft dan synthesize menjadi dokumen final
+        draft_content = draft_path.read_text(encoding="utf-8")
+        logger.info(
+            "TechnicalWriterAgent: draft siap (%d chars), memulai sintesis. session=%s",
+            len(draft_content), task.session_id,
+        )
+        final_md = await self._synthesize_final_document(draft_content, repo_url, task)
+
+        if final_md.count("```") % 2 != 0:
+            logger.warning(
+                "TechnicalWriterAgent: sintesis kemungkinan terpotong. session=%s",
+                task.session_id,
+            )
+            final_md += "\n```"
+
+        task.metadata["document_markdown"] = final_md
+        task.agent_trace.append(
+            f"technical_writer → final markdown synthesized ({len(final_md)} chars)"
+        )
+
+        # 6. Daftarkan tools
+        task.pending_tools.extend(["diagram_renderer", "document_generator"])
+
+        # 7. Mark done
+        fmt_label = output_format.upper()
+        reply = (
+            f"✅ Dokumen teknis dari repo `{repo_url}`{branch_note} berhasil disusun "
+            f"menggunakan strategi chunking "
+            f"({total_chunks} chunks, {len(files)} files).\n"
+            f"Sedang mengompilasi ke **{fmt_label}** — file akan dikirim sebentar lagi."
+        )
+        task.mark_done(reply)
+        self._history.add(task.session_id, "assistant", reply)
+
+        logger.info(
+            "TechnicalWriterAgent: chunked generation done session=%s pending_tools=%s",
+            task.session_id, task.pending_tools,
+        )
+        return task
+
+    # ── Gather all repo files ─────────────────────────────────────────────────
+
+    async def _gather_all_repo_files(
+        self,
+        repo_url:  str,
+        repo_path: Path,
+        task:      AgentTask,
+    ) -> list[tuple[str, str]]:
+        """
+        Kumpulkan semua file teks/kode dari repo (bukan hanya file kunci).
+        Kembalikan list of (relative_path, content).
+        File biner dan direktori yang di-skip diabaikan.
+        """
+        files: list[tuple[str, str]] = []
+        count = 0
+
+        for fpath in sorted(repo_path.rglob("*")):
+            if count >= _MAX_REPO_FILES:
+                logger.info(
+                    "TechnicalWriterAgent: batas %d file tercapai. session=%s",
+                    _MAX_REPO_FILES, task.session_id,
+                )
+                break
+
+            if not fpath.is_file():
+                continue
+
+            # Lewati direktori yang di-skip dan file tersembunyi (hidden)
+            parts = fpath.relative_to(repo_path).parts
+            if any(part in _SKIP_DIR_NAMES or part.startswith(".") for part in parts[:-1]):
+                continue
+            if parts[-1].startswith("."):
+                continue
+
+            # Lewati file dengan ekstensi biner
+            suffix = fpath.suffix.lower()
+            if suffix and suffix not in _TEXT_EXTENSIONS:
+                continue
+            # File tanpa ekstensi: coba baca (mungkin script)
+            # File dengan ekstensi teks: baca
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            # Lewati file yang terlalu pendek (mungkin kosong atau tidak informatif)
+            if len(content.strip()) < _MIN_FILE_CONTENT_CHARS:
+                continue
+
+            rel_path = str(fpath.relative_to(repo_path))
+            # Potong file yang sangat panjang agar satu file tidak mendominasi chunk
+            if len(content) > _MAX_FILE_CONTENT_CHARS:
+                content = content[:_MAX_FILE_CONTENT_CHARS] + "\n... [dipotong]"
+
+            files.append((rel_path, content))
+            count += 1
+
+        task.agent_trace.append(
+            f"technical_writer → gathered {len(files)} files for chunked processing"
+        )
+        logger.info(
+            "TechnicalWriterAgent: %d files dikumpulkan dari %s. session=%s",
+            len(files), repo_url, task.session_id,
+        )
+        return files
+
+    # ── LLM calls per chunk ────────────────────────────────────────────────────
+
+    async def _generate_section_for_chunk(
+        self,
+        chunk_files:   list[tuple[str, str]],
+        repo_url:      str,
+        chunk_num:     int,
+        total_chunks:  int,
+    ) -> str:
+        """Panggil LLM untuk mendokumentasikan satu chunk file."""
+        chunk_content_parts: list[str] = []
+        for fname, content in chunk_files:
+            # Deteksi bahasa dari ekstensi file untuk syntax highlighting
+            lang = Path(fname).suffix.lstrip(".") or "text"
+            chunk_content_parts.append(f"### File: `{fname}`\n```{lang}\n{content}\n```")
+        chunk_content = "\n\n".join(chunk_content_parts)
+
+        system_prompt = _CHUNK_ANALYSIS_PROMPT.format(
+            repo_url=repo_url,
+            chunk_num=chunk_num,
+            total_chunks=total_chunks,
+            chunk_content=chunk_content,
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    f"Dokumentasikan file-file pada chunk {chunk_num}/{total_chunks} "
+                    f"dari repositori {repo_url}."
+                ),
+            }
+        ]
+
+        try:
+            section_md = await self._llm.complete(
+                system_prompt=system_prompt,
+                messages=messages,
+                max_tokens=_SECTION_MAX_TOKENS,
+            )
+            return section_md.strip()
+        except Exception as exc:
+            logger.warning(
+                "TechnicalWriterAgent: chunk %d LLM gagal: %s", chunk_num, exc
+            )
+            # Kembalikan placeholder agar proses tidak terhenti
+            return f"<!-- chunk {chunk_num} gagal diproses: {exc} -->"
+
+    async def _synthesize_final_document(
+        self,
+        draft_content: str,
+        repo_url:      str,
+        task:          AgentTask,
+    ) -> str:
+        """
+        Buat dokumen final yang kohesif dari seluruh section draft.
+        Draft content dipotong jika melebihi batas aman untuk LLM.
+        """
+        # Potong draft jika terlalu besar agar tidak melebihi context window
+        if len(draft_content) > _MAX_DRAFT_SYNTHESIS_CHARS:
+            draft_content = (
+                draft_content[:_MAX_DRAFT_SYNTHESIS_CHARS]
+                + "\n\n... [draft dipotong karena melebihi batas]"
+            )
+
+        system_prompt = _FINAL_SYNTHESIS_PROMPT.format(
+            base=_SYSTEM_PROMPT_BASE,
+            draft_content=draft_content,
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": f"Susun dokumen teknis final untuk repositori: {repo_url}",
+            }
+        ]
+        task.agent_trace.append("technical_writer → synthesizing final document from chunks")
+
+        try:
+            final_md = await self._llm.complete(
+                system_prompt=system_prompt,
+                messages=messages,
+                max_tokens=16_384,
+            )
+            return final_md.strip()
+        except Exception as exc:
+            logger.exception(
+                "TechnicalWriterAgent: synthesis LLM gagal: %s", exc
+            )
+            # Fallback: kembalikan draft mentah
+            logger.warning(
+                "TechnicalWriterAgent: menggunakan draft mentah sebagai fallback. session=%s",
+                task.session_id,
+            )
+            return draft_content
+
+    # ── Fallback: key-files only (digunakan ketika tidak ada file yang terkumpul) ──
+
+    async def _build_document_from_key_files(
+        self,
+        task:      AgentTask,
+        repo_url:  str,
+        repo_path: Path,
+        branch:    Optional[str],
+    ) -> AgentTask:
+        """
+        Fallback ke pendekatan lama: baca hanya file kunci dan buat dokumen
+        dalam satu LLM call. Digunakan bila _gather_all_repo_files tidak menemukan file.
+        """
+        repo_context = await self._gather_repo_context(repo_url, repo_path, task)
+        output_format = task.metadata.get("output_format", "pdf")
+
+        if repo_context:
+            task.metadata["repo_context_chars"] = len(repo_context)
+            system_prompt = _SYSTEM_PROMPT_WITH_REPO.format(
+                base=_SYSTEM_PROMPT_BASE,
+                repo_context=repo_context,
+            )
+        else:
+            system_prompt = _SYSTEM_PROMPT_BASE
+
+        messages = self._history.get_as_llm_messages(task.session_id)
+        if not messages or messages[-1].get("role") != "user":
+            messages.append({"role": "user", "content": task.user_input})
+
+        task.agent_trace.append("technical_writer → calling LLM (key-files fallback)")
+        try:
+            markdown_doc = await self._llm.complete(
+                system_prompt=system_prompt,
+                messages=messages,
+                max_tokens=16_384,
+            )
+        except Exception as exc:
+            logger.exception("TechnicalWriterAgent: LLM call failed: %s", exc)
+            task.mark_failed(f"LLM error: {exc}")
+            return task
+
+        if markdown_doc.count("```") % 2 != 0:
+            markdown_doc += "\n```"
+        task.metadata["document_markdown"] = markdown_doc
+        task.agent_trace.append(
+            f"technical_writer → markdown generated ({len(markdown_doc)} chars)"
+        )
+
+        task.pending_tools.extend(["diagram_renderer", "document_generator"])
+
+        fmt_label   = output_format.upper() if output_format else "PDF"
+        branch_note = f" branch `{branch}`" if branch else ""
+        reply = (
+            f"✅ Dokumen teknis dari repo `{repo_url}`{branch_note} berhasil disusun.\n"
+            f"Sedang mengompilasi ke **{fmt_label}** — file akan dikirim sebentar lagi."
+        )
+        task.mark_done(reply)
+        self._history.add(task.session_id, "assistant", reply)
+        return task
+
+    # ── Gather repo context (key-files only, dipertahankan untuk fallback) ────
 
     async def _gather_repo_context(
         self,
@@ -396,6 +848,7 @@ class TechnicalWriterAgent(BaseAgent):
         """
         Baca struktur direktori + file-file kunci dari repo yang sudah di-clone.
         Dikembalikan sebagai string konteks untuk injeksi ke LLM.
+        Digunakan sebagai fallback oleh _build_document_from_key_files.
         """
         cli = CLIExecutor(work_dir=repo_path, timeout=30)
 
