@@ -194,7 +194,77 @@ fi
 success "Python dependencies terinstall."
 
 # ==============================================================================
-# 2. Pandoc (sistem) — untuk konversi Markdown ke Word (.docx)
+# 2. System libraries — WeasyPrint (PDF) & Chromium/puppeteer (mermaid-cli)
+# ==============================================================================
+header "System Libraries (WeasyPrint & Chromium)"
+
+if [[ "$OS" == "debian" ]]; then
+    info "Menginstall system libraries yang dibutuhkan WeasyPrint dan mermaid-cli ..."
+    sudo apt-get install -y --no-install-recommends \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        libpangocairo-1.0-0 \
+        libcairo2 \
+        libgdk-pixbuf2.0-0 \
+        libffi-dev \
+        libatk1.0-0 \
+        libatk-bridge2.0-0 \
+        libcups2 \
+        libdrm2 \
+        libgbm1 \
+        libnss3 \
+        libxkbcommon0 \
+        libglib2.0-0 \
+        libxss1 \
+        libasound2 \
+        libxrandr2 \
+        libgtk-3-0 \
+        fonts-liberation \
+        2>/dev/null || warning "Beberapa system library gagal diinstall (mungkin sudah ada atau nama berbeda)."
+    success "System libraries selesai diproses."
+elif [[ "$OS" == "fedora" ]]; then
+    sudo dnf install -y \
+        pango \
+        cairo \
+        gdk-pixbuf2 \
+        atk \
+        at-spi2-atk \
+        cups-libs \
+        libdrm \
+        mesa-libgbm \
+        nss \
+        libxkbcommon \
+        glib2 \
+        libXScrnSaver \
+        alsa-lib \
+        libXrandr \
+        gtk3 \
+        2>/dev/null || warning "Beberapa system library gagal diinstall."
+    success "System libraries selesai diproses."
+elif [[ "$OS" == "arch" ]]; then
+    sudo pacman -S --noconfirm --needed \
+        pango \
+        cairo \
+        gdk-pixbuf2 \
+        at-spi2-atk \
+        libcups \
+        libdrm \
+        mesa \
+        nss \
+        libxkbcommon \
+        glib2 \
+        libxss \
+        alsa-lib \
+        libxrandr \
+        gtk3 \
+        2>/dev/null || warning "Beberapa system library gagal diinstall."
+    success "System libraries selesai diproses."
+else
+    warning "OS tidak dikenali ($OS). Install system libraries secara manual jika diperlukan."
+fi
+
+# ==============================================================================
+# 3. Pandoc (sistem) — untuk konversi Markdown ke Word (.docx)
 # ==============================================================================
 header "Pandoc (Markdown → Word)"
 
@@ -257,7 +327,7 @@ else
 fi
 
 # ==============================================================================
-# 3. Node.js & mermaid-cli — untuk render diagram Mermaid ke PNG
+# 4. Node.js & mermaid-cli — untuk render diagram Mermaid ke PNG
 # ==============================================================================
 header "mermaid-cli / mmdc (diagram renderer)"
 
@@ -324,7 +394,7 @@ else
 fi
 
 # ==============================================================================
-# 4. Verifikasi akhir
+# 5. Verifikasi akhir
 # ==============================================================================
 header "Ringkasan Instalasi"
 
@@ -346,7 +416,7 @@ check "mmdc"    "mmdc"
 echo ""
 
 # ==============================================================================
-# 5. Jalankan bot
+# 6. Jalankan bot
 # ==============================================================================
 case "$MODE" in
     install)
