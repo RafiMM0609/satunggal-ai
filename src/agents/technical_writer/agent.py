@@ -428,6 +428,12 @@ class TechnicalWriterAgent(BaseAgent):
             return
         await cli.run("git remote set-branches origin '*'")
         await cli.run("git fetch --all --prune")
+        # Coba checkout biasa dulu (branch mungkin sudah ada di lokal setelah fetch)
+        result = await cli.run(f"git checkout {branch}")
+        if result.succeeded:
+            logger.info("TechnicalWriterAgent: checked out branch '%s' after fetch", branch)
+            return
+        # Branch belum ada di lokal, buat tracking branch dari remote
         result = await cli.run(f"git checkout -b {branch} origin/{branch}")
         if not result.succeeded:
             raise RuntimeError(
