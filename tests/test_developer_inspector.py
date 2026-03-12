@@ -525,3 +525,184 @@ class TestConstants:
         assert 3 <= MAX_RELEVANT_FILES <= 15, (
             "MAX_RELEVANT_FILES should be between 3 and 15 for context balance"
         )
+
+
+# ── Q/A mode: classify_intent ─────────────────────────────────────────────────
+
+from src.tools.repo_qa import QAIntent, classify_intent, extract_specific_target
+from src.agents.developer_inspector.agent import _QA_INTENT_LABELS
+
+
+class TestClassifyIntent:
+    @pytest.mark.parametrize("text,expected", [
+        # API endpoints triggers
+        ("ada api apa saja di repo ini?", QAIntent.API_ENDPOINTS),
+        ("list semua endpoint REST", QAIntent.API_ENDPOINTS),
+        ("show me all routes", QAIntent.API_ENDPOINTS),
+        ("jelaskan endpoint /upload", QAIntent.SPECIFIC_SYMBOL),
+        ("explain function process_payment", QAIntent.SPECIFIC_SYMBOL),
+        # Tech stack
+        ("teknologi apa yang dipakai?", QAIntent.TECH_STACK),
+        ("what framework is used?", QAIntent.TECH_STACK),
+        ("bahasa pemrograman apa?", QAIntent.TECH_STACK),
+        # Data models
+        ("apa saja data model di repo?", QAIntent.DATA_MODELS),
+        ("jelaskan schema database", QAIntent.DATA_MODELS),
+        ("show orm models", QAIntent.DATA_MODELS),
+        # Dependencies
+        ("apa saja dependency yang dipakai?", QAIntent.DEPENDENCIES),
+        ("show requirements", QAIntent.DEPENDENCIES),
+        ("list packages", QAIntent.DEPENDENCIES),
+        # CI/CD
+        ("bagaimana proses deployment?", QAIntent.CI_CD),
+        ("explain the ci/cd pipeline", QAIntent.CI_CD),
+        ("cara deploy ke production?", QAIntent.CI_CD),
+        # Security
+        ("bagaimana autentikasi dilakukan?", QAIntent.SECURITY),
+        ("how is jwt implemented?", QAIntent.SECURITY),
+        ("explain security layer", QAIntent.SECURITY),
+        # Main flow
+        ("bagaimana flow utama aplikasi?", QAIntent.MAIN_FLOW),
+        ("explain the main flow", QAIntent.MAIN_FLOW),
+        ("alur kerja sistem ini?", QAIntent.MAIN_FLOW),
+        # Full inspection triggers (error/bug keywords)
+        ("ada bug di payment service", QAIntent.FULL_INSPECTION),
+        ("error 500 saat login", QAIntent.FULL_INSPECTION),
+        ("crash waktu startup", QAIntent.FULL_INSPECTION),
+        ("tolong perbaiki", QAIntent.FULL_INSPECTION),
+    ])
+    def test_classify_returns_correct_intent(self, text, expected):
+        result = classify_intent(text)
+        assert result == expected, f"classify_intent({text!r}) = {result!r}, want {expected!r}"
+
+    def test_empty_input_returns_full_inspection(self):
+        assert classify_intent("") == QAIntent.FULL_INSPECTION
+
+    def test_unrecognized_input_returns_full_inspection(self):
+        assert classify_intent("blablabla xyz 1234") == QAIntent.FULL_INSPECTION
+
+
+class TestExtractSpecificTarget:
+    @pytest.mark.parametrize("text,expected_substr", [
+        ("jelaskan api /upload", "/upload"),
+        ("explain endpoint /users/profile", "/users/profile"),
+        ("explain function process_payment", "process_payment"),
+        ("jelaskan method handle_request di agent.py", "handle_request"),
+        ("explain class UserModel", "UserModel"),
+    ])
+    def test_extracts_target(self, text, expected_substr):
+        target = extract_specific_target(text)
+        assert expected_substr in target, (
+            f"extract_specific_target({text!r}) = {target!r}, expected to contain {expected_substr!r}"
+        )
+
+    def test_no_target_returns_empty(self):
+        result = extract_specific_target("ada api apa saja?")
+        assert result == ""
+
+
+# ── Q/A Intent labels ─────────────────────────────────────────────────────────
+
+class TestQAIntentLabels:
+    def test_all_non_full_inspection_intents_have_label(self):
+        for intent in QAIntent:
+            if intent == QAIntent.FULL_INSPECTION:
+                continue
+            assert intent in _QA_INTENT_LABELS, f"{intent} missing from _QA_INTENT_LABELS"
+            assert _QA_INTENT_LABELS[intent], f"{intent} has empty label"
+
+    def test_full_inspection_not_in_labels(self):
+        assert QAIntent.FULL_INSPECTION not in _QA_INTENT_LABELS
+
+
+# ── Q/A flow routing ─────────────────────────────────────────────────────────
+
+class TestRunQAFlow:
+    def _make_agent_with_qa_mock(self, llm_response: str):
+        agent = _make_agent()
+        agent._llm = _make_llm_mock(returns=llm_response)
+        return agent
+
+    def test_run_routes_to_qa_flow_for_api_question(self):
+        """run() must call _run_qa_flow (not _run_inspection_task) for API questions."""
+        agent = self._make_agent_with_qa_mock("📡 API answer here")
+        qa_flow_called = []
+
+        async def fake_qa_flow(task, repo_path, req):
+            qa_flow_called.append(True)
+            task.mark_done("📡 API answer")
+            return task
+
+        async def fake_inspection(task, repo_path, req):
+            raise AssertionError("Inspection should NOT be called for Q/A intent")
+
+        with patch.object(agent, "_resolve_repo", return_value=Path("/tmp/fake_repo")):
+            with patch.object(agent, "_checkout_branch", new=AsyncMock()):
+                with patch.object(agent, "_run_qa_flow", side_effect=fake_qa_flow):
+                    with patch.object(agent, "_run_inspection_task", side_effect=fake_inspection):
+                        with patch.object(agent, "_extract_request",
+                                          return_value=InspectionRequest(
+                                              repo_url="https://github.com/x/y",
+                                              branch="main",
+                                          )):
+                            task = _make_task("ada api apa saja di repo ini?")
+                            asyncio.get_event_loop().run_until_complete(agent.run(task))
+
+        assert qa_flow_called, "_run_qa_flow was not called for API Q/A question"
+
+    def test_run_routes_to_inspection_for_bug_report(self):
+        """run() must call _run_inspection_task (not _run_qa_flow) for bug reports."""
+        agent = self._make_agent_with_qa_mock("Inspection report")
+        inspection_called = []
+
+        async def fake_inspection(task, repo_path, req):
+            inspection_called.append(True)
+            task.mark_done("Inspection done")
+            return task
+
+        async def fake_qa(task, repo_path, req):
+            raise AssertionError("Q/A flow should NOT be called for bug report")
+
+        with patch.object(agent, "_resolve_repo", return_value=Path("/tmp/fake_repo")):
+            with patch.object(agent, "_checkout_branch", new=AsyncMock()):
+                with patch.object(agent, "_run_inspection_task", side_effect=fake_inspection):
+                    with patch.object(agent, "_run_qa_flow", side_effect=fake_qa):
+                        with patch.object(agent, "_extract_request",
+                                          return_value=InspectionRequest(
+                                              repo_url="https://github.com/x/y",
+                                              branch="main",
+                                          )):
+                            task = _make_task("ada bug di payment service, error 500")
+                            asyncio.get_event_loop().run_until_complete(agent.run(task))
+
+        assert inspection_called, "_run_inspection_task was not called for bug report"
+
+    def test_qa_mode_stored_in_pending_confirmation(self):
+        """When no branch given, qa_mode and qa_intent must be saved in pending dict."""
+        from src.agents.developer_inspector import agent as agent_module
+
+        agent_obj = _make_agent()
+        agent_obj._llm = _make_llm_mock(returns="irrelevant")
+        original_pending = dict(agent_module._inspector_pending_confirmations)
+
+        try:
+            with patch.object(agent_obj, "_resolve_repo", return_value=Path("/tmp/r")):
+                with patch.object(agent_obj, "_get_current_branch",
+                                   new=AsyncMock(return_value="main")):
+                    with patch.object(agent_obj, "_extract_request",
+                                       return_value=InspectionRequest(
+                                           repo_url="https://github.com/x/y",
+                                           branch="",  # no branch → forces pending
+                                       )):
+                        task = _make_task("ada api apa saja?")
+                        asyncio.get_event_loop().run_until_complete(agent_obj.run(task))
+
+            # The pending entry for this session must contain qa_mode / qa_intent
+            pending = agent_module._inspector_pending_confirmations.get(task.session_id, {})
+            assert pending.get("qa_mode") is True, "qa_mode not stored in pending"
+            assert pending.get("qa_intent") == QAIntent.API_ENDPOINTS.value, (
+                f"qa_intent mismatch: {pending.get('qa_intent')!r}"
+            )
+        finally:
+            agent_module._inspector_pending_confirmations.clear()
+            agent_module._inspector_pending_confirmations.update(original_pending)

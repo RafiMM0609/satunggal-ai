@@ -49,6 +49,12 @@ from src.tools.git_utils import (
     is_gitlab_url       as _is_gitlab_url,
     repo_name_from_url  as _repo_name_from_url,
 )
+from src.tools.repo_qa import (
+    QAIntent,
+    classify_intent,
+    extract_specific_target,
+    run_qa_extraction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +204,45 @@ Verifikasi setiap temuan dalam laporan terhadap evidence di atas. \
 Perbarui status [CONFIRMED/LIKELY/UNVERIFIED] dan tambahkan/perbaiki kutipan bukti.
 """
 
+# ── Q/A mode LLM prompt ───────────────────────────────────────────────────────
+
+_QA_SYSTEM_PROMPT = """\
+Kamu adalah **Asisten Analisis Repositori** yang menjawab pertanyaan langsung
+tentang sebuah codebase berdasarkan data yang diekstrak dari repositori.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️  ATURAN KRITIS – ANTI-HALUSINASI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Jawab HANYA berdasarkan data repositori yang diberikan.
+2. Setiap poin jawaban HARUS disertai sumber: nama file + nomor baris jika ada.
+3. Gunakan label:
+   - 🟢 **[CONFIRMED]** – ditemukan langsung dalam kode.
+   - 🟡 **[LIKELY]** – dapat disimpulkan dari konteks.
+   - 🔴 **[UNVERIFIED]** – tidak ada bukti langsung, tulis ini jika harus menduga.
+4. Jika data tidak cukup, tulis **[DATA TIDAK CUKUP]** dan jelaskan apa yang perlu diperiksa.
+5. DILARANG mengarang detail yang tidak ada dalam data.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Format jawaban:
+
+## 💬 Jawaban
+<Jawaban langsung dan padat, 2-5 kalimat>
+
+## 📋 Detail & Bukti
+<Daftar poin dengan sumber file:baris dan kutipan kode>
+
+## 🗺️ Lokasi di Repo
+<Tabel ringkas: nama/path | file | baris | status>
+
+## 💡 Catatan Tambahan
+<Hal-hal penting yang relevan dengan pertanyaan>
+
+**Format:**
+- Gunakan bahasa yang sama dengan pertanyaan pengguna.
+- Singkat dan faktual, tidak perlu struktur laporan inspeksi penuh.
+- Jangan tampilkan template kosong jika tidak ada konten.
+"""
+
 # ── Extract prompt ─────────────────────────────────────────────────────────────
 
 _EXTRACT_PROMPT = """\
@@ -219,10 +264,14 @@ Pesan pengguna: {user_input}
 # ── Pydantic schema untuk parsing LLM extract ─────────────────────────────────
 
 class InspectionRequest(BaseModel):
-    repo_url: str       = ""
-    problem:  str       = ""
-    keywords: list[str] = []
-    branch:   str       = ""
+    repo_url:   str       = ""
+    problem:    str       = ""
+    keywords:   list[str] = []
+    branch:     str       = ""
+    # Q/A mode: diisi oleh agent berdasarkan classify_intent(), bukan oleh LLM extractor.
+    qa_mode:    bool      = False
+    qa_intent:  str       = ""    # nilai QAIntent
+    verbosity:  str       = "detailed"  # detailed | concise
 
 # ── Branch confirmation state (per session, in-process) ─────────────────────
 #
@@ -231,6 +280,9 @@ class InspectionRequest(BaseModel):
 # resumes on the next message from the stored pending state.
 
 _inspector_pending_confirmations: dict[str, dict] = {}
+
+# Q/A pending confirmations: digunakan saat branch belum diketahui pada Q/A mode
+_qa_pending_confirmations: dict[str, dict] = {}
 
 _CONFIRMATION_ANSWERS = {
     "ya", "yes", "ok", "lanjutkan", "continue", "iya",
@@ -250,6 +302,27 @@ def _resolve_branch_from_reply(user_input: str, detected_branch: str) -> str | N
     if len(clean) <= 100 and " " not in clean and re.match(r"^[\w\-./]+$", clean):
         return clean
     return None
+
+# ── Q/A Intent display labels ─────────────────────────────────────────────────────
+
+_QA_INTENT_LABELS: dict["QAIntent", str] = {}
+
+
+def _build_qa_intent_labels() -> None:
+    """Populate _QA_INTENT_LABELS lazily after QAIntent is imported."""
+    _QA_INTENT_LABELS.update({
+        QAIntent.API_ENDPOINTS:   "📡 API Endpoints",
+        QAIntent.TECH_STACK:      "🛠️ Tech Stack",
+        QAIntent.DATA_MODELS:     "🗃️ Data Models",
+        QAIntent.DEPENDENCIES:    "📦 Dependencies",
+        QAIntent.CI_CD:           "🚀 CI/CD",
+        QAIntent.SECURITY:        "🔐 Security",
+        QAIntent.MAIN_FLOW:       "🔄 Main Flow",
+        QAIntent.SPECIFIC_SYMBOL: "🔍 Symbol Q/A",
+    })
+
+
+_build_qa_intent_labels()
 
 # ── Agent ──────────────────────────────────────────────────────────────────────
 
@@ -628,6 +701,134 @@ class DeveloperInspectorAgent(BaseAgent):
             if content.strip()
         )
 
+    async def _fetch_tavily_context(self, query: str) -> str:
+        """Attempt to fetch web research context from Tavily.
+
+        Returns an empty string on any failure (missing API key, network, etc.).
+        """
+        try:
+            from src.tools.tavily_search import TavilySearchTool  # type: ignore
+
+            tool = TavilySearchTool()
+            resp = await tool.search(query)
+            ctx = resp.as_context_text()
+            return ctx or ""
+        except Exception as exc:  # pragma: no cover - best-effort external call
+            logger.debug("Tavily fetch failed or unavailable: %s", exc)
+            return ""
+
+    async def _run_qa_flow(
+        self,
+        task:      AgentTask,
+        repo_path: Path,
+        req:       InspectionRequest,
+    ) -> AgentTask:
+        """
+        Q/A mode: jawab pertanyaan spesifik user secara langsung dan ringkas.
+
+        Flow:
+          1. Jalankan extractor yang sesuai intent (API, tech, model, dll.).
+          2. Sertakan RAG file relevan sebagai konteks tambahan.
+          3. Kirim ke LLM dengan prompt Q/A (bukan template inspeksi penuh).
+          4. Kembalikan jawaban langsung tanpa template laporan.
+        """
+        try:
+            intent = QAIntent(req.qa_intent) if req.qa_intent else QAIntent.FULL_INSPECTION
+            logger.info(
+                "Inspector Q/A: intent=%s repo=%s problem=%r",
+                intent, repo_path, req.problem,
+            )
+            t_start = time.monotonic()
+
+            # Run topic extractor + RAG concurrently
+            qa_evidence_task = asyncio.create_task(
+                run_qa_extraction(repo_path, intent, req.problem or task.user_input)
+            )
+            rag_task = asyncio.create_task(
+                self._read_relevant_files(repo_path, req.problem or task.user_input)
+            )
+            tavily_task = asyncio.create_task(
+                self._fetch_tavily_context(req.problem or task.user_input)
+            )
+            dir_tree_task = asyncio.create_task(
+                self._get_dir_tree(repo_path)
+            )
+
+            qa_evidence, rag_files, tavily_ctx, dir_tree = await asyncio.gather(
+                qa_evidence_task, rag_task, tavily_task, dir_tree_task,
+                return_exceptions=True,
+            )
+
+            def _safe_str(r: object, fallback: str) -> str:
+                return str(r) if not isinstance(r, Exception) else fallback
+
+            evidence: dict[str, str] = {}
+
+            # Primary: topic-specific extraction
+            if isinstance(qa_evidence, dict):
+                evidence.update(qa_evidence)
+            else:
+                evidence["Extraction Error"] = str(qa_evidence)
+
+            # Secondary: RAG-relevant files as additional context
+            rag_text = _safe_str(rag_files, "(RAG unavailable)")
+            if rag_text.strip() and "unavailable" not in rag_text and "error" not in rag_text.lower():
+                evidence["📂 File Relevan (RAG)"] = rag_text
+
+            # Tertiary: directory tree for structural context
+            tree = _safe_str(dir_tree, "")
+            if tree.strip():
+                evidence["🗂️ Struktur Direktori"] = tree
+
+            # Optional: Tavily web search context for broader research
+            tavily_text = _safe_str(tavily_ctx, "")
+            if tavily_text.strip() and "hasil pencarian" in tavily_text.lower():
+                evidence["🔎 Pencarian Web (Tavily)"] = tavily_text
+
+            t_extract = time.monotonic()
+            logger.info("Inspector Q/A: extraction done in %.2fs", t_extract - t_start)
+
+            # Build Q/A LLM prompt
+            evidence_text = self._build_evidence_text(evidence)
+            verbosity_note = (
+                "Jawab secara SINGKAT dan padat (maksimal 10 poin)."
+                if req.verbosity == "concise"
+                else "Jawab secara LENGKAP dengan detail dan contoh kode bila ada."
+            )
+            user_msg = (
+                f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
+                f"**Panduan verbositas:** {verbosity_note}\n\n"
+                f"---\n\n"
+                f"**Data dari repositori:**\n\n{evidence_text}"
+            )
+
+            qa_response = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _QA_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=INSPECTOR_TEMPERATURE,
+                top_p=INSPECTOR_TOP_P,
+            )
+
+            t_total = time.monotonic() - t_start
+            logger.info("Inspector Q/A: done in %.2fs total", t_total)
+
+            branch_note = f"🌿 **Branch:** `{req.branch}`\n\n" if req.branch else ""
+            intent_badge = _QA_INTENT_LABELS.get(intent, "💬 Q/A")
+            perf_footer = (
+                f"\n\n---\n"
+                f"⏱️ *{intent_badge} · {t_total:.1f}s "
+                f"(ekstraksi: {t_extract - t_start:.1f}s)*"
+            )
+            task.mark_done(branch_note + qa_response.strip() + perf_footer)
+
+        except Exception as exc:
+            logger.exception("Inspector Q/A flow error: %s", exc)
+            task.mark_failed(f"❌ Q/A gagal: {exc}")
+
+        return task
+
     async def _run_inspection_llm(
         self,
         user_input: str,
@@ -680,7 +881,7 @@ class DeveloperInspectorAgent(BaseAgent):
 
     async def run(self, task: AgentTask) -> AgentTask:
         try:
-            logger.info("DeveloperInspectorAgent: starting inspection for session=%s", task.session_id)
+            logger.info("DeveloperInspectorAgent: starting for session=%s", task.session_id)
 
             # ── Check for pending branch confirmation ──────────────────────
             pending = _inspector_pending_confirmations.get(task.session_id)
@@ -697,68 +898,90 @@ class DeveloperInspectorAgent(BaseAgent):
                         problem=pending["problem"],
                         keywords=pending["keywords"],
                         branch=branch_choice,
+                        qa_mode=pending.get("qa_mode", False),
+                        qa_intent=pending.get("qa_intent", ""),
+                        verbosity=pending.get("verbosity", "detailed"),
                     )
+                    if req.qa_mode and req.qa_intent:
+                        return await self._run_qa_flow(task, repo_path, req)
                     return await self._run_inspection_task(task, repo_path, req)
                 # Not a recognizable confirmation – fall through to normal parse.
 
-            # ── Step 1: Extract structured request ────────────────────────
+            # ── Step 1: Classify intent FIRST (fast, no LLM call) ─────────
+            intent = classify_intent(task.user_input)
+            is_qa  = (intent != QAIntent.FULL_INSPECTION)
+            logger.info("Inspector: intent=%s qa_mode=%s", intent.value, is_qa)
+
+            # ── Step 2: Extract structured request ────────────────────────
             req = await self._extract_request(task.user_input)
+            req.qa_mode   = is_qa
+            req.qa_intent = intent.value if is_qa else ""
+
+            lower = task.user_input.lower()
+            if any(w in lower for w in ["singkat", "brief", "concise", "ringkas"]):
+                req.verbosity = "concise"
+
             logger.info(
-                "Inspector: repo_url=%r problem=%r keywords=%s branch=%r",
-                req.repo_url, req.problem, req.keywords, req.branch,
+                "Inspector: repo_url=%r problem=%r keywords=%s branch=%r intent=%s",
+                req.repo_url, req.problem, req.keywords, req.branch, intent.value,
             )
 
-            # ── Step 2: Resolve local repo path ───────────────────────────
+            # ── Step 3: Resolve local repo path ───────────────────────────
             repo_path = await self._resolve_repo(req.repo_url)
 
             if repo_path is None:
-                # No repo available – do a pure LLM analysis on the description.
-                logger.info("Inspector: no local repo – proceeding with description-only analysis.")
-                evidence = {
-                    "Deskripsi Masalah dari Pengguna": task.user_input,
-                }
+                # No repo – answer from description only (inspection-style).
+                logger.info("Inspector: no local repo – description-only analysis.")
                 warning = (
                     "\n\n> ⚠️ **Catatan:** Tidak ada repositori yang dapat diakses "
                     "(URL tidak diberikan atau tidak ada repo yang sebelumnya di-clone). "
                     "Analisis ini didasarkan pada deskripsi pengguna saja.\n"
                 )
-                report = await self._run_inspection_llm(
-                    task.user_input,
-                    req.problem or task.user_input,
-                    evidence,
+                evidence = {"Deskripsi dari Pengguna": task.user_input}
+                report   = await self._run_inspection_llm(
+                    task.user_input, req.problem or task.user_input, evidence,
                 )
                 task.mark_done(report + warning)
                 return task
 
-            # ── Branch selection ───────────────────────────────────────────
+            # ── Step 4: Branch selection ───────────────────────────────────
             if req.branch:
-                # Branch explicitly mentioned → checkout immediately.
                 await self._checkout_branch(repo_path, req.branch)
+                if req.qa_mode:
+                    return await self._run_qa_flow(task, repo_path, req)
                 return await self._run_inspection_task(task, repo_path, req)
-            else:
-                # No branch specified → detect current branch and ask client.
-                detected_branch = await self._get_current_branch(repo_path)
-                _inspector_pending_confirmations[task.session_id] = {
-                    "repo_url":        req.repo_url,
-                    "repo_path":       str(repo_path),
-                    "problem":         req.problem,
-                    "keywords":        req.keywords,
-                    "detected_branch": detected_branch,
-                }
-                task.mark_done(
-                    f"⚠️ **Branch tidak ditentukan dalam permintaan.**\n\n"
-                    f"Repository berhasil diakses. Branch aktif saat ini adalah: **`{detected_branch}`**\n\n"
-                    f"Inspeksi akan dijalankan pada branch **`{detected_branch}`**.\n\n"
-                    f"Balas **`lanjutkan`** untuk melanjutkan pada branch ini, "
-                    f"atau ketik nama branch yang diinginkan "
-                    f"(contoh: `develop`, `feature/my-feature`)."
-                )
-                return task
+
+            # No branch specified → detect and ask for confirmation.
+            detected_branch = await self._get_current_branch(repo_path)
+            _inspector_pending_confirmations[task.session_id] = {
+                "repo_url":        req.repo_url,
+                "repo_path":       str(repo_path),
+                "problem":         req.problem,
+                "keywords":        req.keywords,
+                "detected_branch": detected_branch,
+                "qa_mode":         req.qa_mode,
+                "qa_intent":       req.qa_intent,
+                "verbosity":       req.verbosity,
+            }
+            mode_label = (
+                f"mode **Q/A** (`{_QA_INTENT_LABELS.get(intent, intent.value)}`)"
+                if req.qa_mode
+                else "mode **Inspeksi Penuh**"
+            )
+            task.mark_done(
+                f"⚠️ **Branch tidak ditentukan dalam permintaan.**\n\n"
+                f"Repository berhasil diakses. Branch aktif saat ini: **`{detected_branch}`**\n\n"
+                f"Akan dijalankan dalam {mode_label} pada branch **`{detected_branch}`**.\n\n"
+                f"Balas **`lanjutkan`** untuk melanjutkan, "
+                f"atau ketik nama branch yang diinginkan "
+                f"(contoh: `develop`, `feature/my-feature`)."
+            )
+            return task
 
         except Exception as exc:
             logger.exception("DeveloperInspectorAgent: unexpected error: %s", exc)
             task.mark_failed(
-                f"❌ Inspeksi gagal karena error tidak terduga: {exc}\n\n"
+                f"❌ Gagal karena error tidak terduga: {exc}\n\n"
                 "Mohon periksa log untuk detail lebih lanjut."
             )
 
