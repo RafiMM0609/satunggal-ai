@@ -14,14 +14,16 @@ import sys
 from src.interfaces.config import Config
 from src.interfaces.telegram_bot import build_application
 from src.interfaces.webhook import run_webhook
+from src.tools.log_buffer import LogBufferHandler
 
 
 def setup_logging() -> None:
+    log_buffer_handler = LogBufferHandler()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(name)s — %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        handlers=[logging.StreamHandler(sys.stdout), log_buffer_handler],
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)

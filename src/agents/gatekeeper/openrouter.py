@@ -36,6 +36,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - code_inspection    (user wants to INSPECT a repo, find bugs/issues/root causes, review code quality — read-only, NO code changes)
 - document_creation  (user wants to generate a technical document, PDF, or Word file — from a GitHub repo, topic, or data such as WBS/mandays output)
 - system_info        (user asks about server/host resource status: CPU usage, RAM, memory, storage, disk space, hardware info of this machine)
+- log_viewer         (user wants to see, inspect, or debug the bot's recent application logs)
 - unknown
 
 Pre-agent tools the orchestrator can execute before the specialist agent:
@@ -77,6 +78,11 @@ Rules:
       info hardware server, penggunaan CPU, penggunaan memori, berapa banyak RAM, lihat storage, cek resource
     - English: check CPU, how much RAM, disk space, storage info, server resource, memory usage, CPU usage, hardware info server
     - Key differentiator: user wants LIVE metrics of THIS machine. If user asks about cloud billing or a remote server by URL → general_inquiry.
+14. Use "log_viewer" when the user wants to see, read, or debug the bot's recent log output:
+    - Indonesian: lihat log, tampilkan log, cek log, log bot, log error, log terbaru, debug log, tampilkan 20 log, log terakhir,
+      lihat log terakhir, beri tahu log, tunjukkan log, log aplikasi, lihat catatan log
+    - English: show log, view log, check log, bot log, recent log, last log lines, debug log, show me the logs, display logs,
+      application log, log output, what does the log say, show last 10 lines of log
 
 Example responses:
   {"intent": "data_analysis",    "confidence": 0.97, "tools": []}
@@ -86,6 +92,7 @@ Example responses:
   {"intent": "code_inspection",   "confidence": 0.95, "tools": []}
   {"intent": "document_creation", "confidence": 0.95, "tools": []}
   {"intent": "system_info",       "confidence": 0.97, "tools": []}
+  {"intent": "log_viewer",        "confidence": 0.98, "tools": []}
   {"intent": "general_inquiry",   "confidence": 0.88, "tools": []}
 """
 

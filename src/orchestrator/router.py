@@ -41,6 +41,7 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.CODE_INSPECTION:   "developer_inspector",  #← read-only inspect + root cause
     IntentCategory.DOCUMENT_CREATION: "technical_writer",     #← generate PDF/Word dari repo/topik
     IntentCategory.SYSTEM_INFO:       "sysinfo_agent",        #← CPU / RAM / storage host info
+    IntentCategory.LOG_VIEWER:        "log_viewer_agent",     #← tampilkan log bot untuk debugging
 }
 
 
