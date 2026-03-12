@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -59,6 +60,7 @@ from src.tools.git_utils import (
     is_gitlab_url       as _is_gitlab_url,
     repo_name_from_url  as _repo_name_from_url,
 )
+from src.memory.repo_tracker import RepoTracker
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +304,7 @@ class TechnicalWriterAgent(BaseAgent):
         self._gitlab_pat   = _settings.gitlab_pat
         self._repos_dir    = Path(_settings.sandbox_repos_dir).expanduser()
         self._repos_dir.mkdir(parents=True, exist_ok=True)
+        self._tracker      = RepoTracker()
 
     async def run(self, task: AgentTask) -> AgentTask:
         task.mark_processing(self.name)
@@ -486,12 +489,56 @@ class TechnicalWriterAgent(BaseAgent):
 
         # ── Langkah 5: buat tracking branch baru dari remote ─────────────────
         result = await cli.run(f"git checkout -b {branch} origin/{branch}")
-        if not result.succeeded:
+        if result.succeeded:
+            logger.info("TechnicalWriterAgent: checked out remote branch '%s'", branch)
+            return
+
+        # ── Langkah 6: hapus repo & clone ulang langsung ke branch ───────────
+        # Semua strategi checkout gagal. Hapus direktori repo yang ada, hapus
+        # record database supaya tidak terjadi konflik, lalu clone ulang
+        # langsung ke branch yang diminta.
+        if not repo_url:
             raise RuntimeError(
                 f"Branch '{branch}' tidak ditemukan di lokal maupun remote:\n"
                 f"{(result.stderr or '')[:400]}"
             )
-        logger.info("TechnicalWriterAgent: checked out remote branch '%s'", branch)
+
+        logger.warning(
+            "TechnicalWriterAgent: semua strategi checkout gagal untuk branch '%s', "
+            "menghapus repo dan melakukan clone ulang.",
+            branch,
+        )
+        try:
+            shutil.rmtree(repo_path)
+        except OSError as rm_exc:
+            logger.warning(
+                "TechnicalWriterAgent: gagal menghapus direktori repo '%s': %s",
+                repo_path, rm_exc,
+            )
+
+        # Hapus record dari database agar tidak terjadi error pada akses berikutnya.
+        try:
+            await asyncio.to_thread(self._tracker.delete_by_url, repo_url)
+        except Exception as del_exc:
+            logger.warning(
+                "TechnicalWriterAgent: gagal hapus DB record (diabaikan): %s", del_exc
+            )
+
+        _pat     = self._gitlab_pat if _is_gitlab_url(repo_url) else self._github_pat
+        auth_url = _inject_pat_into_url(repo_url, _pat)
+        cli_base = CLIExecutor(work_dir=repo_path.parent, timeout=120)
+        clone = await cli_base.run(
+            f"git clone -b {branch} {auth_url} {repo_path.name}"
+        )
+        if clone.succeeded:
+            logger.info(
+                "TechnicalWriterAgent: clone ulang ke branch '%s' berhasil", branch
+            )
+            return
+        raise RuntimeError(
+            f"Branch '{branch}' tidak ditemukan di lokal maupun remote "
+            f"(clone ulang juga gagal):\n{(clone.stderr or '')[:400]}"
+        )
 
     # ── Build document (round 2 & 3) ─────────────────────────────────────────
 
