@@ -25,6 +25,7 @@ class IntentCategory(str, Enum):
     CODE_INSPECTION    = "code_inspection"   # inspeksi repo, temukan akar masalah, beri rekomendasi (read-only)
     DOCUMENT_CREATION  = "document_creation" # buat dokumen teknis PDF/Word dari repo atau topik
     SYSTEM_INFO        = "system_info"        # tanya info CPU, RAM, storage server
+    LOG_VIEWER         = "log_viewer"         # lihat log bot untuk debugging
     UNKNOWN            = "unknown"
 
 

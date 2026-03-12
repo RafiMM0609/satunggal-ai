@@ -73,6 +73,7 @@ def _get_pipeline():
     from src.agents.developer_inspector.agent import DeveloperInspectorAgent
     from src.agents.gatekeeper.agent import GatekeeperAgent
     from src.agents.llm_client import LLMClient
+    from src.agents.log_viewer_agent.agent import LogViewerAgent
     from src.agents.mandays_agent.agent import MandaysAgent
     from src.agents.researcher.agent import ResearcherAgent
     from src.agents.responder.agent import ResponderAgent
@@ -120,6 +121,7 @@ def _get_pipeline():
         "developer_inspector": DeveloperInspectorAgent(_llm),
         "technical_writer":    TechnicalWriterAgent(_history, _llm),
         "sysinfo_agent":       SysInfoAgent(_history, _llm),
+        "log_viewer_agent":    LogViewerAgent(_history, _llm),
     }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
