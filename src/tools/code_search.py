@@ -30,11 +30,15 @@ logger = logging.getLogger(__name__)
 MIN_SCORE = 0.05
 
 # Extensions processed per language.
-_PY_EXTS  = {".py"}
-_JS_EXTS  = {".js", ".jsx", ".mjs", ".cjs"}
-_TS_EXTS  = {".ts", ".tsx"}
-_VUE_EXTS = {".vue", ".svelte"}
-_ALL_EXTS = _PY_EXTS | _JS_EXTS | _TS_EXTS | _VUE_EXTS
+_PY_EXTS   = {".py"}
+_JS_EXTS   = {".js", ".jsx", ".mjs", ".cjs"}
+_TS_EXTS   = {".ts", ".tsx"}
+_VUE_EXTS  = {".vue", ".svelte"}
+_GO_EXTS   = {".go"}
+_PROTO_EXT = {".proto"}
+
+# Include Go and proto files so the inspector can find Go REST endpoints
+_ALL_EXTS = _PY_EXTS | _JS_EXTS | _TS_EXTS | _VUE_EXTS | _GO_EXTS | _PROTO_EXT
 
 # Paths/dirs to skip during traversal.
 _SKIP_DIRS = {
@@ -102,6 +106,10 @@ _RE_JS_DEF   = re.compile(r"(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=|cl
 _RE_IMPORT   = re.compile(r'(?:import|from)\s+["\']?(\w[\w./]*)["\']?', re.MULTILINE)
 _RE_VUE_SCRIPT = re.compile(r"<script[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
+# Go-specific patterns (simple, regex-based fallback)
+_RE_GO_FUNC   = re.compile(r"^func\s+([A-Za-z_][\w]*)\s*\(", re.MULTILINE)
+_RE_GO_IMPORT = re.compile(r'import\s+(?:\((.*?)\)|"([^"]+)")', re.DOTALL)
+
 
 def _extract_symbols_regex(text: str, ext: str) -> list[str]:
     """Fallback symbol extractor using regex – no tree-sitter required."""
@@ -121,9 +129,22 @@ def _extract_symbols_regex(text: str, ext: str) -> list[str]:
         for m in _RE_JS_DEF.finditer(inner):
             symbols += [g for g in m.groups() if g]
 
+
+    elif ext in _GO_EXTS:
+        # Extract top-level function names and import paths from Go files.
+        symbols += _RE_GO_FUNC.findall(text)
+        # import blocks may contain multiple lines; extract each quoted path
+        for m in _RE_GO_IMPORT.finditer(text):
+            block = m.group(1)
+            single = m.group(2)
+            if single:
+                symbols.append(single)
+            elif block:
+                # find all quoted import paths inside the block
+                symbols += re.findall(r'"([^"]+)"', block)
+
     # Always add imported module names (useful for task-keyword matching).
     symbols += _RE_IMPORT.findall(text)
-
     return list(set(symbols))
 
 
