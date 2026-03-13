@@ -8,6 +8,8 @@ Provides two main public functions:
       Vue) and return a dict mapping relative path → list of extracted symbols
       (function names, class names, identifiers). Falls back to a fast
       regex-based extractor for any file that tree-sitter cannot parse.
+      Go (.go) and Protobuf (.proto) files are indexed using a regex-based
+      extractor so that routes, handlers, and message types are discoverable.
 
   rank_files_by_relevance(candidates, symbol_index, task)
       Score each candidate file against the task description using TF-IDF
@@ -30,15 +32,13 @@ logger = logging.getLogger(__name__)
 MIN_SCORE = 0.05
 
 # Extensions processed per language.
-_PY_EXTS   = {".py"}
-_JS_EXTS   = {".js", ".jsx", ".mjs", ".cjs"}
-_TS_EXTS   = {".ts", ".tsx"}
-_VUE_EXTS  = {".vue", ".svelte"}
-_GO_EXTS   = {".go"}
-_PROTO_EXT = {".proto"}
-
-# Include Go and proto files so the inspector can find Go REST endpoints
-_ALL_EXTS = _PY_EXTS | _JS_EXTS | _TS_EXTS | _VUE_EXTS | _GO_EXTS | _PROTO_EXT
+_PY_EXTS    = {".py"}
+_JS_EXTS    = {".js", ".jsx", ".mjs", ".cjs"}
+_TS_EXTS    = {".ts", ".tsx"}
+_VUE_EXTS   = {".vue", ".svelte"}
+_GO_EXTS    = {".go"}
+_PROTO_EXTS = {".proto"}
+_ALL_EXTS   = _PY_EXTS | _JS_EXTS | _TS_EXTS | _VUE_EXTS | _GO_EXTS | _PROTO_EXTS
 
 # Paths/dirs to skip during traversal.
 _SKIP_DIRS = {
@@ -101,14 +101,18 @@ def _ext_to_lang(ext: str) -> Optional[str]:
 # ── Symbol extractors ─────────────────────────────────────────────────────────
 
 # Compiled regex patterns for the fallback extractor.
-_RE_PY_DEF   = re.compile(r"^(?:def|class|async def)\s+(\w+)", re.MULTILINE)
-_RE_JS_DEF   = re.compile(r"(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=|class\s+(\w+))", re.MULTILINE)
-_RE_IMPORT   = re.compile(r'(?:import|from)\s+["\']?(\w[\w./]*)["\']?', re.MULTILINE)
+_RE_PY_DEF     = re.compile(r"^(?:def|class|async def)\s+(\w+)", re.MULTILINE)
+_RE_JS_DEF     = re.compile(r"(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=|class\s+(\w+))", re.MULTILINE)
+_RE_IMPORT     = re.compile(r'(?:import|from)\s+["\']?(\w[\w./]*)["\']?', re.MULTILINE)
 _RE_VUE_SCRIPT = re.compile(r"<script[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
 
-# Go-specific patterns (simple, regex-based fallback)
-_RE_GO_FUNC   = re.compile(r"^func\s+([A-Za-z_][\w]*)\s*\(", re.MULTILINE)
-_RE_GO_IMPORT = re.compile(r'import\s+(?:\((.*?)\)|"([^"]+)")', re.DOTALL)
+# Go: match top-level func declarations and import paths.
+# Import regex matches both single-import lines and aliased imports inside import blocks.
+_RE_GO_DEF    = re.compile(r"^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(", re.MULTILINE)
+_RE_GO_IMPORT = re.compile(r'^\s*(?:\w+\s+)?"([\w./]+)"', re.MULTILINE)
+
+# Proto: match message, service, rpc, and enum declarations (may be indented).
+_RE_PROTO_DEF = re.compile(r"(?:^|\s)(?:message|service|rpc|enum)\s+(\w+)", re.MULTILINE)
 
 
 def _extract_symbols_regex(text: str, ext: str) -> list[str]:
@@ -129,22 +133,19 @@ def _extract_symbols_regex(text: str, ext: str) -> list[str]:
         for m in _RE_JS_DEF.finditer(inner):
             symbols += [g for g in m.groups() if g]
 
-
     elif ext in _GO_EXTS:
-        # Extract top-level function names and import paths from Go files.
-        symbols += _RE_GO_FUNC.findall(text)
-        # import blocks may contain multiple lines; extract each quoted path
-        for m in _RE_GO_IMPORT.finditer(text):
-            block = m.group(1)
-            single = m.group(2)
-            if single:
-                symbols.append(single)
-            elif block:
-                # find all quoted import paths inside the block
-                symbols += re.findall(r'"([^"]+)"', block)
+        # Extract function names and imported package paths.
+        symbols += _RE_GO_DEF.findall(text)
+        symbols += _RE_GO_IMPORT.findall(text)
+
+    elif ext in _PROTO_EXTS:
+        # Extract message, service, rpc, and enum names.
+        symbols += _RE_PROTO_DEF.findall(text)
 
     # Always add imported module names (useful for task-keyword matching).
-    symbols += _RE_IMPORT.findall(text)
+    if ext not in _GO_EXTS | _PROTO_EXTS:
+        symbols += _RE_IMPORT.findall(text)
+
     return list(set(symbols))
 
 

@@ -706,3 +706,113 @@ class TestRunQAFlow:
         finally:
             agent_module._inspector_pending_confirmations.clear()
             agent_module._inspector_pending_confirmations.update(original_pending)
+
+
+# ── code_search Go/Proto indexing ─────────────────────────────────────────────
+
+class TestCodeSearchGoProto:
+    """Validate that build_ast_index indexes .go and .proto files."""
+
+    def test_go_extension_in_all_exts(self):
+        from src.tools.code_search import _ALL_EXTS
+        assert ".go" in _ALL_EXTS, ".go must be in _ALL_EXTS"
+
+    def test_proto_extension_in_all_exts(self):
+        from src.tools.code_search import _ALL_EXTS
+        assert ".proto" in _ALL_EXTS, ".proto must be in _ALL_EXTS"
+
+    def test_go_functions_extracted(self):
+        from src.tools.code_search import _extract_symbols_regex
+        go_source = textwrap.dedent("""\
+            package main
+
+            import (
+                "net/http"
+                "github.com/gorilla/mux"
+            )
+
+            func RegisterRoutes(r *mux.Router) {
+                r.HandleFunc("/users", GetUsers).Methods("GET")
+            }
+
+            func GetUsers(w http.ResponseWriter, r *http.Request) {
+                // handler body
+            }
+        """)
+        symbols = _extract_symbols_regex(go_source, ".go")
+        assert "RegisterRoutes" in symbols
+        assert "GetUsers" in symbols
+
+    def test_go_imports_extracted(self):
+        from src.tools.code_search import _extract_symbols_regex
+        go_source = textwrap.dedent("""\
+            package routes
+
+            import (
+                "net/http"
+                "github.com/gorilla/mux"
+            )
+
+            func Setup() {}
+        """)
+        symbols = _extract_symbols_regex(go_source, ".go")
+        assert "net/http" in symbols
+        assert "github.com/gorilla/mux" in symbols
+
+    def test_go_method_receiver_function_extracted(self):
+        from src.tools.code_search import _extract_symbols_regex
+        go_source = textwrap.dedent("""\
+            package server
+
+            func (s *Server) HandlePing(w http.ResponseWriter) {}
+
+            func NewServer() *Server { return &Server{} }
+        """)
+        symbols = _extract_symbols_regex(go_source, ".go")
+        assert "HandlePing" in symbols, "method receiver function must be extracted"
+        assert "NewServer" in symbols, "regular function must be extracted alongside method receiver"
+
+    def test_proto_messages_extracted(self):
+        from src.tools.code_search import _extract_symbols_regex
+        proto_source = textwrap.dedent("""\
+            syntax = "proto3";
+
+            message UserRequest {
+                string id = 1;
+            }
+
+            message UserResponse {
+                string name = 1;
+            }
+
+            service UserService {
+                rpc GetUser(UserRequest) returns (UserResponse);
+            }
+        """)
+        symbols = _extract_symbols_regex(proto_source, ".proto")
+        assert "UserRequest" in symbols
+        assert "UserResponse" in symbols
+        assert "UserService" in symbols
+        assert "GetUser" in symbols
+
+    def test_build_ast_index_includes_go_file(self, tmp_path):
+        from src.tools.code_search import build_ast_index
+        go_file = tmp_path / "routes.go"
+        go_file.write_text(
+            "package main\n\nfunc SetupRouter() {}\n",
+            encoding="utf-8",
+        )
+        index = build_ast_index(tmp_path)
+        assert "routes.go" in index, "routes.go must be indexed"
+        assert "SetupRouter" in index["routes.go"]
+
+    def test_build_ast_index_includes_proto_file(self, tmp_path):
+        from src.tools.code_search import build_ast_index
+        proto_file = tmp_path / "user.proto"
+        proto_file.write_text(
+            'syntax = "proto3";\nmessage User { string id = 1; }\n',
+            encoding="utf-8",
+        )
+        index = build_ast_index(tmp_path)
+        assert "user.proto" in index, "user.proto must be indexed"
+        assert "User" in index["user.proto"]
