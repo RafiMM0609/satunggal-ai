@@ -62,7 +62,11 @@ def _load_ts_languages() -> dict:
     Returns an empty dict if none are installed, so callers can fall back to
     the regex extractor gracefully.
     """
-    from tree_sitter import Language  # type: ignore
+    try:
+        from tree_sitter import Language  # type: ignore
+    except Exception:
+        logger.debug("code_search: tree-sitter package not available; using regex fallback")
+        return {}
 
     languages: dict = {}
     _candidates = [
@@ -223,30 +227,12 @@ def build_ast_index(repo_path: Path) -> dict[str, list[str]]:
     index:    dict[str, list[str]] = {}
 
     for abs_path in sorted(repo_path.rglob("*")):
-        # Skip dirs and unrecognised extensions.
-        if abs_path.is_dir():
+        # Use helper to read file and obtain skip reasons for diagnostics
+        content, skip_reason = _read_file_with_reason(abs_path, repo_path)
+        if skip_reason is not None:
+            logger.debug("code_search: skipping %s (%s)", abs_path, skip_reason)
             continue
-        if abs_path.suffix.lower() not in _ALL_EXTS:
-            continue
-
-        # Skip paths inside blacklisted directories.
-        parts = set(abs_path.relative_to(repo_path).parts[:-1])
-        if parts & _SKIP_DIRS:
-            continue
-
-        # Skip oversized files (probably generated bundles).
-        try:
-            file_size = abs_path.stat().st_size
-        except OSError:
-            continue
-        if file_size > _MAX_FILE_BYTES:
-            logger.debug("code_search: skipping large file %s (%d B)", abs_path, file_size)
-            continue
-
-        try:
-            text = abs_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
+        text = content
 
         rel_path = abs_path.relative_to(repo_path).as_posix()
         ext      = abs_path.suffix.lower()
@@ -275,6 +261,36 @@ def build_ast_index(repo_path: Path) -> dict[str, list[str]]:
         repo_path,
     )
     return index
+
+
+def _read_file_with_reason(abs_path: Path, repo_path: Path, max_bytes: int = _MAX_FILE_BYTES) -> tuple[str, str | None]:
+    """Try to read a file and return (content, skip_reason).
+
+    If the file should be skipped, content will be an empty string and
+    skip_reason will be a short string explaining why.
+    """
+    try:
+        if abs_path.is_dir():
+            return "", "is_dir"
+        ext = abs_path.suffix.lower()
+        if ext not in _ALL_EXTS:
+            return "", "ext_not_supported"
+        parts = set(abs_path.relative_to(repo_path).parts[:-1])
+        if parts & _SKIP_DIRS:
+            return "", "skip_dir"
+        try:
+            file_size = abs_path.stat().st_size
+        except OSError:
+            return "", "stat_failed"
+        if file_size > _MAX_FILE_BYTES:
+            return "", "too_large"
+        try:
+            text = abs_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return "", "read_error"
+        return text[:max_bytes], None
+    except Exception:
+        return "", "unknown_error"
 
 
 def rank_files_by_relevance(

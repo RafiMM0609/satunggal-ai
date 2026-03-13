@@ -281,20 +281,29 @@ def _format_file_snippet(rel_path: str, content: str, label: str = "") -> str:
 
 # Patterns for route decorators across major frameworks
 _ROUTE_PATTERNS = [
-    # FastAPI / Flask / Starlette
-    r"@(?:app|router|api)\.(get|post|put|patch|delete|options|head|route)\s*\(['\"]([^'\"]+)['\"]",
+    # FastAPI / Flask / Starlette: @app.get("/path")
+    r"@(?:app|router|api)\.(get|post|put|patch|delete|options|head|route)\s*\(\s*['\"]([^'\"]+)['\"]",
     # Django urls.py: path('...', view)
     r"(?:path|re_path|url)\s*\(\s*['\"]([^'\"]+)['\"]",
     # Express.js: app.get('/path', ...) or router.get('/path', ...)
     r"(?:app|router)\.(get|post|put|patch|delete|options|use)\s*\(\s*['\"]([^'\"]+)['\"]",
     # Laravel/Symphony style: @Route("/path")
-    r"@Route\s*\(['\"]([^'\"]+)['\"]",
-    # Go Gin/Mux/Stdlib: r.GET("/path", ...) or router.HandleFunc("/path", ...) or http.HandleFunc("/path", ...)
-    r"(?:r|router|mux|http)\.(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HandleFunc|Handle)\s*\(\s*\"([^\"]+)\"",
+    r"@Route\s*\(\s*['\"]([^'\"]+)['\"]",
     # Spring Boot: @RequestMapping / @GetMapping etc.
     r"@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(?['\"]?([^'\")\s]+)",
+
+    # Go: support many common router patterns including gin, gorilla/mux, stdlib
+    # Examples supported:
+    #   r.HandleFunc("/path", handler)
+    #   http.HandleFunc("/path", handler)
+    #   router.Methods("GET").Path("/path")
+    #   r.GET("/path", handler)   (gin)
+    # Allow single/double quotes and raw backtick strings; allow whitespace/newlines.
+    r"(?:\b(?:r|router|mux|http|engine|gin|e)\b)\.(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HandleFunc|Handle|GET)\s*\(\s*(?:['\"`])([^'\"`]*)['\"`]",
+    r"HandleFunc\s*\(\s*(?:['\"`])([^'\"`]*)['\"`]\s*,",
+    r"\.Methods\s*\(\s*['\"]?([A-Z,\s]+)['\"]?\s*\)\.Path\s*\(\s*(?:['\"`])([^'\"`]*)['\"`]\s*\)",
 ]
-_ROUTE_RE = re.compile("|".join(_ROUTE_PATTERNS), re.MULTILINE)
+_ROUTE_RE = re.compile("|".join(_ROUTE_PATTERNS), re.MULTILINE | re.DOTALL)
 
 _OPENAPI_FILES = {
     "openapi.yaml", "openapi.yml", "openapi.json",
@@ -303,7 +312,7 @@ _OPENAPI_FILES = {
 }
 
 
-async def extract_api_endpoints(repo_path: Path) -> str:
+async def extract_api_endpoints(repo_path: Path, candidate_filenames: list[str] | None = None) -> str:
     """
     Extract semua endpoint/rute HTTP dari repo.
 
@@ -336,10 +345,12 @@ async def extract_api_endpoints(repo_path: Path) -> str:
         if fpath.is_dir() or fpath.suffix not in source_exts:
             continue
         if _should_skip(fpath.relative_to(repo_path).parts):
+            logger.debug("repo_qa: skipping file in skip-dir: %s", fpath)
             continue
         try:
             text = fpath.read_text(errors="replace")
         except OSError:
+            logger.debug("repo_qa: could not read file %s (OSError)", fpath)
             continue
         matches = _ROUTE_RE.findall(text)
         if matches:
@@ -364,20 +375,40 @@ async def extract_api_endpoints(repo_path: Path) -> str:
 
     # 3. Route-specific files
     route_filenames = {
+        # Common routing file names (add Go variants)
         "urls.py", "routes.py", "router.py", "routes.ts", "router.ts",
         "routes.js", "router.js", "api.py", "views.py", "controllers.py",
         "routes.rb", "web.php", "api.php",
+        # Go routing files
+        "routes.go", "router.go", "routing.go", "main.go",
     }
-    for fpath in sorted(repo_path.rglob("*")):
-        if fpath.name not in route_filenames:
-            continue
-        if _should_skip(fpath.relative_to(repo_path).parts):
-            continue
-        content = _read_snippet(fpath)
-        if content:
-            sections.append(_format_file_snippet(
-                str(fpath.relative_to(repo_path)), content, "routing file"
-            ))
+    # Allow caller to inject candidate filenames with higher priority
+    def _route_filename_priority(candidates: set[str] | None) -> list[str]:
+        if not candidates:
+            return sorted(route_filenames)
+        # Candidate filenames first, then defaults (deduped)
+        ordered = []
+        seen = set()
+        for c in list(candidates):
+            if c not in seen:
+                ordered.append(c)
+                seen.add(c)
+        for r in sorted(route_filenames):
+            if r not in seen:
+                ordered.append(r)
+                seen.add(r)
+        return ordered
+    candidates_set = set(candidate_filenames) if candidate_filenames else None
+    for name in _route_filename_priority(candidates_set):
+        for fpath in sorted(repo_path.rglob(name)):
+            if _should_skip(fpath.relative_to(repo_path).parts):
+                logger.debug("repo_qa: skipping route file in skip-dir: %s", fpath)
+                continue
+            content = _read_snippet(fpath)
+            if content:
+                sections.append(_format_file_snippet(
+                    str(fpath.relative_to(repo_path)), content, "routing file"
+                ))
 
     if not sections:
         return "(tidak ditemukan definisi API/route di repositori ini)"
@@ -793,6 +824,8 @@ async def run_qa_extraction(
     repo_path:  Path,
     intent:     QAIntent,
     user_input: str,
+    *,
+    candidate_route_filenames: list[str] | None = None,
 ) -> dict[str, str]:
     """
     Jalankan extractor yang sesuai berdasarkan intent dan kembalikan evidence dict.
@@ -803,7 +836,7 @@ async def run_qa_extraction(
     logger.info("QA extraction: intent=%s repo=%s", intent, repo_path)
 
     _extractor_map: dict[QAIntent, Callable[..., Awaitable[str]]] = {
-        QAIntent.API_ENDPOINTS:  lambda: extract_api_endpoints(repo_path),
+        QAIntent.API_ENDPOINTS:  lambda: extract_api_endpoints(repo_path, candidate_route_filenames),
         QAIntent.TECH_STACK:     lambda: extract_tech_stack(repo_path),
         QAIntent.DATA_MODELS:    lambda: extract_data_models(repo_path),
         QAIntent.DEPENDENCIES:   lambda: extract_dependencies(repo_path),

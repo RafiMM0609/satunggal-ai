@@ -272,6 +272,8 @@ class InspectionRequest(BaseModel):
     qa_mode:    bool      = False
     qa_intent:  str       = ""    # nilai QAIntent
     verbosity:  str       = "detailed"  # detailed | concise
+    # Optional: user-provided candidate routing filenames (e.g. ['routes.go']).
+    candidate_route_filenames: list[str] = []
 
 # ── Branch confirmation state (per session, in-process) ─────────────────────
 #
@@ -742,7 +744,12 @@ class DeveloperInspectorAgent(BaseAgent):
 
             # Run topic extractor + RAG concurrently
             qa_evidence_task = asyncio.create_task(
-                run_qa_extraction(repo_path, intent, req.problem or task.user_input)
+                run_qa_extraction(
+                    repo_path,
+                    intent,
+                    req.problem or task.user_input,
+                    candidate_route_filenames=req.candidate_route_filenames,
+                )
             )
             rag_task = asyncio.create_task(
                 self._read_relevant_files(repo_path, req.problem or task.user_input)
