@@ -34,6 +34,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - content_creation   (user wants to create, write, or draft content for a platform such as LinkedIn, Twitter, blog, etc.)
 - code_development   (user wants to clone a repo, edit/fix code using AI CLI, or run code in a Docker sandbox)
 - code_inspection    (user wants to INSPECT a repo, find bugs/issues/root causes, review code quality — read-only, NO code changes)
+- code_understanding (user wants to UNDERSTAND or EXPLORE a repo: what APIs exist, what tech stack is used, what are the data models, dependencies, CI/CD setup, main flow, or what a specific function/class does)
 - document_creation  (user wants to generate a technical document, PDF, or Word file — from a GitHub repo, topic, or data such as WBS/mandays output)
 - system_info        (user asks about server/host resource status: CPU usage, RAM, memory, storage, disk space, hardware info of this machine)
 - log_viewer         (user wants to see, inspect, or debug the bot's recent application logs)
@@ -66,34 +67,45 @@ Rules:
       diagnosis masalah, lacak bug, inspektor, investigasi kode, apa yang salah di repo, kenapa error, selidiki bug
     - English: inspect repo, review code, find bug, audit code, analyze error, diagnose issue, trace bug, what is wrong in repo,
       why is it failing, code review, root cause analysis, check the code, look at the repo for issues
-    - Key differentiator: user wants FINDINGS and RECOMMENDATIONS (not actual code changes).
-      If user says "perbaiki" / "fix" → code_development. If user says "cari tahu" / "periksa" / "apa yang salah" → code_inspection.
-12. Use "document_creation" when the user asks to generate, create, or compile a technical document in PDF or Word format:
+    - Key differentiator: user wants FINDINGS about PROBLEMS and RECOMMENDATIONS to fix them.
+      If user says "perbaiki" / "fix" → code_development. If user says "cari bug" / "apa yang salah" / "kenapa error" → code_inspection.
+12. Use "code_understanding" when the user wants to LEARN or EXPLORE what is INSIDE a repo — not to find bugs:
+    - Indonesian: ada api apa, tech stack apa, model data apa, dependency apa, alur utama bagaimana, fungsi X itu apa,
+      class apa saja, endpoint apa, teknologi apa yang dipakai, library apa, struktur repo, jelaskan repo ini,
+      apa yang ada di repo, bagaimana cara kerja, kenalkan isi repo, explorasi repo, pelajari repo
+    - English: what APIs are there, what tech stack, what data models, what dependencies, explain the main flow,
+      what does function X do, what is class Y, list all endpoints, what technology is used, explain this repo,
+      explore the repo, what is in this repo, how does it work, walk me through the codebase
+    - Key differentiator: user wants to UNDERSTAND the content/structure of the repo, not diagnose a problem.
+      If user asks "ada API apa?" / "tech stack apa?" / "jelaskan fungsi X" → code_understanding.
+      If user asks "kenapa error?" / "ada bug apa?" → code_inspection.
+13. Use "document_creation" when the user asks to generate, create, or compile a technical document in PDF or Word format:
     - Indonesian: buat dokumen, buat dokumen teknis, generate PDF, buat PDF, buat Word, buat laporan teknis, dokumentasikan, buatkan dokumentasi, buat doc
     - English: generate document, create technical doc, make a PDF, create Word document, document this repo, write technical documentation
     - Even if a repo URL is mentioned, if the primary intent is to produce a document (not to fix/edit code), use "document_creation"
     - Pre-agent tools: include "tavily_search" only if no repo URL is present and additional context from the web would help
-13. Use "system_info" when the user asks about the current resource usage or hardware specs of THIS running server/machine:
+14. Use "system_info" when the user asks about the current resource usage or hardware specs of THIS running server/machine:
     - Indonesian: berapa CPU, cek RAM, info memori, cek storage, disk penuh, berapa sisa disk, status server, resource server,
       info hardware server, penggunaan CPU, penggunaan memori, berapa banyak RAM, lihat storage, cek resource
     - English: check CPU, how much RAM, disk space, storage info, server resource, memory usage, CPU usage, hardware info server
     - Key differentiator: user wants LIVE metrics of THIS machine. If user asks about cloud billing or a remote server by URL → general_inquiry.
-14. Use "log_viewer" when the user wants to see, read, or debug the bot's recent log output:
+15. Use "log_viewer" when the user wants to see, read, or debug the bot's recent log output:
     - Indonesian: lihat log, tampilkan log, cek log, log bot, log error, log terbaru, debug log, tampilkan 20 log, log terakhir,
       lihat log terakhir, beri tahu log, tunjukkan log, log aplikasi, lihat catatan log
     - English: show log, view log, check log, bot log, recent log, last log lines, debug log, show me the logs, display logs,
       application log, log output, what does the log say, show last 10 lines of log
 
 Example responses:
-  {"intent": "data_analysis",    "confidence": 0.97, "tools": []}
-  {"intent": "mandays_planning", "confidence": 0.95, "tools": []}
-  {"intent": "research",         "confidence": 0.91, "tools": ["tavily_search"]}
-  {"intent": "code_development",  "confidence": 0.96, "tools": []}
-  {"intent": "code_inspection",   "confidence": 0.95, "tools": []}
-  {"intent": "document_creation", "confidence": 0.95, "tools": []}
-  {"intent": "system_info",       "confidence": 0.97, "tools": []}
-  {"intent": "log_viewer",        "confidence": 0.98, "tools": []}
-  {"intent": "general_inquiry",   "confidence": 0.88, "tools": []}
+  {"intent": "data_analysis",      "confidence": 0.97, "tools": []}
+  {"intent": "mandays_planning",   "confidence": 0.95, "tools": []}
+  {"intent": "research",           "confidence": 0.91, "tools": ["tavily_search"]}
+  {"intent": "code_development",   "confidence": 0.96, "tools": []}
+  {"intent": "code_inspection",    "confidence": 0.95, "tools": []}
+  {"intent": "code_understanding", "confidence": 0.94, "tools": []}
+  {"intent": "document_creation",  "confidence": 0.95, "tools": []}
+  {"intent": "system_info",        "confidence": 0.97, "tools": []}
+  {"intent": "log_viewer",         "confidence": 0.98, "tools": []}
+  {"intent": "general_inquiry",    "confidence": 0.88, "tools": []}
 """
 
 

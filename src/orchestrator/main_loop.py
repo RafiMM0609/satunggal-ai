@@ -71,6 +71,7 @@ def _get_pipeline():
     from src.agents.content_creator.agent import ContentCreatorAgent
     from src.agents.developer.agent import DeveloperAgent
     from src.agents.developer_inspector.agent import DeveloperInspectorAgent
+    from src.agents.developer_qna.agent import DeveloperQnAAgent
     from src.agents.gatekeeper.agent import GatekeeperAgent
     from src.agents.llm_client import LLMClient
     from src.agents.log_viewer_agent.agent import LogViewerAgent
@@ -119,6 +120,7 @@ def _get_pipeline():
         "mandays_agent":     MandaysAgent(_llm),
         "developer":            DeveloperAgent(_llm),
         "developer_inspector": DeveloperInspectorAgent(_llm),
+        "developer_qna":        DeveloperQnAAgent(_llm),
         "technical_writer":    TechnicalWriterAgent(_history, _llm),
         "sysinfo_agent":       SysInfoAgent(_history, _llm),
         "log_viewer_agent":    LogViewerAgent(_history, _llm),
