@@ -147,8 +147,12 @@ class DeveloperQnAAgent(RepoAgentBase):
 
     name = "developer_qna"
 
-    def __init__(self, llm: LLMClient | None = None) -> None:
-        super().__init__(llm)
+    def __init__(
+        self,
+        llm: LLMClient | None = None,
+        history=None,
+    ) -> None:
+        super().__init__(llm=llm, history=history)
 
     # ── Q/A flow ───────────────────────────────────────────────────────────────
 
@@ -252,6 +256,14 @@ class DeveloperQnAAgent(RepoAgentBase):
             )
             task.mark_done(branch_note + qa_response.strip() + perf_footer)
 
+            # Persist context so follow-up questions inherit repo + branch.
+            self._save_session_context(
+                task.session_id,
+                req.repo_url,
+                req.branch,
+                req.candidate_route_filenames or None,
+            )
+
         except Exception as exc:
             logger.exception("QnA flow error: %s", exc)
             task.mark_failed(f"❌ Q/A gagal: {exc}")
@@ -282,6 +294,13 @@ class DeveloperQnAAgent(RepoAgentBase):
                         verbosity=pending.get("verbosity", "detailed"),
                         candidate_route_filenames=pending.get("candidate_route_filenames", []),
                     )
+                    # Persist confirmed context so subsequent follow-ups inherit it.
+                    self._save_session_context(
+                        task.session_id,
+                        req.repo_url,
+                        branch_choice,
+                        req.candidate_route_filenames or None,
+                    )
                     return await self._run_qa_flow(task, repo_path, req, intent)
                 # Not a recognizable confirmation – fall through to normal parse.
 
@@ -290,7 +309,7 @@ class DeveloperQnAAgent(RepoAgentBase):
             logger.info("QnA: classified intent=%s", intent.value)
 
             # ── Step 2: Extract structured request via LLM ─────────────────
-            req = await self._extract_request(task.user_input)
+            req = await self._extract_request(task.user_input, session_id=task.session_id)
 
             logger.info(
                 "QnA: repo_url=%r problem=%r branch=%r intent=%s",

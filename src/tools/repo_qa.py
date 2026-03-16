@@ -204,6 +204,14 @@ def classify_intent(user_input: str) -> QAIntent:
         logger.debug("QA classify: specific symbol detected (path present) -> SPECIFIC_SYMBOL")
         return QAIntent.SPECIFIC_SYMBOL
 
+    # Jika user menyebutkan API path dengan path-parameter (/:param) — ciri khas
+    # route berparam seperti /download/:appuuid/:uuid — ini hampir pasti SPECIFIC_SYMBOL
+    # meski tanpa kata pemicu eksplisit (jelaskan/explain/dll.).
+    # Pattern ini juga menangkap follow-up questions yang hanya menyebut path API.
+    if re.search(r"(?:^|\s|api\s*:?\s*\n?\s*)/[a-z0-9_\-]+(?:/[a-z0-9_\-:]+){1,}", text):
+        logger.debug("QA classify: route path pattern detected -> SPECIFIC_SYMBOL")
+        return QAIntent.SPECIFIC_SYMBOL
+
     # If user explicitly requests Q/A mode ("qna", "q/a", "use qna"),
     # prefer matching Q/A intents first and fall back to a SPECIFIC_SYMBOL
     # Q/A intent so the agent runs in Q/A mode instead of forcing full

@@ -220,8 +220,12 @@ class DeveloperInspectorAgent(RepoAgentBase):
 
     name = "developer_inspector"
 
-    def __init__(self, llm: LLMClient | None = None) -> None:
-        super().__init__(llm)
+    def __init__(
+        self,
+        llm: LLMClient | None = None,
+        history=None,
+    ) -> None:
+        super().__init__(llm=llm, history=history)
 
     # ── Inspection-specific evidence helpers ───────────────────────────────────
 
@@ -409,6 +413,13 @@ class DeveloperInspectorAgent(RepoAgentBase):
             )
             task.mark_done(branch_header + report + perf_footer)
 
+            # Persist context so follow-up questions inherit repo + branch.
+            self._save_session_context(
+                task.session_id,
+                req.repo_url,
+                req.branch,
+            )
+
         except Exception as exc:
             logger.exception("Inspector._run_inspection_task: error: %s", exc)
             task.mark_failed(f"❌ Inspeksi gagal pada branch `{req.branch}`: {exc}")
@@ -437,11 +448,17 @@ class DeveloperInspectorAgent(RepoAgentBase):
                         keywords=pending["keywords"],
                         branch=branch_choice,
                     )
+                    # Persist confirmed context so subsequent follow-ups inherit it.
+                    self._save_session_context(
+                        task.session_id,
+                        req.repo_url,
+                        branch_choice,
+                    )
                     return await self._run_inspection_task(task, repo_path, req)
                 # Not a recognizable confirmation – fall through to normal parse.
 
             # ── Step 1: Extract structured request via LLM ─────────────────
-            req = await self._extract_request(task.user_input)
+            req = await self._extract_request(task.user_input, session_id=task.session_id)
 
             logger.info(
                 "Inspector: repo_url=%r problem=%r keywords=%s branch=%r",

@@ -24,12 +24,13 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 
 from pydantic import BaseModel, ValidationError
 
 from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
+from src.memory.history import ConversationHistory
 from src.memory.repo_tracker import RepoTracker
 from src.memory.state import AgentTask
 from src.tools.cli_executor import CLIExecutor, CommandResult
@@ -56,6 +57,11 @@ _SKIP_DIRS = {
     "env", "dist", "build", ".next", ".nuxt", "coverage",
 }
 
+# ── Session repo context ──────────────────────────────────────────────────────
+# Stores the last successfully-used {repo_url, branch} per session_id,
+# so follow-up questions can inherit context without re-stating the repo/branch.
+_REPO_SESSION_CONTEXT: dict[str, dict] = {}
+
 # ── Shared LLM extraction prompt ──────────────────────────────────────────────
 
 _EXTRACT_PROMPT = """\
@@ -64,13 +70,15 @@ Ekstrak informasi berikut dari pesan pengguna dan balas dalam JSON:
   "repo_url":   "<URL lengkap repository (GitHub, GitLab, Bitbucket, dll.) atau string kosong jika tidak ada>",
   "problem":    "<deskripsi ringkas masalah yang dilaporkan atau area yang ingin diinspeksi>",
   "keywords":   ["<keyword error atau simbol yang relevan untuk dicari di kode>"],
-  "branch":     "<nama git branch jika disebutkan secara eksplisit dalam pesan, jika tidak ada biarkan string kosong>"
+  "branch":     "<nama git branch jika disebutkan secara eksplisit dalam pesan atau dalam percakapan sebelumnya, jika tidak ada biarkan string kosong>"
 }}
 
-Perhatian: repo_url bisa berupa URL GitHub (github.com), GitLab (gitlab.com), atau platform git lainnya.
-Salin URL persis seperti yang disebutkan pengguna, termasuk scheme https://.
+Perhatian:
+- repo_url bisa berupa URL GitHub (github.com), GitLab (gitlab.com), atau platform git lainnya.
+- Salin URL persis seperti yang disebutkan pengguna, termasuk scheme https://.
+- Jika pesan saat ini adalah pertanyaan lanjutan (follow-up) dan repo_url / branch disebutkan di percakapan sebelumnya, ekstrak dari sana.
 
-Pesan pengguna: {user_input}
+{history_section}Pesan pengguna saat ini: {user_input}
 """
 
 
@@ -96,10 +104,15 @@ class RepoAgentBase(BaseAgent):
     Subclasses must implement `run(task: AgentTask) -> AgentTask`.
     """
 
-    def __init__(self, llm: LLMClient | None = None) -> None:
+    def __init__(
+        self,
+        llm: LLMClient | None = None,
+        history: ConversationHistory | None = None,
+    ) -> None:
         from config.settings import get_settings
         _settings          = get_settings()
         self._llm          = llm or LLMClient()
+        self._history      = history
         self._repo_tracker = RepoTracker()
         self._cli          = CLIExecutor(timeout=30)
         self._repos_dir    = Path(_settings.sandbox_repos_dir).expanduser()
@@ -367,14 +380,74 @@ class RepoAgentBase(BaseAgent):
                 return path
         return None
 
+    # ── Session repo context ───────────────────────────────────────────────────
+
+    def _save_session_context(
+        self,
+        session_id: str,
+        repo_url: str,
+        branch: str,
+        candidate_route_filenames: list[str] | None = None,
+    ) -> None:
+        """
+        Persist the repo context used in this turn so follow-up questions
+        can inherit repo_url and branch without re-stating them.
+        """
+        if repo_url or branch:
+            ctx = _REPO_SESSION_CONTEXT.setdefault(session_id, {})
+            if repo_url:
+                ctx["repo_url"] = repo_url
+            if branch:
+                ctx["branch"] = branch
+            if candidate_route_filenames:
+                ctx["candidate_route_filenames"] = candidate_route_filenames
+            logger.debug(
+                "%s: saved session context for %s → repo=%s branch=%s",
+                self.name, session_id, repo_url, branch,
+            )
+
+    def _get_session_context(self, session_id: str) -> dict:
+        """Return saved repo context for the session (empty dict if none)."""
+        return _REPO_SESSION_CONTEXT.get(session_id, {})
+
     # ── LLM request extraction ─────────────────────────────────────────────────
 
-    async def _extract_request(self, user_input: str) -> RepoExtractionRequest:
+    async def _extract_request(
+        self,
+        user_input: str,
+        session_id: str = "",
+    ) -> RepoExtractionRequest:
         """
         Call LLM to parse repo_url, problem, keywords, and branch from user input.
+
+        When session_id is provided:
+          - Includes recent conversation history in the prompt so the LLM can
+            pick up repo URL / branch from prior turns.
+          - Falls back to the last saved session context when the LLM returns
+            empty repo_url or branch (common in follow-up questions).
+
         Falls back to a minimal request if JSON parsing fails.
         """
-        prompt   = _EXTRACT_PROMPT.format(user_input=user_input)
+        # Build optional history section for the prompt
+        history_section = ""
+        if session_id and self._history:
+            recent_messages = self._history.get_as_llm_messages(session_id)
+            # Include up to last 6 messages (3 user+assistant pairs) for context
+            history_turns = recent_messages[-6:] if len(recent_messages) > 1 else []
+            if history_turns:
+                history_lines = "\n".join(
+                    f"[{m['role']}]: {m['content'][:600]}"
+                    for m in history_turns
+                )
+                history_section = (
+                    f"Percakapan sebelumnya (untuk konteks):\n"
+                    f"{history_lines}\n\n"
+                )
+
+        prompt   = _EXTRACT_PROMPT.format(
+            user_input=user_input,
+            history_section=history_section,
+        )
         response = await self._llm.chat(
             messages=[
                 {"role": "system", "content": "You are a JSON extractor. Reply with valid JSON only."},
@@ -391,6 +464,24 @@ class RepoAgentBase(BaseAgent):
         except (json.JSONDecodeError, ValidationError) as exc:
             logger.warning("%s: failed to parse extraction JSON: %s", self.name, exc)
             req = RepoExtractionRequest(problem=user_input)
+
+        # ── Fallback: inherit repo context from previous turn in session ───
+        if session_id:
+            ctx = self._get_session_context(session_id)
+            if not req.repo_url and ctx.get("repo_url"):
+                req.repo_url = ctx["repo_url"]
+                logger.info(
+                    "%s: inherited repo_url=%r from session context",
+                    self.name, req.repo_url,
+                )
+            if not req.branch and ctx.get("branch"):
+                req.branch = ctx["branch"]
+                logger.info(
+                    "%s: inherited branch=%r from session context",
+                    self.name, req.branch,
+                )
+            if not req.candidate_route_filenames and ctx.get("candidate_route_filenames"):
+                req.candidate_route_filenames = ctx["candidate_route_filenames"]
 
         # Verbosity hint from user message (applies to both agents)
         lower = user_input.lower()
