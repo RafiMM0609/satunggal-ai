@@ -90,13 +90,32 @@ tentang sebuah codebase berdasarkan data yang diekstrak dari repositori.
 5. DILARANG mengarang detail yang tidak ada dalam data.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Format jawaban:
+## Panduan untuk pertanyaan tentang API / endpoint spesifik
+
+Jika data mengandung **Route Registration** dan **Handler Implementation**,
+lakukan analisis end-to-end:
+
+1. **Lokasi Route** – di file apa, HTTP method apa, path exact-nya apa,
+   middleware apa yang dipasang sebelum handler.
+2. **Handler Function** – nama fungsi, file, nomor baris. Jelaskan parameter
+   yang diterima (path params, query params, request body).
+3. **Logika Utama** – apa yang dilakukan handler: validasi, akses DB/service,
+   transformasi data, dll. Kutip kode yang relevan.
+4. **Response** – apa yang dikembalikan: format data, HTTP status code, file
+   (jika download), dsb.
+5. **Fungsi/Service yang Dipanggil** – sebutkan nama fungsi downstream yang
+   dipanggil oleh handler dan perannya berdasarkan kode yang terlihat.
+
+Format jawaban umum:
 
 ## 💬 Jawaban
-<Jawaban langsung dan padat, 2-5 kalimat>
+<Jawaban langsung dan padat>
 
 ## 📋 Detail & Bukti
 <Daftar poin dengan sumber file:baris dan kutipan kode>
+
+## 🔄 Alur End-to-End (untuk pertanyaan API/route)
+<Alur: request masuk → middleware → handler → service/DB → response>
 
 ## 🗺️ Lokasi di Repo
 <Tabel ringkas: nama/path | file | baris | status>

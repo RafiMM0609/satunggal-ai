@@ -269,11 +269,14 @@ def extract_specific_target(user_input: str) -> str:
       "endpoint /api/v1/users bagaimana" → "/api/v1/users"
       "jabarkan fungsi downloadFile" → "downloadFile"
       "cari fungsi HandleDownload" → "HandleDownload"
+      "/download/:appuuid/:uuid" → "/download/:appuuid/:uuid"
     """
-    # Match path like /upload, /api/v1/something — strip HTTP URLs first to
+    # Match path like /upload, /api/v1/:param — strip HTTP URLs first to
     # avoid picking up repo URL paths (e.g. /okai-ai-internal/okai-v2.git)
+    # Allow colons (:) for path parameters like /:uuid and asterisks (*) for
+    # wildcards, which are standard in Go, Express.js, and similar frameworks.
     text_no_url = re.sub(r"https?://\S+", "", user_input)
-    path_match = re.search(r"(/[a-zA-Z][a-zA-Z0-9_/\-]*)", text_no_url)
+    path_match = re.search(r"(/[a-zA-Z][a-zA-Z0-9_/\-:*]*)", text_no_url)
     if path_match:
         return path_match.group(1)
 
@@ -799,68 +802,363 @@ async def extract_specific_symbol(repo_path: Path, target: str) -> str:
     """
     Temukan definisi + penggunaan simbol tertentu (API path, fungsi, class).
 
-    Args:
-        target: string yang dicari, bisa path API (/upload) atau nama simbol.
+    Untuk API path (target starts with "/"): lakukan 2-phase trace:
+      Phase 1 – Route registration: cari file routing, temukan baris registrasi
+                route yang sesuai, ekstrak nama handler function.
+      Phase 2 – Handler implementation: baca body lengkap handler (bukan hanya
+                snippet), lalu cari 1 level fungsi yang dipanggil handler tersebut.
+
+    Untuk symbol biasa (fungsi/class): cari definisi dengan regex, tampilkan
+    body lengkap.
     """
     if not target:
         return "(target tidak ditentukan)"
 
+    if target.startswith("/"):
+        return await _trace_api_route(repo_path, target)
+    else:
+        return await _find_symbol_definition(repo_path, target)
+
+
+# ── API route tracing helpers ─────────────────────────────────────────────────
+
+_ROUTE_FILE_NAMES = {
+    "routes.go", "router.go", "routing.go", "main.go",
+    "urls.py", "routes.py", "router.py",
+    "routes.ts", "router.ts", "routes.js", "router.js",
+    "api.php", "web.php", "routes.rb",
+}
+
+_SOURCE_EXTS_ALL = {".py", ".js", ".ts", ".go", ".java", ".rb", ".php", ".cs", ".rs"}
+
+
+def _build_path_search_terms(api_path: str) -> list[str]:
+    """
+    Build a list of search terms (from most specific to least) for an API path.
+
+    "/download/:appuuid/:uuid/:processoption/:outputtype"
+    → ["/download/:appuuid/:uuid/:processoption/:outputtype",
+       ":processoption/:outputtype",
+       "processoption",
+       "outputtype",
+       "download"]
+    """
+    terms: list[str] = []
+    # 1. Exact path (most specific)
+    terms.append(api_path)
+    # 2. Unique param names (path params are often unique to this endpoint)
+    params = re.findall(r":([a-zA-Z0-9_]+)", api_path)
+    # pairs of consecutive params help disambiguate
+    for i in range(len(params) - 1):
+        terms.append(f":{params[i]}/:{params[i+1]}")
+    # 3. Individual param names (less specific but useful fallback)
+    for p in params:
+        terms.append(p)
+    # 4. First non-param path segment (anchor for group-based routers)
+    segs = [s for s in api_path.split("/") if s and not s.startswith(":")]
+    if segs:
+        terms.append(segs[0])
+    return terms
+
+
+def _extract_handler_from_line(line: str) -> list[str]:
+    """
+    Try to extract handler function reference(s) from a route registration line.
+
+    Handles patterns like:
+      r.GET("/path", ctrl.Method)
+      r.GET("/path", ctrl.Method, middleware1)
+      router.HandleFunc("/path", handleFunc)
+      @app.get("/path")  → next function is the handler (Python), caller must handle
+      route("/path", handler)
+    Returns a list of candidate identifiers (may include obj.Method and just Method).
+    """
+    candidates: list[str] = []
+    # Match all word.word or word tokens after the first string argument
+    # Typical: r.GET("...", ctrl.Method) or r.GET("...", handlerFunc, middleware)
+    # Skip the first string literal, then collect function references
+    after_path = re.sub(r"""^[^,)]*,\s*(?:["'`][^"'`]*["'`]\s*,\s*)""", "", line)
+    for m in re.finditer(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*[,)]", after_path):
+        ref = m.group(1)
+        # Skip common non-handler tokens
+        if ref.lower() in {"true", "false", "nil", "null", "none"}:
+            continue
+        candidates.append(ref)
+        # Also add just the method part
+        if "." in ref:
+            candidates.append(ref.split(".")[-1])
+    return candidates
+
+
+def _read_full_function_body(lines: list[str], start_line: int, lang_ext: str) -> str:
+    """
+    Read the complete function/method body starting at start_line (0-indexed).
+
+    Supports:
+      - Go / Java / JS / TS / C#: brace counting ({ ... })
+      - Python: indentation-based
+    Returns the full body as a string.
+    """
+    if not lines:
+        return ""
+
+    body_lines = [lines[start_line]]
+
+    if lang_ext == ".py":
+        # Python: collect lines with deeper indentation than the def line
+        def_indent = len(lines[start_line]) - len(lines[start_line].lstrip())
+        for i in range(start_line + 1, min(start_line + 120, len(lines))):
+            line = lines[i]
+            stripped = line.rstrip()
+            if not stripped:
+                body_lines.append(line)
+                continue
+            curr_indent = len(line) - len(line.lstrip())
+            if curr_indent <= def_indent and line.lstrip():
+                break
+            body_lines.append(line)
+    else:
+        # Brace-based languages: count { and } to find end of function
+        open_braces = lines[start_line].count("{") - lines[start_line].count("}")
+        i = start_line + 1
+        while i < len(lines) and i < start_line + 200:
+            line = lines[i]
+            body_lines.append(line)
+            open_braces += line.count("{") - line.count("}")
+            if open_braces <= 0:
+                break
+            i += 1
+
+    return "\n".join(body_lines)
+
+
+async def _find_symbol_definition(repo_path: Path, name: str) -> str:
+    """
+    Find function/class/method definition for a named symbol (non-path).
+    Returns full body, not just a snippet.
+    """
     sections: list[str] = []
-    escaped = re.escape(target)
-    pattern = re.compile(
-        rf"(?:"
-        rf'["\'{re.escape(target)}["\']'      # string literal "/upload"
-        rf"|def\s+{escaped}"                   # Python function def
-        rf"|class\s+{escaped}"                 # class def
-        rf"|function\s+{escaped}"              # JS function
-        rf"|const\s+{escaped}\s*="             # JS const
-        rf"|{escaped}\s*[(:{{]"                # Go/Java/TS definition
-        rf")",
+    escaped = re.escape(name)
+
+    func_def_re = re.compile(
+        rf"\b(?:"
+        rf"func\s+(?:\(\w[^)]*\)\s+)?{escaped}"    # Go method/function
+        rf"|def\s+{escaped}"                         # Python
+        rf"|function\s+{escaped}"                    # JS/TS function keyword
+        rf"|(?:async\s+function\s+){escaped}"        # async JS function
+        rf"|const\s+{escaped}\s*=\s*(?:async\s+)?\("  # JS const arrow
+        rf"|class\s+{escaped}"                        # class def
+        rf")\s*[\s({{]",
         re.IGNORECASE,
     )
 
-    hits: list[tuple[str, list[str]]] = []
-    source_exts = {".py", ".js", ".ts", ".go", ".java", ".rb", ".php", ".cs"}
-
+    hits = 0
     for fpath in sorted(repo_path.rglob("*")):
-        if fpath.is_dir() or fpath.suffix not in source_exts:
+        if fpath.is_dir() or fpath.suffix not in _SOURCE_EXTS_ALL:
             continue
         if _should_skip(fpath.relative_to(repo_path).parts):
             continue
         try:
-            lines = fpath.read_text(errors="replace").splitlines()
+            text = fpath.read_text(errors="replace")
+            file_lines = text.splitlines()
         except OSError:
             continue
 
-        matched_lines: list[str] = []
-        for i, line in enumerate(lines):
-            if pattern.search(line) or target in line:
-                # Show context: 3 lines before and after
-                start = max(0, i - 3)
-                end   = min(len(lines), i + 10)
-                ctx = "\n".join(
-                    f"  {'→' if j == i else ' '} L{j+1}: {lines[j]}"
-                    for j in range(start, end)
+        for i, line in enumerate(file_lines):
+            if func_def_re.search(line):
+                body = _read_full_function_body(file_lines, i, fpath.suffix)
+                rel = str(fpath.relative_to(repo_path))
+                lang = fpath.suffix.lstrip(".")
+                sections.append(
+                    f"### 🔧 `{name}` — `{rel}` (L{i + 1})\n"
+                    f"```{lang}\n{body}\n```"
                 )
-                matched_lines.append(ctx)
-                if len(matched_lines) >= 5:
-                    break
+                hits += 1
+                break  # one hit per file
 
-        if matched_lines:
-            rel = str(fpath.relative_to(repo_path))
-            hits.append((rel, matched_lines))
-
-        if len(hits) >= MAX_FILES_PER_TOPIC:
+        if hits >= 5:
             break
 
-    if not hits:
-        return f"(simbol/path `{target}` tidak ditemukan di repositori ini)"
+    # Fallback: plain text search if no definition found
+    if not sections:
+        for fpath in sorted(repo_path.rglob("*")):
+            if fpath.is_dir() or fpath.suffix not in _SOURCE_EXTS_ALL:
+                continue
+            if _should_skip(fpath.relative_to(repo_path).parts):
+                continue
+            try:
+                file_lines = fpath.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for i, line in enumerate(file_lines):
+                if name in line:
+                    start = max(0, i - 2)
+                    end = min(len(file_lines), i + 12)
+                    ctx = "\n".join(
+                        f"  {'→' if j == i else ' '} L{j+1}: {file_lines[j]}"
+                        for j in range(start, end)
+                    )
+                    rel = str(fpath.relative_to(repo_path))
+                    sections.append(f"### 📄 `{rel}` (reference)\n```\n{ctx}\n```")
+                    break
+            if len(sections) >= 5:
+                break
 
-    for rel, match_ctxs in hits:
-        combined = "\n\n---\n".join(match_ctxs)
-        sections.append(f"### 📄 `{rel}`\n```\n{combined}\n```")
+    return "\n\n".join(sections) if sections else f"(simbol `{name}` tidak ditemukan)"
 
-    return "\n\n".join(sections)
+
+async def _trace_api_route(repo_path: Path, api_path: str) -> str:
+    """
+    2-phase trace for an API path:
+      Phase 1 – Locate route registration line; extract handler function reference(s).
+      Phase 2 – Find and read full handler implementation body.
+               Optionally trace 1 level of inner calls for service/repo layer.
+
+    Handles group-based routers (Gin groups, Express Router, etc.) where the
+    full path is split across Group("/download") + GET("/:uuid/...").
+    """
+    sections: list[str] = []
+    search_terms = _build_path_search_terms(api_path)
+
+    # Collect all source files; routing files get first priority
+    all_files: list[Path] = []
+    route_files: list[Path] = []
+    for fpath in sorted(repo_path.rglob("*")):
+        if fpath.is_dir() or fpath.suffix not in _SOURCE_EXTS_ALL:
+            continue
+        if _should_skip(fpath.relative_to(repo_path).parts):
+            continue
+        if fpath.name.lower() in _ROUTE_FILE_NAMES:
+            route_files.append(fpath)
+        else:
+            all_files.append(fpath)
+
+    ordered_files = route_files + all_files
+
+    # ── Phase 1: Find route registration ────────────────────────────────────
+    registration_hits: list[str] = []  # markdown snippets
+    handler_names: list[str] = []      # extracted handler function names
+
+    for fpath in ordered_files:
+        try:
+            text = fpath.read_text(errors="replace")
+            file_lines = text.splitlines()
+        except OSError:
+            continue
+
+        matched_line_idx: int | None = None
+        matched_term: str = ""
+
+        # Try search terms from most specific to least
+        for term in search_terms:
+            for i, line in enumerate(file_lines):
+                if term in line:
+                    # Exclude comment-only lines
+                    stripped = line.lstrip()
+                    if stripped.startswith("//") or stripped.startswith("#"):
+                        continue
+                    matched_line_idx = i
+                    matched_term = term
+                    break
+            if matched_line_idx is not None:
+                break
+
+        if matched_line_idx is None:
+            continue
+
+        # Show context around the registration line
+        start = max(0, matched_line_idx - 3)
+        end   = min(len(file_lines), matched_line_idx + 8)
+        ctx_lines = []
+        for j in range(start, end):
+            marker = "→" if j == matched_line_idx else " "
+            ctx_lines.append(f"  {marker} L{j+1}: {file_lines[j]}")
+        ctx = "\n".join(ctx_lines)
+        rel = str(fpath.relative_to(repo_path))
+        registration_hits.append(
+            f"**`{rel}`** (matched: `{matched_term}`):\n```\n{ctx}\n```"
+        )
+
+        # Extract handler reference(s) from matched line
+        raw_handlers = _extract_handler_from_line(file_lines[matched_line_idx])
+        # Also scan ±2 lines for inline anonymous func or decorator patterns
+        for extra_i in range(max(0, matched_line_idx - 1), min(len(file_lines), matched_line_idx + 3)):
+            if extra_i == matched_line_idx:
+                continue
+            raw_handlers.extend(_extract_handler_from_line(file_lines[extra_i]))
+
+        for h in raw_handlers:
+            if h not in handler_names and len(h) > 2:
+                handler_names.append(h)
+
+        if len(registration_hits) >= 4:
+            break  # enough route hits
+
+    if registration_hits:
+        sections.append(
+            "## 📍 Route Registration\n\n" + "\n\n".join(registration_hits)
+        )
+    else:
+        # Hard fallback: show any file containing first path segment
+        segs = [s for s in api_path.split("/") if s and not s.startswith(":")]
+        sections.append(
+            f"## ⚠️ Route Tidak Ditemukan Secara Eksplisit\n"
+            f"Path `{api_path}` tidak ditemukan verbatim di codebase.\n"
+            f"Kemungkinan terdapat di file routing dengan group/prefix. "
+            f"Coba cari file yang mengandung: {', '.join(segs)}"
+        )
+
+    # ── Phase 2: Find handler implementations ───────────────────────────────
+    if handler_names:
+        impl_sections: list[str] = []
+        seen_handlers: set[str] = set()
+
+        for handler_ref in dict.fromkeys(handler_names):  # deduplicate, preserve order
+            # handler_ref may be "ctrl.DownloadFile" or just "DownloadFile"
+            simple_name = handler_ref.split(".")[-1]
+            if simple_name in seen_handlers or len(simple_name) < 3:
+                continue
+            seen_handlers.add(simple_name)
+
+            # Build a regex that matches Go / Python / JS / TS function definitions
+            esc = re.escape(simple_name)
+            func_def_re = re.compile(
+                rf"\b(?:"
+                rf"func\s+(?:\(\w[^)]*\)\s+)?{esc}"   # Go method or function
+                rf"|def\s+{esc}"                         # Python
+                rf"|function\s+{esc}"                    # JS/TS
+                rf"|const\s+{esc}\s*=\s*(?:async\s+)?\("  # JS arrow
+                rf")\s*",
+                re.IGNORECASE,
+            )
+
+            for fpath in ordered_files:
+                try:
+                    file_lines = fpath.read_text(errors="replace").splitlines()
+                except OSError:
+                    continue
+
+                for i, line in enumerate(file_lines):
+                    if func_def_re.search(line):
+                        body = _read_full_function_body(file_lines, i, fpath.suffix)
+                        rel = str(fpath.relative_to(repo_path))
+                        lang = fpath.suffix.lstrip(".")
+                        impl_sections.append(
+                            f"### 🔧 Handler: `{simple_name}` — `{rel}` (L{i + 1})\n"
+                            f"```{lang}\n{body}\n```"
+                        )
+                        break  # found in this file
+
+                if len(impl_sections) >= len(seen_handlers):
+                    break  # found one file per handler
+
+            if len(impl_sections) >= 6:
+                break  # cap at 6 handler implementations
+
+        if impl_sections:
+            sections.append("## 🔧 Handler Implementation\n\n" + "\n\n".join(impl_sections))
+
+    return "\n\n".join(sections) if sections else f"(path `{api_path}` tidak ditemukan di repositori)"
 
 
 # ── Top-level Q/A extraction dispatcher ──────────────────────────────────────
