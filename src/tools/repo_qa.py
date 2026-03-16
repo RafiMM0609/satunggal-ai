@@ -210,6 +210,13 @@ def classify_intent(user_input: str) -> QAIntent:
     """
     text = user_input.lower().strip()
 
+    # Detect qualified identifiers like controllers.DownloadFile or pkg.Method.
+    # This is a very strong signal for SPECIFIC_SYMBOL — check before all other rules
+    # so it is not shadowed by e.g. MAIN_FLOW patterns.
+    if re.search(r'\b[a-z_]\w*\.[A-Z][a-zA-Z0-9]+\b', user_input):
+        logger.debug("QA classify: qualified identifier (pkg.Export) detected → SPECIFIC_SYMBOL")
+        return QAIntent.SPECIFIC_SYMBOL
+
     # Jika user meminta penjelasan dan menyertakan path spesifik (mis. "/upload"),
     # anggap ini permintaan `SPECIFIC_SYMBOL` dan beri prioritas sebelum pattern
     # Q/A umum seperti "ada api apa".
@@ -259,8 +266,10 @@ def classify_intent(user_input: str) -> QAIntent:
     # Fallback: detect "jabarkan/jelaskan/cari <CamelCase|snake_case>" using the
     # ORIGINAL (non-lowercased) input — catches identifiers like HandleDownload,
     # get_user_data that can't be detected in lowercase text reliably.
+    # Also handles informal Indonesian "jelasin", "tolong jelasin", "coba jelasin".
     if re.search(
-        r"(?:jelaskan|jabarkan|explain|describe|cari|apa.itu|tentang)\s+"
+        r"(?:jelaskan|jelasin|jabarkan|explain|describe|cari|apa.itu|tentang"
+        r"|coba\s+jelas\w*|tolong\s+jelas\w*)\s+"
         r"(?:[A-Z][a-zA-Z0-9]{2,}|[a-z][a-z0-9]+(?:_[a-z0-9]+)+)\b",
         user_input,  # original case
     ):
@@ -283,34 +292,48 @@ def extract_specific_target(user_input: str) -> str:
       "jabarkan fungsi downloadFile" → "downloadFile"
       "cari fungsi HandleDownload" → "HandleDownload"
       "/download/:appuuid/:uuid" → "/download/:appuuid/:uuid"
+      "controllers.DownloadFile" → "controllers.DownloadFile"
     """
-    # Match path like /upload, /api/v1/:param — strip HTTP URLs first to
-    # avoid picking up repo URL paths (e.g. /okai-ai-internal/okai-v2.git)
-    # Allow colons (:) for path parameters like /:uuid and asterisks (*) for
-    # wildcards, which are standard in Go, Express.js, and similar frameworks.
+    # Broad trigger-word pattern — includes informal Indonesian variants
+    # (jelasin, coba jelasin, tolong jelaskan, etc.)
+    _TRIGGER = (
+        r"(?:jelaskan|jelasin|jabarkan|explain|apa.itu|what.is|describe"
+        r"|tentang|cari|coba\s+jelas\w*|tolong\s+jelas\w*)"
+    )
+
+    # Qualified identifier: controllers.DownloadFile, pkg.Method, etc.
+    # Recognised as `lowercase_word.CamelCaseWord` — very common in Go/Java/JS.
+    # Checked BEFORE path extraction to avoid false-positive on URL paths.
     text_no_url = re.sub(r"https?://\S+", "", user_input)
+    qualified_match = re.search(
+        r"\b([A-Za-z_]\w*)\.([A-Z][a-zA-Z0-9_]+)\b",
+        text_no_url,
+    )
+    if qualified_match:
+        return qualified_match.group(0)  # e.g. "controllers.DownloadFile"
+
+    # API path: /upload, /api/v1/:param — strip URL schemes first
     path_match = re.search(r"(/[a-zA-Z][a-zA-Z0-9_/\-:*]*)", text_no_url)
     if path_match:
         return path_match.group(1)
 
-    # Match "explain/jelaskan/jabarkan <keyword> <name>" — captures the actual name, not keyword
+    # "jelaskan fungsi X" — captures name after keyword intermediary
     kw_sym_match = re.search(
-        r"(?:jelaskan|jabarkan|explain|apa.itu|what.is|describe|tentang|cari)\s+"
-        r"(?:fungsi|function|class|method|api|endpoint)\s+([a-zA-Z_]\w*)",
+        rf"{_TRIGGER}\s+(?:fungsi|function|class|method|api|endpoint)\s+([a-zA-Z_]\w*)",
         user_input,
         re.IGNORECASE,
     )
     if kw_sym_match:
-        return kw_sym_match.group(1)
+        return kw_sym_match.group(kw_sym_match.lastindex)
 
-    # Match "explain/jelaskan/jabarkan <name>" directly (no intermediate keyword)
+    # "jelaskan X" directly
     sym_match = re.search(
-        r"(?:jelaskan|jabarkan|explain|apa.itu|what.is|describe|tentang|cari)\s+([a-zA-Z_]\w*)",
+        rf"{_TRIGGER}\s+([a-zA-Z_]\w*)",
         user_input,
         re.IGNORECASE,
     )
     if sym_match:
-        return sym_match.group(1)
+        return sym_match.group(sym_match.lastindex)
 
     return ""
 
@@ -823,14 +846,26 @@ async def extract_specific_symbol(repo_path: Path, target: str) -> str:
 
     Untuk symbol biasa (fungsi/class): cari definisi dengan regex, tampilkan
     body lengkap.
+
+    Untuk qualified name (pkg.FunctionName / controllers.DownloadFile): split
+    dan prioritaskan file di dalam direktori yang sesuai.
     """
     if not target:
         return "(target tidak ditentukan)"
 
     if target.startswith("/"):
         return await _trace_api_route(repo_path, target)
-    else:
-        return await _find_symbol_definition(repo_path, target)
+
+    # Qualified name: controllers.DownloadFile → search in controllers/ first
+    if "." in target and not target.startswith("."):
+        parts = target.rsplit(".", 1)
+        package_hint = parts[0]   # e.g. "controllers"
+        func_name    = parts[1]   # e.g. "DownloadFile"
+        return await _find_symbol_definition(
+            repo_path, func_name, package_hint=package_hint
+        )
+
+    return await _find_symbol_definition(repo_path, target)
 
 
 # ── API route tracing helpers ─────────────────────────────────────────────────
@@ -1037,10 +1072,18 @@ def _compress_handler_body(body: str, max_chars: int = 12_000) -> str:
     return compressed
 
 
-async def _find_symbol_definition(repo_path: Path, name: str) -> str:
+async def _find_symbol_definition(repo_path: Path, name: str, package_hint: str = "") -> str:
     """
     Find function/class/method definition for a named symbol (non-path).
-    Returns full body, not just a snippet.
+    Returns full body (compressed), not just a snippet.
+
+    Args:
+        repo_path:     Root of the local repository.
+        name:          Simple function/class name (e.g. "DownloadFile").
+        package_hint:  Optional package/directory name to prioritise
+                       (e.g. "controllers" from "controllers.DownloadFile").
+                       Files inside a path segment matching this hint are
+                       searched before the rest of the repo.
     """
     sections: list[str] = []
     escaped = re.escape(name)
@@ -1057,12 +1100,29 @@ async def _find_symbol_definition(repo_path: Path, name: str) -> str:
         re.IGNORECASE,
     )
 
+    # Sort files: package_hint directory first, then everything else.
+    # This ensures controllers/downloadController.go is searched before an
+    # unrelated helper that might happen to contain the same function name.
+    hint_lower = package_hint.lower() if package_hint else ""
+
+    def _file_priority(p: Path) -> int:
+        if not hint_lower:
+            return 0
+        rel_parts = p.relative_to(repo_path).parts
+        return 0 if any(hint_lower in part.lower() for part in rel_parts[:-1]) else 1
+
+    ordered_files = sorted(
+        (
+            f for f in sorted(repo_path.rglob("*"))
+            if not f.is_dir()
+            and f.suffix in _SOURCE_EXTS_ALL
+            and not _should_skip(f.relative_to(repo_path).parts)
+        ),
+        key=_file_priority,
+    )
+
     hits = 0
-    for fpath in sorted(repo_path.rglob("*")):
-        if fpath.is_dir() or fpath.suffix not in _SOURCE_EXTS_ALL:
-            continue
-        if _should_skip(fpath.relative_to(repo_path).parts):
-            continue
+    for fpath in ordered_files:
         try:
             text = fpath.read_text(errors="replace")
             file_lines = text.splitlines()
@@ -1077,7 +1137,7 @@ async def _find_symbol_definition(repo_path: Path, name: str) -> str:
                 rel = str(fpath.relative_to(repo_path))
                 lang = fpath.suffix.lstrip(".")
                 sections.append(
-                    f"### 🔧 `{name}` — `{rel}` (L{i + 1})\n"
+                    f"### \U0001f527 `{name}` \u2014 `{rel}` (L{i + 1})\n"
                     f"```{lang}\n{body}\n```"
                 )
                 hits += 1
@@ -1088,11 +1148,7 @@ async def _find_symbol_definition(repo_path: Path, name: str) -> str:
 
     # Fallback: plain text search if no definition found
     if not sections:
-        for fpath in sorted(repo_path.rglob("*")):
-            if fpath.is_dir() or fpath.suffix not in _SOURCE_EXTS_ALL:
-                continue
-            if _should_skip(fpath.relative_to(repo_path).parts):
-                continue
+        for fpath in ordered_files:
             try:
                 file_lines = fpath.read_text(errors="replace").splitlines()
             except OSError:
@@ -1101,12 +1157,13 @@ async def _find_symbol_definition(repo_path: Path, name: str) -> str:
                 if name in line:
                     start = max(0, i - 2)
                     end = min(len(file_lines), i + 12)
+                    _arrow = "\u2192"
                     ctx = "\n".join(
-                        f"  {'→' if j == i else ' '} L{j+1}: {file_lines[j]}"
+                        f"  {_arrow if j == i else ' '} L{j+1}: {file_lines[j]}"
                         for j in range(start, end)
                     )
                     rel = str(fpath.relative_to(repo_path))
-                    sections.append(f"### 📄 `{rel}` (reference)\n```\n{ctx}\n```")
+                    sections.append(f"### \U0001f4c4 `{rel}` (reference)\n```\n{ctx}\n```")
                     break
             if len(sections) >= 5:
                 break
