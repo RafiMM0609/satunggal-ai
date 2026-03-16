@@ -397,6 +397,21 @@ class RepoAgentBase(BaseAgent):
         if any(w in lower for w in ["singkat", "brief", "concise", "ringkas"]):
             req.verbosity = "concise"
 
+        # Detect explicitly mentioned source file names from user input
+        # e.g. "routes.go", "router.py", "api.ts" → prioritized in API extraction
+        if not req.candidate_route_filenames:
+            file_mentions = re.findall(
+                r"\b([\w\-]+\.(?:go|py|js|ts|rb|php|java|cs))\b",
+                user_input,
+                re.IGNORECASE,
+            )
+            if file_mentions:
+                # Deduplicate while preserving order
+                seen_files: dict[str, None] = {}
+                for f in file_mentions:
+                    seen_files[f.lower()] = None
+                req.candidate_route_filenames = list(seen_files.keys())
+
         return req
 
     # ── Evidence text builder ──────────────────────────────────────────────────

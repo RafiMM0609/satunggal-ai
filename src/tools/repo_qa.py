@@ -89,6 +89,14 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"available.*api", r"available.*endpoint",
             r"show.*route", r"all.*route", r"all.*endpoint", r"semua.*api",
             r"semua.*endpoint", r"semua.*route",
+            # Go / specific routing file mentions → treat as API_ENDPOINTS query
+            r"routes?\.go\b", r"router?\.go\b", r"routing\.go\b",
+            r"(?:di|dalam|pada|in|file)\s+routes?\.(?:go|py|js|ts)\b",
+            r"(?:fitur|feature|route|endpoint|fungsi)\s+.*\.(?:go|py|js|ts)\b",
+            r"\.go\s+.*(?:fitur|feature|download|unduh|endpoint|route)",
+            # download / upload feature queries (commonly maps to HTTP routes)
+            r"(?:fitur|feature).*(?:download|unduh|upload|ekspor|export)",
+            r"(?:download|unduh|upload).*(?:route|endpoint|api|fitur|feature)",
         ],
         [],
     ),
@@ -141,19 +149,30 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"main.flow", r"request.*flow", r"arsitektur.*flow",
             r"flow.*arsitektur", r"cara.kerja", r"alur.kerja",
             r"alur.sistem", r"sistem.bekerja",
+            # Directory / project structure queries
+            r"struktur.dir", r"struktur.project", r"struktur.projek",
+            r"struktur.folder", r"struktur.aplikasi", r"struktur.app",
+            r"directory.struct", r"folder.struct", r"project.struct",
+            r"susunan.folder", r"susunan.file", r"layout.project",
+            r"arsitektur.aplikasi", r"arsitektur.project", r"arsitektur.projek",
+            r"(?:jabarkan|jelaskan|describe|show|tampilkan)\s+(?:struktur|directory|folder|layout|tree)",
+            r"(?:struktur|directory|folder|layout|tree)\s+(?:yang.ada|project|repo|aplikasi|app)",
         ],
         [],
     ),
     (
         QAIntent.SPECIFIC_SYMBOL,
         [
-            # Match explicit path patterns like /upload, /api/v1/users
-            r"(?:jelaskan|explain|apa.itu|what.is|describe|tentang)\s+[/\w]",
-            # Match "jelaskan fungsi X", "apa itu class Y"
-            r"(?:jelaskan|explain|describe)\s+(?:fungsi|function|class|method|api|endpoint)\s+\w",
-            # Match "/upload", "/api/v1/...", exact path question
+            # Match explicit path patterns like /upload, /api/v1/users (slash required)
+            r"(?:jelaskan|jabarkan|explain|apa.itu|what.is|describe|tentang|cari)\s+/[a-zA-Z]",
+            # Match "jelaskan fungsi X", "apa itu class Y", "jabarkan method Z"
+            r"(?:jelaskan|jabarkan|explain|describe|cari)\s+(?:fungsi|function|class|method|api|endpoint)\s+\w",
+            # Match standalone /path questions (not inside a URL)
             r"(?:endpoint|api|route)\s+[/]\S+",
             r"[/][a-zA-Z][a-zA-Z0-9_/\-]+\s+(?:itu|adalah|digunakan|bekerja|fungsi)",
+            # Match "jelaskan CamelCase or snake_case identifier"
+            r"(?:jelaskan|jabarkan|explain|describe|cari)\s+[A-Z][a-zA-Z0-9]+",
+            r"(?:jelaskan|jabarkan|explain|describe|cari)\s+[a-z][a-z0-9]*(?:_[a-z0-9]+)+",
         ],
         [],
     ),
@@ -181,7 +200,7 @@ def classify_intent(user_input: str) -> QAIntent:
     # Jika user meminta penjelasan dan menyertakan path spesifik (mis. "/upload"),
     # anggap ini permintaan `SPECIFIC_SYMBOL` dan beri prioritas sebelum pattern
     # Q/A umum seperti "ada api apa".
-    if re.search(r"(?:jelaskan|explain|apa.itu|what.is|describe)", text) and re.search(r"(?:^|\s)/[a-z0-9_\-/]+", text):
+    if re.search(r"(?:jelaskan|jabarkan|explain|apa.itu|what.is|describe|cari)", text) and re.search(r"(?:^|\s)/[a-z0-9_\-/]+", text):
         logger.debug("QA classify: specific symbol detected (path present) -> SPECIFIC_SYMBOL")
         return QAIntent.SPECIFIC_SYMBOL
 
@@ -216,6 +235,17 @@ def classify_intent(user_input: str) -> QAIntent:
             logger.debug("QA classify: FULL_INSPECTION triggered by %r", pat)
             return QAIntent.FULL_INSPECTION
 
+    # Fallback: detect "jabarkan/jelaskan/cari <CamelCase|snake_case>" using the
+    # ORIGINAL (non-lowercased) input — catches identifiers like HandleDownload,
+    # get_user_data that can't be detected in lowercase text reliably.
+    if re.search(
+        r"(?:jelaskan|jabarkan|explain|describe|cari|apa.itu|tentang)\s+"
+        r"(?:[A-Z][a-zA-Z0-9]{2,}|[a-z][a-z0-9]+(?:_[a-z0-9]+)+)\b",
+        user_input,  # original case
+    ):
+        logger.debug("QA classify: CamelCase/snake_case identifier detected → SPECIFIC_SYMBOL")
+        return QAIntent.SPECIFIC_SYMBOL
+
     # Default: inspeksi penuh jika tidak ada Q/A pattern yang cocok
     logger.debug("QA classify: no Q/A pattern matched → FULL_INSPECTION")
     return QAIntent.FULL_INSPECTION
@@ -229,15 +259,19 @@ def extract_specific_target(user_input: str) -> str:
       "jelaskan api /upload" → "/upload"
       "apa itu fungsi process_payment" → "process_payment"
       "endpoint /api/v1/users bagaimana" → "/api/v1/users"
+      "jabarkan fungsi downloadFile" → "downloadFile"
+      "cari fungsi HandleDownload" → "HandleDownload"
     """
-    # Match path like /upload, /api/v1/something
-    path_match = re.search(r"(/[a-zA-Z][a-zA-Z0-9_/\-]*)", user_input)
+    # Match path like /upload, /api/v1/something — strip HTTP URLs first to
+    # avoid picking up repo URL paths (e.g. /okai-ai-internal/okai-v2.git)
+    text_no_url = re.sub(r"https?://\S+", "", user_input)
+    path_match = re.search(r"(/[a-zA-Z][a-zA-Z0-9_/\-]*)", text_no_url)
     if path_match:
         return path_match.group(1)
 
-    # Match "explain/jelaskan <keyword> <name>" — captures the actual name, not keyword
+    # Match "explain/jelaskan/jabarkan <keyword> <name>" — captures the actual name, not keyword
     kw_sym_match = re.search(
-        r"(?:jelaskan|explain|apa.itu|what.is|describe|tentang)\s+"
+        r"(?:jelaskan|jabarkan|explain|apa.itu|what.is|describe|tentang|cari)\s+"
         r"(?:fungsi|function|class|method|api|endpoint)\s+([a-zA-Z_]\w*)",
         user_input,
         re.IGNORECASE,
@@ -245,9 +279,9 @@ def extract_specific_target(user_input: str) -> str:
     if kw_sym_match:
         return kw_sym_match.group(1)
 
-    # Match "explain/jelaskan <name>" directly (no intermediate keyword)
+    # Match "explain/jelaskan/jabarkan <name>" directly (no intermediate keyword)
     sym_match = re.search(
-        r"(?:jelaskan|explain|apa.itu|what.is|describe|tentang)\s+([a-zA-Z_]\w*)",
+        r"(?:jelaskan|jabarkan|explain|apa.itu|what.is|describe|tentang|cari)\s+([a-zA-Z_]\w*)",
         user_input,
         re.IGNORECASE,
     )
@@ -726,24 +760,27 @@ async def extract_main_flow(repo_path: Path) -> str:
         if fpath.exists():
             sections.append(_format_file_snippet(filename, _read_snippet(fpath), "entry point"))
 
-    # Files with lifecycle/startup keywords
+    # Files with lifecycle/startup keywords — scan Python and Go sources
     seen: set[str] = set()
-    for fpath in sorted(repo_path.rglob("*.py")):
-        if _should_skip(fpath.relative_to(repo_path).parts):
-            continue
-        if fpath.name in {ep for ep in _ENTRY_POINTS if ep.endswith(".py")}:
-            continue  # already handled above
-        content = _read_snippet(fpath)
-        if _LIFECYCLE_KEYWORDS.search(content):
-            rel = str(fpath.relative_to(repo_path))
-            if rel not in seen:
-                seen.add(rel)
-                sections.append(_format_file_snippet(rel, content, "startup/lifecycle"))
-                if len(seen) >= MAX_FILES_PER_TOPIC - 1:
-                    break
+    _already_handled = {ep for ep in _ENTRY_POINTS}
+    for ext, label in ((".py", "startup/lifecycle"), (".go", "Go startup/lifecycle")):
+        for fpath in sorted(repo_path.rglob(f"*{ext}")):
+            if _should_skip(fpath.relative_to(repo_path).parts):
+                continue
+            if fpath.name in _already_handled:
+                continue  # already handled as entry point above
+            content = _read_snippet(fpath)
+            if _LIFECYCLE_KEYWORDS.search(content):
+                rel = str(fpath.relative_to(repo_path))
+                if rel not in seen:
+                    seen.add(rel)
+                    sections.append(_format_file_snippet(rel, content, label))
+                    if len(seen) >= MAX_FILES_PER_TOPIC - 1:
+                        break
 
     if not sections:
         return "(tidak ditemukan entry point atau lifecycle hooks yang jelas)"
+
 
     return "\n\n".join(sections)
 
