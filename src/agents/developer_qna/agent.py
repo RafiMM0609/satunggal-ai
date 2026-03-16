@@ -145,6 +145,17 @@ _CONFIRMATION_ANSWERS = {
     "proceed", "y", "yep", "sure", "lanjut",
 }
 
+# Regex to detect explanation-style questions ("cara kerja", "logika bisnis", etc.)
+# Compiled once at module level for efficiency.
+_EXPLANATION_Q_RE = re.compile(
+    r"cara\s*kerja|bagaimana\s*bekerja|logika\s*bisnis|business\s*logic"
+    r"|alur\s*(?:api|endpoint|handler|bisnis|request)"
+    r"|jelaskan\s*(?:alur|logika|flow|cara)"
+    r"|detailkan\s*(?:logika|alur|flow|cara)"
+    r"|how\s*(?:does|it\s*work)",
+    re.IGNORECASE,
+)
+
 
 def _resolve_branch_from_reply(user_input: str, detected_branch: str) -> str | None:
     """Parse the user's confirmation reply; return branch name or None."""
@@ -223,6 +234,10 @@ class DeveloperQnAAgent(RepoAgentBase):
                         )
 
             # Run topic extractor + RAG + optional Tavily concurrently
+            # Detect explanation-style questions BEFORE gather so we can skip
+            # unnecessary data (RAG dumps, dir-tree) for SPECIFIC_SYMBOL intent.
+            is_explanation_q = _EXPLANATION_Q_RE.search(task.user_input) is not None
+
             qa_evidence, rag_files, tavily_ctx, dir_tree = await asyncio.gather(
                 run_qa_extraction(
                     repo_path,
@@ -248,15 +263,19 @@ class DeveloperQnAAgent(RepoAgentBase):
             else:
                 evidence["Extraction Error"] = str(qa_evidence)
 
-            # Secondary: RAG-relevant files
-            rag_text = _safe_str(rag_files, "(RAG unavailable)")
-            if rag_text.strip() and "unavailable" not in rag_text and "error" not in rag_text.lower():
-                evidence["📂 File Relevan (RAG)"] = rag_text
+            # For explanation questions about a specific symbol, skip RAG file
+            # dumps and dir-tree — they add noise (often 10+ full Go files) that
+            # tempts the LLM to reproduce code rather than explain logic.
+            if not (is_explanation_q and intent == QAIntent.SPECIFIC_SYMBOL):
+                # Secondary: RAG-relevant files
+                rag_text = _safe_str(rag_files, "(RAG unavailable)")
+                if rag_text.strip() and "unavailable" not in rag_text and "error" not in rag_text.lower():
+                    evidence["📂 File Relevan (RAG)"] = rag_text
 
-            # Tertiary: directory tree for structural context
-            tree = _safe_str(dir_tree, "")
-            if tree.strip():
-                evidence["🗂️ Struktur Direktori"] = tree
+                # Tertiary: directory tree for structural context
+                tree = _safe_str(dir_tree, "")
+                if tree.strip():
+                    evidence["🗂️ Struktur Direktori"] = tree
 
             # Optional: Tavily web search context
             tavily_text = _safe_str(tavily_ctx, "")
@@ -267,44 +286,51 @@ class DeveloperQnAAgent(RepoAgentBase):
             logger.info("QnA: extraction done in %.2fs", t_extract - t_start)
 
             evidence_text = self._build_evidence_text(evidence)
-            verbosity_note = (
-                "Jawab secara SINGKAT dan padat (maksimal 10 poin)."
-                if req.verbosity == "concise"
-                else "Jawab secara LENGKAP dengan penjelasan step-by-step."
-            )
 
-            # Detect explanation-style questions ("cara kerja", "logika bisnis", etc.)
-            # and inject an explicit natural-language directive so the LLM does not
-            # dump raw code back as its answer.
-            _EXPLANATION_Q_RE = re.compile(
-                r"cara\s*kerja|bagaimana\s*bekerja|logika\s*bisnis|business\s*logic"
-                r"|alur\s*(?:api|endpoint|handler|bisnis|request)"
-                r"|jelaskan\s*(?:alur|logika|flow|cara)"
-                r"|detailkan\s*(?:logika|alur|flow|cara)"
-                r"|how\s*(?:does|it\s*work)",
-                re.IGNORECASE,
-            )
-            if _EXPLANATION_Q_RE.search(task.user_input):
-                explanation_directive = (
-                    "\n\n**⚠️ Instruksi tambahan (wajib diikuti):** "
-                    "Pengguna ingin memahami CARA KERJA / LOGIKA BISNIS API ini. "
-                    "Jelaskan dalam bahasa natural (bahasa Indonesia), step-by-step. "
-                    "JANGAN tampilkan ulang kode sumber secara mentah. "
-                    "Gunakan kode sebagai referensi untuk mendeskripsikan: "
-                    "(1) validasi apa yang dilakukan, "
-                    "(2) query/operasi DB apa yang terjadi, "
-                    "(3) transformasi data, "
-                    "(4) response yang dikembalikan."
+            if is_explanation_q:
+                # Cap evidence size so the LLM focuses on explaining, not copying.
+                # 8000 chars covers ~80 lines of code comfortably.
+                _MAX_EVIDENCE_CHARS = 8_000
+                if len(evidence_text) > _MAX_EVIDENCE_CHARS:
+                    evidence_text = (
+                        evidence_text[:_MAX_EVIDENCE_CHARS]
+                        + f"\n\n... [evidence dipotong pada {_MAX_EVIDENCE_CHARS} karakter "
+                        "untuk fokus pada analisis logika]"
+                    )
+                # Directive placed FIRST so the LLM reads it before the evidence.
+                explanation_preamble = (
+                    "**🔴 INSTRUKSI WAJIB (baca sebelum menjawab):**\n"
+                    "Pengguna ingin memahami CARA KERJA / LOGIKA BISNIS API, "
+                    "BUKAN melihat kode sumbernya.\n"
+                    "- Jawab dalam bahasa natural (bahasa Indonesia), step-by-step.\n"
+                    "- JANGAN salin atau tampilkan ulang kode sumber.\n"
+                    "- Gunakan kode di bagian 'Data dari repositori' HANYA sebagai "
+                    "referensi untuk menjelaskan ALUR LOGIKA.\n"
+                    "- Format jawaban: nomor langkah + penjelasan prose + sumber file:baris.\n"
+                    "- Jika ada bagian yang di-truncate, simpulkan berdasarkan pola "
+                    "yang terlihat.\n"
+                    "---\n\n"
+                )
+                verbosity_note = "Jelaskan secara LENGKAP tapi dalam prosa bahasa natural, bukan kode."
+                user_msg = (
+                    f"{explanation_preamble}"
+                    f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
+                    f"**Panduan verbositas:** {verbosity_note}\n\n"
+                    f"---\n\n"
+                    f"**Data dari repositori (REFERENSI SAJA — jangan salin ulang):**\n\n{evidence_text}"
                 )
             else:
-                explanation_directive = ""
-
-            user_msg = (
-                f"**Pertanyaan pengguna:**\n{task.user_input}{explanation_directive}\n\n"
-                f"**Panduan verbositas:** {verbosity_note}\n\n"
-                f"---\n\n"
-                f"**Data dari repositori:**\n\n{evidence_text}"
-            )
+                verbosity_note = (
+                    "Jawab secara SINGKAT dan padat (maksimal 10 poin)."
+                    if req.verbosity == "concise"
+                    else "Jawab secara LENGKAP dengan penjelasan step-by-step."
+                )
+                user_msg = (
+                    f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
+                    f"**Panduan verbositas:** {verbosity_note}\n\n"
+                    f"---\n\n"
+                    f"**Data dari repositori:**\n\n{evidence_text}"
+                )
 
             qa_response = await self._llm.chat(
                 messages=[

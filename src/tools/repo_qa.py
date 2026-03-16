@@ -903,14 +903,14 @@ def _extract_handler_from_line(line: str) -> list[str]:
     return candidates
 
 
-def _read_full_function_body(lines: list[str], start_line: int, lang_ext: str) -> str:
+def _read_full_function_body(lines: list[str], start_line: int, lang_ext: str, max_lines: int = 80) -> str:
     """
     Read the complete function/method body starting at start_line (0-indexed).
 
     Supports:
       - Go / Java / JS / TS / C#: brace counting ({ ... })
       - Python: indentation-based
-    Returns the full body as a string.
+    Returns the full body as a string, capped at max_lines.
     """
     if not lines:
         return ""
@@ -930,15 +930,24 @@ def _read_full_function_body(lines: list[str], start_line: int, lang_ext: str) -
             if curr_indent <= def_indent and line.lstrip():
                 break
             body_lines.append(line)
+            if len(body_lines) >= max_lines:
+                total_est = sum(1 for _ in range(start_line, min(start_line + 300, len(lines))))
+                body_lines.append(f"\n// ... [truncated: showing {max_lines} of ~{total_est} lines]")
+                break
     else:
         # Brace-based languages: count { and } to find end of function
         open_braces = lines[start_line].count("{") - lines[start_line].count("}")
         i = start_line + 1
-        while i < len(lines) and i < start_line + 200:
+        while i < len(lines) and i < start_line + 300:
             line = lines[i]
             body_lines.append(line)
             open_braces += line.count("{") - line.count("}")
             if open_braces <= 0:
+                break
+            if len(body_lines) >= max_lines:
+                # Count remaining lines to give user context
+                remaining = sum(1 for j in range(i + 1, min(start_line + 300, len(lines))))
+                body_lines.append(f"\n// ... [truncated: showing {max_lines} of ~{max_lines + remaining} lines]")
                 break
             i += 1
 
