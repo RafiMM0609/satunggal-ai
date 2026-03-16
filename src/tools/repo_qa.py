@@ -38,9 +38,9 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MAX_BYTES_PER_FILE   = 20_000   # max chars per file snippet
+MAX_BYTES_PER_FILE   = 40_000   # max chars per file snippet
 MAX_GREP_LINES       = 100      # max lines per grep result
-MAX_FILES_PER_TOPIC  = 8        # max files read per extractor
+MAX_FILES_PER_TOPIC  = 12       # max files read per extractor
 
 _SKIP_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",

@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 QNA_TEMPERATURE = 0.15
 QNA_TOP_P       = 0.90
+QNA_MAX_TOKENS  = 16384   # increased from global default to allow richer answers
 
 # ── Q/A Intent display labels ──────────────────────────────────────────────────
 
@@ -236,6 +237,7 @@ class DeveloperQnAAgent(RepoAgentBase):
                 ],
                 temperature=QNA_TEMPERATURE,
                 top_p=QNA_TOP_P,
+                max_tokens=QNA_MAX_TOKENS,
             )
 
             t_total = time.monotonic() - t_start
@@ -323,6 +325,7 @@ class DeveloperQnAAgent(RepoAgentBase):
                     ],
                     temperature=QNA_TEMPERATURE,
                     top_p=QNA_TOP_P,
+                    max_tokens=QNA_MAX_TOKENS,
                 )
                 task.mark_done(answer.strip() + warning)
                 return task
