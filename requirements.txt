@@ -1,5 +1,6 @@
 # ── Core interfaces ────────────────────────────────────────────────────────────
 python-telegram-bot[webhooks]==21.9
+telegramify-markdown>=0.1.0   # Konversi Markdown → Telegram MarkdownV2
 fastapi==0.115.12
 uvicorn[standard]==0.34.0
 

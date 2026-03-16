@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-import re
 
+import telegramify_markdown
 from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
@@ -15,11 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_MSG_LEN = 4096
-
-
-def _escape_markdown(text: str) -> str:
-    """Escape special Markdown v1 characters so Telegram won't reject the message."""
-    return re.sub(r"([_*`\[])", r"\\\1", text)
 
 
 def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
@@ -45,17 +40,19 @@ def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
 
 
 async def _safe_reply(message, text: str) -> None:
-    """Send *text* with Markdown, auto-splitting if too long.
+    """Send *text* with MarkdownV2, auto-splitting if too long.
 
-    Each chunk is tried with Markdown first; if Telegram rejects the formatting,
-    the same chunk is retried as plain text so the message is never lost.
+    Each chunk is converted with telegramify-markdown then sent with MarkdownV2;
+    if Telegram rejects the formatting the same chunk is retried as plain text
+    so the message is never lost.
     """
     chunks = _split_text(text)
     for chunk in chunks:
         try:
-            await message.reply_text(chunk, parse_mode="Markdown", quote=True)
+            formatted = telegramify_markdown.markdownify(chunk)
+            await message.reply_text(formatted, parse_mode="MarkdownV2", quote=True)
         except BadRequest as exc:
-            logger.warning("Markdown parse failed (%s), retrying as plain text.", exc)
+            logger.warning("MarkdownV2 parse failed (%s), retrying as plain text.", exc)
             try:
                 await message.reply_text(chunk, parse_mode=None, quote=True)
             except BadRequest as exc2:
@@ -73,19 +70,20 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # This message will be edited live at each pipeline stage so the user
     # always sees what the bot is doing.
     progress_msg = await message.reply_text(
-        "⏳ *Sedang memproses permintaan...*\n`[░░░░░░░░░░]` *0%*",
-        parse_mode="Markdown",
+        telegramify_markdown.markdownify("⏳ *Sedang memproses permintaan...*\n`[░░░░░░░░░░]` *0%*"),
+        parse_mode="MarkdownV2",
         quote=True,
     )
 
     async def _progress_callback(rendered_text: str) -> None:
         """Edit the progress message with the latest tracker output."""
         try:
+            formatted = telegramify_markdown.markdownify(rendered_text)
             await context.bot.edit_message_text(
                 chat_id=progress_msg.chat_id,
                 message_id=progress_msg.message_id,
-                text=rendered_text,
-                parse_mode="Markdown",
+                text=formatted,
+                parse_mode="MarkdownV2",
             )
         except Exception as exc:  # noqa: BLE001
             # Telegram raises if the text didn't change – silently ignore.
