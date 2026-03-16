@@ -903,15 +903,22 @@ def _extract_handler_from_line(line: str) -> list[str]:
     return candidates
 
 
-def _read_full_function_body(lines: list[str], start_line: int, lang_ext: str, max_lines: int = 80) -> str:
+def _read_full_function_body(lines: list[str], start_line: int, lang_ext: str) -> str:
     """
-    Read the complete function/method body starting at start_line (0-indexed).
+    Read the COMPLETE function/method body starting at start_line (0-indexed).
+
+    No line cap is applied here — the caller is responsible for size reduction
+    (e.g. via _compress_handler_body) and/or a character cap afterwards.
+    Reading the full body is important so that business logic later in the
+    function (error handling, response building, downstream calls) is not lost.
 
     Supports:
       - Go / Java / JS / TS / C#: brace counting ({ ... })
       - Python: indentation-based
-    Returns the full body as a string, capped at max_lines.
+    Hard ceiling: 2000 lines as a safety guard against runaway files.
     """
+    _HARD_CEILING = 2000
+
     if not lines:
         return ""
 
@@ -920,7 +927,7 @@ def _read_full_function_body(lines: list[str], start_line: int, lang_ext: str, m
     if lang_ext == ".py":
         # Python: collect lines with deeper indentation than the def line
         def_indent = len(lines[start_line]) - len(lines[start_line].lstrip())
-        for i in range(start_line + 1, min(start_line + 120, len(lines))):
+        for i in range(start_line + 1, min(start_line + _HARD_CEILING, len(lines))):
             line = lines[i]
             stripped = line.rstrip()
             if not stripped:
@@ -930,28 +937,104 @@ def _read_full_function_body(lines: list[str], start_line: int, lang_ext: str, m
             if curr_indent <= def_indent and line.lstrip():
                 break
             body_lines.append(line)
-            if len(body_lines) >= max_lines:
-                total_est = sum(1 for _ in range(start_line, min(start_line + 300, len(lines))))
-                body_lines.append(f"\n// ... [truncated: showing {max_lines} of ~{total_est} lines]")
-                break
     else:
         # Brace-based languages: count { and } to find end of function
         open_braces = lines[start_line].count("{") - lines[start_line].count("}")
         i = start_line + 1
-        while i < len(lines) and i < start_line + 300:
+        while i < len(lines) and i < start_line + _HARD_CEILING:
             line = lines[i]
             body_lines.append(line)
             open_braces += line.count("{") - line.count("}")
             if open_braces <= 0:
                 break
-            if len(body_lines) >= max_lines:
-                # Count remaining lines to give user context
-                remaining = sum(1 for j in range(i + 1, min(start_line + 300, len(lines))))
-                body_lines.append(f"\n// ... [truncated: showing {max_lines} of ~{max_lines + remaining} lines]")
-                break
             i += 1
 
     return "\n".join(body_lines)
+
+
+# ── Semantic compression of handler bodies ────────────────────────────────────
+
+# Detects single-line field assignments:  respDetail.DocUuid = doc.Uuid
+_FIELD_ASSIGN_RE = re.compile(r'^\s+(\w+)\.(\w+)\s*=\s*\w+\.\w+\s*$')
+# Detects struct-literal field lines:     Uuid:  kf.Uuid,
+_STRUCT_FIELD_RE = re.compile(r'^\s+([A-Za-z_]\w*)\s*:\s*\w+\.\w+\s*,?\s*$')
+_FIELD_COLLAPSE_MIN = 4   # collapse if this many consecutive matching lines
+
+
+def _compress_handler_body(body: str, max_chars: int = 12_000) -> str:
+    """
+    Collapse repetitive field-assignment and struct-literal-field blocks
+    into a single summary comment, then apply a character cap.
+
+    Pipeline:
+      1. Receive FULL function body (no line cap — caller reads everything).
+      2. Collapse consecutive field-assignment lines into one summary comment.
+      3. If compressed result still exceeds max_chars, truncate with a marker.
+
+    This ensures the LLM always sees:
+      - Full business logic (validations, DB queries, error paths, calls)
+      - Field mapping summarised as "// [FIELD MAPPING: N fields → a, b, c...]"
+      - Never more than max_chars of raw text
+
+    Transforms:
+        respDetail.DocUuid = doc.Uuid
+        respDetail.DocName = doc.DocName
+        ...  (40 more lines)
+    Into:
+        // [FIELD MAPPING: 42 fields → DocUuid, DocName, DocType, ... +39 more]
+    """
+    lines  = body.splitlines()
+    result: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        # Try to accumulate a consecutive block of field-like lines
+        block: list[str] = []
+        names: list[str] = []
+
+        j = i
+        while j < len(lines):
+            line = lines[j]
+            m_a = _FIELD_ASSIGN_RE.match(line)
+            m_s = _STRUCT_FIELD_RE.match(line)
+            if m_a:
+                block.append(line)
+                names.append(m_a.group(2))   # dest field name
+                j += 1
+            elif m_s:
+                block.append(line)
+                names.append(m_s.group(1))   # struct key name
+                j += 1
+            else:
+                break
+
+        if len(block) >= _FIELD_COLLAPSE_MIN:
+            shown = names[:4]
+            rest  = len(names) - len(shown)
+            label = ', '.join(shown) + (f', ... +{rest} more' if rest > 0 else '')
+            # Preserve current indentation from the first field line
+            indent = len(block[0]) - len(block[0].lstrip())
+            result.append(
+                ' ' * indent
+                + f'// [FIELD MAPPING: {len(names)} fields → {label}]'
+            )
+            i = j
+        else:
+            result.append(lines[i])
+            i += 1
+
+    compressed = '\n'.join(result)
+
+    # Post-compression character cap — applied AFTER noise removal so real
+    # logic is never discarded in favour of field assignment blocks.
+    if len(compressed) > max_chars:
+        compressed = (
+            compressed[:max_chars]
+            + f"\n\n// ... [body truncated at {max_chars} chars after compression;"
+            " full logic available in the source file]"
+        )
+
+    return compressed
 
 
 async def _find_symbol_definition(repo_path: Path, name: str) -> str:
@@ -988,7 +1071,9 @@ async def _find_symbol_definition(repo_path: Path, name: str) -> str:
 
         for i, line in enumerate(file_lines):
             if func_def_re.search(line):
-                body = _read_full_function_body(file_lines, i, fpath.suffix)
+                body = _compress_handler_body(
+                    _read_full_function_body(file_lines, i, fpath.suffix)
+                )
                 rel = str(fpath.relative_to(repo_path))
                 lang = fpath.suffix.lstrip(".")
                 sections.append(
@@ -1162,7 +1247,9 @@ async def _trace_api_route(repo_path: Path, api_path: str) -> str:
 
                 for i, line in enumerate(file_lines):
                     if func_def_re.search(line):
-                        body = _read_full_function_body(file_lines, i, fpath.suffix)
+                        body = _compress_handler_body(
+                            _read_full_function_body(file_lines, i, fpath.suffix)
+                        )
                         rel = str(fpath.relative_to(repo_path))
                         lang = fpath.suffix.lstrip(".")
                         impl_sections.append(
