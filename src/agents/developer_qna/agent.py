@@ -263,10 +263,22 @@ class DeveloperQnAAgent(RepoAgentBase):
             else:
                 evidence["Extraction Error"] = str(qa_evidence)
 
-            # For explanation questions about a specific symbol, skip RAG file
-            # dumps and dir-tree — they add noise (often 10+ full Go files) that
-            # tempts the LLM to reproduce code rather than explain logic.
-            if not (is_explanation_q and intent == QAIntent.SPECIFIC_SYMBOL):
+            # For SPECIFIC_SYMBOL intent: skip RAG entirely.
+            # The symbol tracer (_trace_api_route / _find_symbol_definition) already
+            # scans all repo files directly. Including TF-IDF RAG here often pulls in
+            # irrelevant files (e.g. WhatsApp download handlers when asking about a
+            # different "download" endpoint) that pollute the LLM context and cause
+            # false "data tidak cukup" responses.
+            # For explanation-style SPECIFIC_SYMBOL: also skip dir-tree to reduce noise.
+            # For other intents: include both RAG and dir-tree as usual.
+            if intent == QAIntent.SPECIFIC_SYMBOL:
+                if not is_explanation_q:
+                    # Keep dir tree so LLM knows file structure (useful for locating
+                    # which directory the handler/controller lives in)
+                    tree = _safe_str(dir_tree, "")
+                    if tree.strip():
+                        evidence["🗂️ Struktur Direktori"] = tree
+            else:
                 # Secondary: RAG-relevant files
                 rag_text = _safe_str(rag_files, "(RAG unavailable)")
                 if rag_text.strip() and "unavailable" not in rag_text and "error" not in rag_text.lower():

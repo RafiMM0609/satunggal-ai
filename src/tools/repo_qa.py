@@ -834,7 +834,9 @@ async def extract_main_flow(repo_path: Path) -> str:
 
 # ── Extractor: Specific Symbol ────────────────────────────────────────────────
 
-async def extract_specific_symbol(repo_path: Path, target: str) -> str:
+async def extract_specific_symbol(
+    repo_path: Path, target: str, user_input: str = ""
+) -> str:
     """
     Temukan definisi + penggunaan simbol tertentu (API path, fungsi, class).
 
@@ -848,7 +850,10 @@ async def extract_specific_symbol(repo_path: Path, target: str) -> str:
     body lengkap.
 
     Untuk qualified name (pkg.FunctionName / controllers.DownloadFile): split
-    dan prioritaskan file di dalam direktori yang sesuai.
+    dan prioritaskan file di dalam direktori yang sesuai. Jika user_input juga
+    mengandung API path eksplisit (misal "GET /appuuid/:uuid → controllers.DownloadFile"),
+    trace KEDUANYA secara paralel sehingga LLM menerima: registrasi route +
+    full handler body + definisi fungsi yang dirujuk.
     """
     if not target:
         return "(target tidak ditentukan)"
@@ -861,6 +866,42 @@ async def extract_specific_symbol(repo_path: Path, target: str) -> str:
         parts = target.rsplit(".", 1)
         package_hint = parts[0]   # e.g. "controllers"
         func_name    = parts[1]   # e.g. "DownloadFile"
+
+        # If the raw question also contains an explicit parameterised API path
+        # (e.g. "GET /appuuid/:uuid/:processoption/:outputtype → controllers.DownloadFile"),
+        # trace BOTH the route AND the symbol definition in parallel so the LLM
+        # receives full context: where the route is registered + full handler body.
+        text_no_url = re.sub(r"https?://\S+", "", user_input) if user_input else ""
+        api_path_match = re.search(
+            r"/[a-zA-Z][a-zA-Z0-9_/\-]*(?:/:[a-zA-Z][a-zA-Z0-9_]*)+",
+            text_no_url,
+        ) if text_no_url else None
+
+        if api_path_match:
+            api_path = api_path_match.group(0)
+            logger.info(
+                "extract_specific_symbol: dual-trace → route=%r + symbol=%r (pkg=%r)",
+                api_path, func_name, package_hint,
+            )
+            route_result, sym_result = await asyncio.gather(
+                _trace_api_route(repo_path, api_path),
+                _find_symbol_definition(repo_path, func_name, package_hint=package_hint),
+            )
+            parts_out: list[str] = []
+            if route_result and "tidak ditemukan" not in route_result:
+                parts_out.append(route_result)
+            if sym_result and "tidak ditemukan" not in sym_result:
+                parts_out.append(sym_result)
+            # Include both even if only one succeeded (so LLM can at least report
+            # what was found and what was missing)
+            if not parts_out:
+                parts_out = [r for r in (route_result, sym_result) if r]
+            return (
+                "\n\n".join(parts_out)
+                if parts_out
+                else f"(tidak ditemukan: route `{api_path}` maupun simbol `{target}`)"
+            )
+
         return await _find_symbol_definition(
             repo_path, func_name, package_hint=package_hint
         )
@@ -1354,7 +1395,9 @@ async def run_qa_extraction(
         QAIntent.SECURITY:       lambda: extract_security(repo_path),
         QAIntent.MAIN_FLOW:      lambda: extract_main_flow(repo_path),
         QAIntent.SPECIFIC_SYMBOL: lambda: extract_specific_symbol(
-            repo_path, symbol_target or extract_specific_target(user_input)
+            repo_path,
+            symbol_target or extract_specific_target(user_input),
+            user_input=user_input,
         ),
     }
 

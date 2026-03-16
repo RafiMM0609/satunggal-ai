@@ -181,18 +181,28 @@ Berlaku hanya untuk intent `SPECIFIC_SYMBOL`. Fungsi `extract_specific_target()`
 
 Jika tidak ditemukan target → **inherit dari session sebelumnya** (`ctx["last_symbol_target"]`), berguna untuk pertanyaan follow-up seperti "bisa detailkan logika bisnis di api ini?".
 
+**Dual-trace (pertanyaan gabungan):** Ketika target adalah qualified name (e.g., `controllers.DownloadFile`) **dan** `user_input` juga mengandung API path berparameter (e.g., `GET /appuuid/:uuid/:processoption/:outputtype`), `extract_specific_symbol()` menjalankan **dua trace secara paralel** via `asyncio.gather()`:
+- `_trace_api_route(repo_path, api_path)` → cari registrasi route + handler body
+- `_find_symbol_definition(repo_path, "DownloadFile", package_hint="controllers")` → cari definisi fungsi di direktori yang sesuai
+
+Sebelumnya, hanya qualified name yang ditelusuri (karena `extract_specific_target()` mengembalikan satu target saja), sehingga registrasi route tidak pernah ditemukan saat pertanyaan mengandung keduanya.
+
 #### 6b. Pengumpulan Evidence (Paralel)
 
 Empat operasi dijalankan secara bersamaan dengan `asyncio.gather()`:
 
-| Operasi | Fungsi | Hasil |
-|---|---|---|
-| Topic extraction | `run_qa_extraction()` | Evidence utama sesuai intent |
-| RAG | `_read_relevant_files()` | File-file paling relevan (TF-IDF) |
-| Tavily | `_fetch_tavily_context()` | Konteks web opsional |
-| Dir tree | `_get_dir_tree()` | Struktur folder repo |
+| Operasi | Fungsi | Hasil | Disertakan untuk SPECIFIC_SYMBOL? |
+|---|---|---|---|
+| Topic extraction | `run_qa_extraction()` | Evidence utama sesuai intent | ✅ selalu |
+| RAG | `_read_relevant_files()` | File-file paling relevan (TF-IDF) | ❌ dilewati |
+| Tavily | `_fetch_tavily_context()` | Konteks web opsional | ✅ jika relevan |
+| Dir tree | `_get_dir_tree()` | Struktur folder repo | ✅ kecuali explanation |
 
-**Optimasi untuk pertanyaan "cara kerja" + `SPECIFIC_SYMBOL`:** RAG dan dir-tree dilewati untuk mengurangi noise — LLM jadi lebih fokus pada kode spesifik, bukan mendump seluruh repo.
+**Optimasi untuk `SPECIFIC_SYMBOL`:** RAG dilewati untuk **semua** pertanyaan `SPECIFIC_SYMBOL`, bukan hanya yang bersifat explanation. Alasannya: symbol tracer (`_trace_api_route` / `_find_symbol_definition`) sudah memindai seluruh repo secara langsung; RAG TF-IDF sering menarik file yang tidak relevan hanya karena kesamaan kata (contoh: kata "download" cocok dengan handler WhatsApp yang tidak ada hubungannya), sehingga LLM menyimpulkan "data tidak cukup".
+
+- **SPECIFIC_SYMBOL + non-explanation:** dir-tree tetap disertakan agar LLM tahu struktur direktori.
+- **SPECIFIC_SYMBOL + explanation** (terdeteksi via `_EXPLANATION_Q_RE`): dir-tree juga dilewati untuk memaksimalkan fokus pada kode spesifik.
+- **Intent lain** (bukan SPECIFIC_SYMBOL): RAG dan dir-tree disertakan seperti biasa.
 
 #### 6c. Penyusunan User Message ke LLM
 
@@ -250,7 +260,7 @@ Setiap intent dipetakan ke satu extractor di `repo_qa.py`:
 | `CI_CD` | `extract_ci_cd()` | Baca .github/workflows/*.yml, .gitlab-ci.yml, Jenkinsfile, Dockerfile, docker-compose.yml |
 | `SECURITY` | `extract_security()` | Grep pola auth middleware, JWT, OAuth, env vars, secret patterns |
 | `MAIN_FLOW` | `extract_main_flow()` | Baca entry points (main.py, app.py, index.js), grep startup sequence, request lifecycle |
-| `SPECIFIC_SYMBOL` | `extract_specific_symbol()` | Cari definisi + penggunaan simbol target dengan grep rekursif + route tracer |
+| `SPECIFIC_SYMBOL` | `extract_specific_symbol(repo_path, target, user_input)` | Cari definisi + penggunaan simbol target. Jika target adalah qualified name (`pkg.Func`) **dan** `user_input` mengandung API path berparameter → dual-trace paralel: `_trace_api_route()` + `_find_symbol_definition()`. Jika target dimulai dengan `/` → `_trace_api_route()` saja. Jika symbol biasa → `_find_symbol_definition()` saja. |
 
 Semua extractor bersifat **READ-ONLY**, menggunakan kombinasi `Path.rglob()` dan `re` untuk membaca dan menganalisis file secara lokal.
 
