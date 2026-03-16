@@ -49,7 +49,7 @@ MAX_GREP_LINES     = 80       # max lines from grep output per pattern
 MAX_LOG_LINES      = 50       # max git log lines
 MAX_DIFF_LINES     = 120      # max git diff lines
 MAX_LS_LINES       = 150      # max lines from directory listing
-MAX_RELEVANT_FILES = 6        # RAG: how many top-relevant source files to read
+MAX_RELEVANT_FILES = 10       # RAG: how many top-relevant source files to read
 
 _SKIP_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",
