@@ -181,6 +181,11 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"(?:logika|alur|implementasi|cara\s*kerja)\s+(?:dari\s+)?(?:api|endpoint|handler|controller)",
             r"(?:bisa\s+)?(?:detailkan|elaborasi|expand)\s+(?:logika|alur|flow|implementasi)",
             r"(?:lebih\s+)?detail\s+(?:logika|alur|flow|implementasi)",
+            # "cara kerja" / "bagaimana bekerja" with explicit API path in message
+            r"cara\s*kerja\s+api",
+            r"bagaimana\s*(?:cara\s*)?(?:api|endpoint|route)\s+(?:ini\s+)?bekerja",
+            r"ingin\s+tahu\s+(?:cara|bagaimana)",
+            r"(?:cara|how)\s+kerja\s+(?:api|endpoint|handler)",
         ],
         [],
     ),

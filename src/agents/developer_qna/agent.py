@@ -79,7 +79,7 @@ Kamu adalah **Asisten Analisis Repositori** yang menjawab pertanyaan langsung
 tentang sebuah codebase berdasarkan data yang diekstrak dari repositori.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️  ATURAN KRITIS – ANTI-HALUSINASI
+⚠️  ATURAN KRITIS – ANTI-HALUSINASI & ANTI-CODE-DUMP
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. Jawab HANYA berdasarkan data repositori yang diberikan.
 2. Setiap poin jawaban HARUS disertai sumber: nama file + nomor baris jika ada.
@@ -89,6 +89,12 @@ tentang sebuah codebase berdasarkan data yang diekstrak dari repositori.
    - 🔴 **[UNVERIFIED]** – tidak ada bukti langsung, tulis ini jika harus menduga.
 4. Jika data tidak cukup, tulis **[DATA TIDAK CUKUP]** dan jelaskan apa yang perlu diperiksa.
 5. DILARANG mengarang detail yang tidak ada dalam data.
+6. **DILARANG menampilkan ulang kode sumber secara verbatim sebagai jawaban.**
+   Kode dalam "Data dari repositori" adalah REFERENSI untuk kamu analisis.
+   Gunakan kode tersebut untuk MENJELASKAN logika dalam bahasa natural (prosa).
+   Kutip hanya potongan kode yang sangat spesifik sebagai bukti (maksimal 5 baris per kutipan).
+   Jika pertanyaan tentang "cara kerja" / "logika bisnis": jawab step-by-step
+   dalam bahasa natural — BUKAN dengan menempel ulang seluruh function body.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ## Panduan untuk pertanyaan tentang API / endpoint spesifik
@@ -264,10 +270,37 @@ class DeveloperQnAAgent(RepoAgentBase):
             verbosity_note = (
                 "Jawab secara SINGKAT dan padat (maksimal 10 poin)."
                 if req.verbosity == "concise"
-                else "Jawab secara LENGKAP dengan detail dan contoh kode bila ada."
+                else "Jawab secara LENGKAP dengan penjelasan step-by-step."
             )
+
+            # Detect explanation-style questions ("cara kerja", "logika bisnis", etc.)
+            # and inject an explicit natural-language directive so the LLM does not
+            # dump raw code back as its answer.
+            _EXPLANATION_Q_RE = re.compile(
+                r"cara\s*kerja|bagaimana\s*bekerja|logika\s*bisnis|business\s*logic"
+                r"|alur\s*(?:api|endpoint|handler|bisnis|request)"
+                r"|jelaskan\s*(?:alur|logika|flow|cara)"
+                r"|detailkan\s*(?:logika|alur|flow|cara)"
+                r"|how\s*(?:does|it\s*work)",
+                re.IGNORECASE,
+            )
+            if _EXPLANATION_Q_RE.search(task.user_input):
+                explanation_directive = (
+                    "\n\n**⚠️ Instruksi tambahan (wajib diikuti):** "
+                    "Pengguna ingin memahami CARA KERJA / LOGIKA BISNIS API ini. "
+                    "Jelaskan dalam bahasa natural (bahasa Indonesia), step-by-step. "
+                    "JANGAN tampilkan ulang kode sumber secara mentah. "
+                    "Gunakan kode sebagai referensi untuk mendeskripsikan: "
+                    "(1) validasi apa yang dilakukan, "
+                    "(2) query/operasi DB apa yang terjadi, "
+                    "(3) transformasi data, "
+                    "(4) response yang dikembalikan."
+                )
+            else:
+                explanation_directive = ""
+
             user_msg = (
-                f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
+                f"**Pertanyaan pengguna:**\n{task.user_input}{explanation_directive}\n\n"
                 f"**Panduan verbositas:** {verbosity_note}\n\n"
                 f"---\n\n"
                 f"**Data dari repositori:**\n\n{evidence_text}"
