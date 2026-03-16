@@ -46,6 +46,7 @@ from src.memory.state import AgentTask
 from src.tools.repo_qa import (
     QAIntent,
     classify_intent,
+    extract_specific_target,
     run_qa_extraction,
 )
 
@@ -197,6 +198,24 @@ class DeveloperQnAAgent(RepoAgentBase):
             )
             t_start = time.monotonic()
 
+            # ── Resolve symbol target for SPECIFIC_SYMBOL intent ──────────
+            # If the user's follow-up question doesn't include an explicit
+            # API path or function name (e.g. "bisa detailkan logika bisnis
+            # di api ini"), inherit the target from the previous turn so the
+            # route tracer can re-run against the same handler.
+            symbol_target = ""
+            if intent == QAIntent.SPECIFIC_SYMBOL:
+                symbol_target = extract_specific_target(req.problem or task.user_input)
+                if not symbol_target:
+                    ctx = self._get_session_context(task.session_id)
+                    inherited = ctx.get("last_symbol_target", "")
+                    if inherited:
+                        symbol_target = inherited
+                        logger.info(
+                            "QnA: follow-up – inherited symbol_target=%r from session",
+                            symbol_target,
+                        )
+
             # Run topic extractor + RAG + optional Tavily concurrently
             qa_evidence, rag_files, tavily_ctx, dir_tree = await asyncio.gather(
                 run_qa_extraction(
@@ -204,6 +223,7 @@ class DeveloperQnAAgent(RepoAgentBase):
                     intent,
                     req.problem or task.user_input,
                     candidate_route_filenames=req.candidate_route_filenames,
+                    symbol_target=symbol_target,
                 ),
                 self._read_relevant_files(repo_path, req.problem or task.user_input),
                 self._fetch_tavily_context(req.problem or task.user_input),
@@ -281,6 +301,7 @@ class DeveloperQnAAgent(RepoAgentBase):
                 req.repo_url,
                 req.branch,
                 req.candidate_route_filenames or None,
+                last_symbol_target=symbol_target if intent == QAIntent.SPECIFIC_SYMBOL else "",
             )
 
         except Exception as exc:

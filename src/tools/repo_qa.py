@@ -173,6 +173,14 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             # Match "jelaskan CamelCase or snake_case identifier"
             r"(?:jelaskan|jabarkan|explain|describe|cari)\s+[A-Z][a-zA-Z0-9]+",
             r"(?:jelaskan|jabarkan|explain|describe|cari)\s+[a-z][a-z0-9]*(?:_[a-z0-9]+)+",
+            # Business logic / implementation detail follow-up patterns (commonly referential)
+            r"logika\s*bisnis",
+            r"business\s*logic",
+            r"alur\s*bisnis",
+            r"(?:detailkan|jelaskan|jabarkan)\s+(?:logika|alur|implementasi|flow|cara\s*kerja)",
+            r"(?:logika|alur|implementasi|cara\s*kerja)\s+(?:dari\s+)?(?:api|endpoint|handler|controller)",
+            r"(?:bisa\s+)?(?:detailkan|elaborasi|expand)\s+(?:logika|alur|flow|implementasi)",
+            r"(?:lebih\s+)?detail\s+(?:logika|alur|flow|implementasi)",
         ],
         [],
     ),
@@ -1169,6 +1177,7 @@ async def run_qa_extraction(
     user_input: str,
     *,
     candidate_route_filenames: list[str] | None = None,
+    symbol_target: str = "",
 ) -> dict[str, str]:
     """
     Jalankan extractor yang sesuai berdasarkan intent dan kembalikan evidence dict.
@@ -1187,7 +1196,7 @@ async def run_qa_extraction(
         QAIntent.SECURITY:       lambda: extract_security(repo_path),
         QAIntent.MAIN_FLOW:      lambda: extract_main_flow(repo_path),
         QAIntent.SPECIFIC_SYMBOL: lambda: extract_specific_symbol(
-            repo_path, extract_specific_target(user_input)
+            repo_path, symbol_target or extract_specific_target(user_input)
         ),
     }
 

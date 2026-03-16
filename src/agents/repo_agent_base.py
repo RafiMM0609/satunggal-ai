@@ -388,6 +388,7 @@ class RepoAgentBase(BaseAgent):
         repo_url: str,
         branch: str,
         candidate_route_filenames: list[str] | None = None,
+        last_symbol_target: str = "",
     ) -> None:
         """
         Persist the repo context used in this turn so follow-up questions
@@ -401,6 +402,8 @@ class RepoAgentBase(BaseAgent):
                 ctx["branch"] = branch
             if candidate_route_filenames:
                 ctx["candidate_route_filenames"] = candidate_route_filenames
+            if last_symbol_target:
+                ctx["last_symbol_target"] = last_symbol_target
             logger.debug(
                 "%s: saved session context for %s → repo=%s branch=%s",
                 self.name, session_id, repo_url, branch,
