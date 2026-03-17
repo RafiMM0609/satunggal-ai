@@ -119,17 +119,23 @@ Jika ada pending:
 
 ### Langkah 2 — Klasifikasi Intent (`classify_intent`)
 
-Fungsi ini berbasis **regex murni** (tidak memanggil LLM), sehingga sangat cepat. Cara kerjanya:
+Fungsi ini masih menggunakan regex sebagai jalur cepat (deterministik dan hampir nol-latensi), tetapi sekarang memakai pendekatan hybrid: **regex pertama, LLM fallback** hanya ketika regex gagal mengklasifikasikan (yaitu ketika regex mengembalikan `FULL_INSPECTION` sebagai fallback).
 
-1. **Cek qualified identifier** (e.g., `controllers.DownloadFile`) → `SPECIFIC_SYMBOL`
-2. **Cek path eksplisit** (e.g., "jelaskan `/upload`") → `SPECIFIC_SYMBOL`
-3. **Cek route path berparam** (e.g., `/download/:uuid/:id`) → `SPECIFIC_SYMBOL`
-4. **Cek override Q/A** (keyword "qna", "q/a") → cari topik, fallback ke `SPECIFIC_SYMBOL`
-5. **Cocokkan `_INTENT_RULES`** — daftar berurutan untuk: `CI_CD`, `API_ENDPOINTS`, `TECH_STACK`, `DATA_MODELS`, `DEPENDENCIES`, `SECURITY`, `MAIN_FLOW`, `SPECIFIC_SYMBOL`
-6. **Cek trigger inspeksi** (kata: "error", "bug", "crash") → `FULL_INSPECTION`
-7. **Fallback** → `FULL_INSPECTION`
+Rangka kerjanya singkat:
 
-> **Catatan:** `FULL_INSPECTION` dari Q/A agent artinya pertanyaan disambungkan ke `DeveloperInspectorAgent`, bukan diproses oleh Q/A flow.
+1. Jalur cepat: regex mengenali pola kuat seperti qualified identifiers (`controllers.DownloadFile`), API paths (`/upload`, `/api/v1/...`), kata kunci topik (`ci/cd`, `dependencies`, `tech stack`), file mentions (`main.py`, `controllers/user.go`), imperatives (`berikan/tampilkan isi dockerfile`), dan existence questions (`adakah/apakah ada endpoint ...`).
+2. Jika regex menemukan kecocokan yang jelas → kembalikan intent sesuai `_INTENT_RULES` (mis. `CI_CD`, `API_ENDPOINTS`, `SPECIFIC_SYMBOL`, dll.).
+3. Jika regex TIDAK menemukan kecocokan (default: `FULL_INSPECTION`), agen membuat satu panggilan LLM singkat (deterministik, 0 temperature, ~20 token output) untuk menebak intent sebenarnya. Ini memperbaiki kasus bahasa alamiah yang tidak terduga tanpa menambah latensi pada jalur yang umum.
+
+Perubahan penting pada pola regex:
+- Menangkap permintaan tentang `Dockerfile` / `docker-compose` (mis. "berikan script dockerfile").
+- Menangkap permintaan "isi file" dan path file (mis. "jelaskan isi file main.py", "lihat controllers/user.go").
+- Menangkap pertanyaan keberadaan fitur/handler (mis. "adakah handle upload file pada repository ini").
+- Menangkap imperative verbs sebelum nama objek (mis. "tampilkan fungsi X", "berikan kode fungsi Y").
+
+Keuntungan: jalur umum tetap cepat karena regex; pertanyaan ambigu diklasifikasikan lebih akurat oleh LLM tanpa memperlambat kasus umum.
+
+> **Catatan:** `FULL_INSPECTION` dari Q/A agent artinya pertanyaan disambungkan ke `DeveloperInspectorAgent` jika memang terkait bug/error, atau diproses oleh Q/A secara fall-through ketika cocok.
 
 ### Langkah 3 — Ekstraksi Terstruktur via LLM (`_extract_request`)
 
@@ -174,10 +180,13 @@ Strategi checkout (5 percobaan):
 
 Berlaku hanya untuk intent `SPECIFIC_SYMBOL`. Fungsi `extract_specific_target()` mengekstrak nama target dari input user dengan prioritas:
 
-1. **Qualified identifier** (`controllers.DownloadFile`) — regex `\b[A-Za-z_]\w*\.[A-Z][a-zA-Z0-9_]+\b`
-2. **Path API** (`/upload`, `/api/v1/users`) — regex `/[a-zA-Z][a-zA-Z0-9_/\-:*]*`
-3. **"jelaskan fungsi X"** — regex trigger word + keyword intermediary + nama
-4. **"jelaskan X"** — regex trigger word + nama langsung
+`extract_specific_target()` telah disempurnakan untuk menangani lebih banyak variasi alami (file mentions, prepositional phrases, imperative verbs) dan untuk menghindari false-positive dari parsing path/file order. Prioritas pengecekan sekarang adalah:
+
+1. **Qualified identifier** (`controllers.DownloadFile`) — regex yang menangkap `pkg.CamelCase`.
+2. **Keyword + intermediary** (mis. "jelaskan fungsi X", "tampilkan kode fungsi X") — menangkap nama fungsi/kelas/handler sebelum pengecekan file/path sehingga kasus seperti "jelaskan method handle_request di agent.py" mengekstrak `handle_request` (bukan `agent.py`).
+3. **File mention / filename.extension** (mis. `main.py`, `controllers/user.go`) — mendukung multi-segment paths sehingga `controllers/user.go` diekstrak utuh.
+4. **API path** (mis. `/upload`, `/api/v1/:id`) — deteksi path HTTP.
+5. **General "jelaskan X" / existence questions** — menangkap target hingga 3 kata dan melewatkan preposisi umum (mis. "fungsi untuk login" → `login`).
 
 Jika tidak ditemukan target → **inherit dari session sebelumnya** (`ctx["last_symbol_target"]`), berguna untuk pertanyaan follow-up seperti "bisa detailkan logika bisnis di api ini?".
 
