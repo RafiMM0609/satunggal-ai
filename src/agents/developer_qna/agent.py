@@ -72,6 +72,27 @@ _QA_INTENT_LABELS: dict[QAIntent, str] = {
     QAIntent.FULL_INSPECTION: "💬 General Q/A",
 }
 
+# ── LLM-based intent fallback prompt ──────────────────────────────────────────
+# Used only when regex classify_intent() returns FULL_INSPECTION (catch-all),
+# to accurately classify genuinely ambiguous natural-language questions.
+
+_LLM_INTENT_CLASSIFY_SYSTEM = """\
+Kamu adalah intent classifier untuk agen Q&A repositori kode.
+Klasifikasikan pertanyaan pengguna ke dalam SATU intent berikut:
+
+api_endpoints   – tentang route HTTP, REST API, endpoint, daftar URL
+tech_stack      – tentang teknologi, framework, bahasa, library yang dipakai
+data_models     – tentang skema database, ORM model, struktur data
+dependencies    – tentang package, library, requirements, modul, dependensi
+ci_cd           – tentang CI/CD, deployment, Docker, Dockerfile, pipeline
+security        – tentang autentikasi, otorisasi, keamanan, permission, JWT
+main_flow       – tentang arsitektur, alur utama sistem, cara kerja secara umum
+specific_symbol – tentang file spesifik, fungsi, class, method, handler, atau fitur tertentu
+full_inspection – laporan bug, error, crash, atau masalah yang perlu dianalisis
+
+Balas HANYA dengan nama intent (satu kata tanpa spasi), contoh: api_endpoints\
+"""
+
 # ── Q/A System Prompt ──────────────────────────────────────────────────────────
 
 _QA_SYSTEM_PROMPT = """\
@@ -190,6 +211,55 @@ class DeveloperQnAAgent(RepoAgentBase):
         history=None,
     ) -> None:
         super().__init__(llm=llm, history=history)
+
+    # ── Intent classification (regex + LLM fallback) ───────────────────────────
+
+    async def _classify_intent(self, user_input: str) -> QAIntent:
+        """
+        Classify Q/A sub-intent with maximum accuracy.
+
+        Strategy:
+          1. Fast regex-based classify_intent() — zero latency, deterministic.
+          2. If regex returns FULL_INSPECTION (the catch-all default), make a
+             single cheap LLM call (~20 output tokens) to accurately classify
+             genuinely ambiguous or free-form natural-language questions.
+
+        The LLM fallback adds ~0.5–1 s only for questions that the regex
+        could not confidently classify, keeping the common path fast.
+        """
+        intent = classify_intent(user_input)
+        if intent != QAIntent.FULL_INSPECTION:
+            logger.debug("QnA intent: regex → %s", intent.value)
+            return intent
+
+        logger.debug("QnA intent: regex → FULL_INSPECTION, trying LLM fallback")
+        try:
+            response = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _LLM_INTENT_CLASSIFY_SYSTEM},
+                    {"role": "user",   "content": user_input[:600]},
+                ],
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=20,
+            )
+            raw = response.strip().lower()
+            # Guard against LLM adding extra text — extract first token only
+            raw = re.split(r"[\s\n,.;:()\[\]]+", raw)[0]
+            _intent_map: dict[str, QAIntent] = {v.value: v for v in QAIntent}
+            fallback = _intent_map.get(raw)
+            if fallback:
+                logger.info(
+                    "QnA intent: LLM fallback → %s (raw=%r)", fallback.value, raw
+                )
+                return fallback
+            logger.warning(
+                "QnA intent: LLM returned unrecognised token %r → FULL_INSPECTION", raw
+            )
+        except Exception as exc:
+            logger.warning("QnA intent: LLM fallback failed (%s) → FULL_INSPECTION", exc)
+
+        return QAIntent.FULL_INSPECTION
 
     # ── Q/A flow ───────────────────────────────────────────────────────────────
 
@@ -415,8 +485,8 @@ class DeveloperQnAAgent(RepoAgentBase):
                     return await self._run_qa_flow(task, repo_path, req, intent)
                 # Not a recognizable confirmation – fall through to normal parse.
 
-            # ── Step 1: Classify Q/A sub-intent (fast, regex-based) ────────
-            intent = classify_intent(task.user_input)
+            # ── Step 1: Classify Q/A sub-intent (regex + LLM fallback) ────
+            intent = await self._classify_intent(task.user_input)
             logger.info("QnA: classified intent=%s", intent.value)
 
             # ── Step 2: Extract structured request via LLM ─────────────────

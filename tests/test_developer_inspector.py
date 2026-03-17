@@ -562,23 +562,47 @@ class TestClassifyIntent:
         ("apa saja dependency yang dipakai?", QAIntent.DEPENDENCIES),
         ("show requirements", QAIntent.DEPENDENCIES),
         ("list packages", QAIntent.DEPENDENCIES),
-        # CI/CD
+        # CI/CD — original + new dockerfile/docker-compose cases
         ("bagaimana proses deployment?", QAIntent.CI_CD),
         ("explain the ci/cd pipeline", QAIntent.CI_CD),
         ("cara deploy ke production?", QAIntent.CI_CD),
+        ("berikan script dockerfile", QAIntent.CI_CD),
+        ("tampilkan docker-compose", QAIntent.CI_CD),
+        ("tunjukkan isi dockerfile", QAIntent.CI_CD),
         # Security
         ("bagaimana autentikasi dilakukan?", QAIntent.SECURITY),
         ("how is jwt implemented?", QAIntent.SECURITY),
         ("explain security layer", QAIntent.SECURITY),
+        ("apakah ada middleware auth di repo ini?", QAIntent.SECURITY),
         # Main flow
         ("bagaimana flow utama aplikasi?", QAIntent.MAIN_FLOW),
         ("explain the main flow", QAIntent.MAIN_FLOW),
         ("alur kerja sistem ini?", QAIntent.MAIN_FLOW),
+        # Specific symbol — original + new file-mention & existence cases
+        ("jelaskan function controler.download", QAIntent.SPECIFIC_SYMBOL),
+        ("jelaskan isi file main.py", QAIntent.SPECIFIC_SYMBOL),
+        ("tampilkan isi dari config.yaml", QAIntent.SPECIFIC_SYMBOL),
+        ("lihat middleware.go", QAIntent.SPECIFIC_SYMBOL),
+        ("berikan isi controllers/user.go", QAIntent.SPECIFIC_SYMBOL),
+        # 'router.go' triggers API_ENDPOINTS (routing file heuristic)
+        ("lihat router.go", QAIntent.API_ENDPOINTS),
+        ("adakah handle upload file pada repository ini", QAIntent.SPECIFIC_SYMBOL),
+        ("apakah ada fungsi untuk login di sini?", QAIntent.SPECIFIC_SYMBOL),
+        ("berikan kode fungsi process_order", QAIntent.SPECIFIC_SYMBOL),
+        # API endpoint existence queries
+        ("apakah ada endpoint untuk download?", QAIntent.API_ENDPOINTS),
+        ("adakah route untuk /users di sini?", QAIntent.API_ENDPOINTS),
         # Full inspection triggers (error/bug keywords)
         ("ada bug di payment service", QAIntent.FULL_INSPECTION),
         ("error 500 saat login", QAIntent.FULL_INSPECTION),
         ("crash waktu startup", QAIntent.FULL_INSPECTION),
         ("tolong perbaiki", QAIntent.FULL_INSPECTION),
+        # "adakah" + bug word must still go to FULL_INSPECTION
+        ("adakah bug di service ini?", QAIntent.FULL_INSPECTION),
+        # "autentikasi" is a strong SECURITY keyword — takes priority over "masalah"
+        ("adakah masalah dengan autentikasi?", QAIntent.SECURITY),
+        # "adakah" + masalah with no specific topic keyword → FULL_INSPECTION
+        ("adakah masalah pada sistem ini?", QAIntent.FULL_INSPECTION),
     ])
     def test_classify_returns_correct_intent(self, text, expected):
         result = classify_intent(text)
@@ -598,6 +622,16 @@ class TestExtractSpecificTarget:
         ("explain function process_payment", "process_payment"),
         ("jelaskan method handle_request di agent.py", "handle_request"),
         ("explain class UserModel", "UserModel"),
+        # New: file.extension mention
+        ("jelaskan isi file main.py", "main.py"),
+        ("tampilkan config.yaml", "config.yaml"),
+        ("lihat controllers/user.go", "controllers/user.go"),
+        # New: existence questions
+        ("adakah handle upload file pada repository ini", "handle"),
+        # "fungsi untuk login" → extracts the actual target after the preposition
+        ("apakah ada fungsi untuk login", "login"),
+        # New: imperative with keyword
+        ("berikan kode fungsi process_order", "process_order"),
     ])
     def test_extracts_target(self, text, expected_substr):
         target = extract_specific_target(text)

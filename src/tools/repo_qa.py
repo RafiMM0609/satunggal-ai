@@ -76,6 +76,10 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"ci[/ \-]?cd", r"pipeline", r"github.action", r"gitlab.ci",
             r"jenkins", r"deploy.flow", r"workflow.deploy", r"bagaimana.deploy",
             r"proses.deploy", r"alur.deploy", r"cara.deploy",
+            # Dockerfile / Docker Compose mentions (build & deployment config)
+            r"dockerfile", r"docker.?compose", r"docker.?file\b",
+            # Imperative requests: "berikan script dockerfile", "tampilkan docker-compose"
+            r"(?:berikan|tampilkan|tunjukkan|kasih|lihat)\s+(?:script\s+)?(?:dockerfile|docker.?compose)",
         ],
         [],
     ),
@@ -97,6 +101,9 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             # download / upload feature queries (commonly maps to HTTP routes)
             r"(?:fitur|feature).*(?:download|unduh|upload|ekspor|export)",
             r"(?:download|unduh|upload).*(?:route|endpoint|api|fitur|feature)",
+            # Existence questions about API/endpoints: "apakah ada endpoint untuk X"
+            r"(?:adakah|apakah.ada)\s+(?:api|endpoint|route|rute|path)\b",
+            r"(?:adakah|apakah.ada).*\b(?:endpoint|route|rute)\b",
         ],
         [],
     ),
@@ -138,6 +145,8 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"keamanan", r"autentika", r"autorisas", r"auth(entika|orisas|ensikasi)?",
             r"jwt", r"oauth", r"middleware.auth", r"security", r"api.key",
             r"secret", r"enkripsi", r"proteksi", r"permission", r"role.*access",
+            # Existence questions about security/auth
+            r"(?:adakah|apakah.ada)\s+(?:middleware|autentika|autorisas|auth|keamanan|permission|role|jwt|oauth)\b",
         ],
         [],
     ),
@@ -186,6 +195,26 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"bagaimana\s*(?:cara\s*)?(?:api|endpoint|route)\s+(?:ini\s+)?bekerja",
             r"ingin\s+tahu\s+(?:cara|bagaimana)",
             r"(?:cara|how)\s+kerja\s+(?:api|endpoint|handler)",
+            # ── File content requests ─────────────────────────────────────────
+            # "jelaskan isi file main.py", "tampilkan config.yaml", "lihat router.go"
+            r"(?:jelaskan|jelasin|jabarkan|explain|describe|tampilkan|tunjukkan|berikan"
+            r"|kasih|lihat|buka|cek|periksa|apa.isi)\s+"
+            r"(?:isi\s+(?:dari\s+)?)?(?:file\s+)?\S+\.(?:py|go|js|ts|jsx|tsx|java|php|rb|rs|kt"
+            r"|cs|yaml|yml|json|toml|env|sh|md|txt|cfg|ini|sql|html|css|scss)\b",
+            # "isi file X.ext" / "isi dari X.ext" without a leading verb
+            r"\bisi\s+(?:dari\s+)?(?:file\s+)?\S+\.(?:py|go|js|ts|jsx|tsx|java|php|rb|rs|kt"
+            r"|cs|yaml|yml|json|toml|env|sh|md|txt|cfg|ini|sql|html|css|scss)\b",
+            # "jelaskan isi file main" (filename without extension)
+            r"(?:jelaskan|jabarkan|explain|describe|tampilkan|tunjukkan|berikan)\s+(?:isi\s+)?(?:dari\s+)?file\s+\S+",
+            # ── Existence questions about specific features / handlers ────────
+            # "adakah handle upload file", "apakah ada fungsi untuk login"
+            # Negative lookahead prevents matching bug/error/masalah reports
+            r"(?:adakah|apakah\s+ada|ada\s+tidak)\s+"
+            r"(?!(?:bug|error|crash|masalah|broken|gagal|exception|fix|perbaik))\w",
+            # ── Imperative verbs for specific code artifacts ──────────────────
+            # "tampilkan fungsi X", "berikan kode method Y", "tunjukkan class Z"
+            r"(?:berikan|tampilkan|tunjukkan|kasih|lihat)\s+(?:kode\s+|script\s+|isi\s+|implementasi\s+)?"
+            r"(?:dari\s+)?(?:fungsi|function|class|method|handler)\s+\w",
         ],
         [],
     ),
@@ -295,15 +324,21 @@ def extract_specific_target(user_input: str) -> str:
       "controllers.DownloadFile" → "controllers.DownloadFile"
     """
     # Broad trigger-word pattern — includes informal Indonesian variants
-    # (jelasin, coba jelasin, tolong jelaskan, etc.)
+    # (jelasin, coba jelasin, tolong jelaskan, etc.) and imperative/existence verbs.
     _TRIGGER = (
         r"(?:jelaskan|jelasin|jabarkan|explain|apa.itu|what.is|describe"
-        r"|tentang|cari|coba\s+jelas\w*|tolong\s+jelas\w*)"
+        r"|tentang|cari|coba\s+jelas\w*|tolong\s+jelas\w*"
+        r"|adakah|apakah.ada|ada.tidak"
+        r"|berikan|tampilkan|tunjukkan|kasih|lihat.isi|apa.isi)"
     )
+
+    # Optional Indonesian/English prepositions that can sit between the keyword
+    # and the actual function / symbol name (e.g. "fungsi untuk login").
+    _PREP = r"(?:(?:untuk|buat|bagi|dengan|dari|yang|terkait|berkaitan|tentang|about|for|of)\s+)?"
 
     # Qualified identifier: controllers.DownloadFile, pkg.Method, etc.
     # Recognised as `lowercase_word.CamelCaseWord` — very common in Go/Java/JS.
-    # Checked BEFORE path extraction to avoid false-positive on URL paths.
+    # Checked BEFORE everything to avoid false-positives on paths/filenames.
     text_no_url = re.sub(r"https?://\S+", "", user_input)
     qualified_match = re.search(
         r"\b([A-Za-z_]\w*)\.([A-Z][a-zA-Z0-9_]+)\b",
@@ -312,28 +347,51 @@ def extract_specific_target(user_input: str) -> str:
     if qualified_match:
         return qualified_match.group(0)  # e.g. "controllers.DownloadFile"
 
-    # API path: /upload, /api/v1/:param — strip URL schemes first
-    path_match = re.search(r"(/[a-zA-Z][a-zA-Z0-9_/\-:*]*)", text_no_url)
-    if path_match:
-        return path_match.group(1)
-
-    # "jelaskan fungsi X" — captures name after keyword intermediary
+    # "jelaskan fungsi X" — checked BEFORE path/file so it correctly captures
+    # the function name even when a filename appears later in the sentence
+    # (e.g. "jelaskan method handle_request di agent.py" → "handle_request").
     kw_sym_match = re.search(
-        rf"{_TRIGGER}\s+(?:fungsi|function|class|method|api|endpoint)\s+([a-zA-Z_]\w*)",
+        rf"{_TRIGGER}\s+(?:fungsi|function|class|method|api|endpoint|handler|fitur|feature|script)\s+{_PREP}([a-zA-Z_]\w*)",
         user_input,
         re.IGNORECASE,
     )
     if kw_sym_match:
         return kw_sym_match.group(kw_sym_match.lastindex)
 
-    # "jelaskan X" directly
+    # Filename.extension — checked BEFORE api-path so that relative file paths
+    # like "controllers/user.go" are not truncated by the /path extractor.
+    # Character class includes "/" to handle multi-segment paths.
+    file_match = re.search(
+        r"\b([\w\-./]+\.(?:py|go|js|ts|jsx|tsx|java|php|rb|rs|kt|cs"
+        r"|yaml|yml|json|toml|env|sh|md|txt|cfg|ini|sql|html|css|scss))\b",
+        text_no_url,
+        re.IGNORECASE,
+    )
+    if file_match:
+        return file_match.group(1)
+
+    # API path: /upload, /api/v1/:param — strip URL schemes first
+    path_match = re.search(r"(/[a-zA-Z][a-zA-Z0-9_/\-:*]*)", text_no_url)
+    if path_match:
+        return path_match.group(1)
+
+    # "jelaskan X" / "adakah X" directly — capture the first meaningful word(s)
     sym_match = re.search(
-        rf"{_TRIGGER}\s+([a-zA-Z_]\w*)",
+        rf"{_TRIGGER}\s+{_PREP}([a-zA-Z_]\w*(?:\s+[a-zA-Z_]\w*){{0,2}})",
         user_input,
         re.IGNORECASE,
     )
     if sym_match:
-        return sym_match.group(sym_match.lastindex)
+        # Return up to 3 words but trim trailing stop-words
+        raw = sym_match.group(sym_match.lastindex).strip()
+        # Remove trailing prepositions / articles common in Indonesian
+        raw = re.sub(
+            r"\s+(?:di|pada|dalam|untuk|dari|yang|ini|itu|ke|dengan)\s*$",
+            "",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        return raw
 
     return ""
 
