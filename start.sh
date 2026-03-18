@@ -194,7 +194,34 @@ fi
 success "Python dependencies terinstall."
 
 # ==============================================================================
-# 2. System libraries — WeasyPrint (PDF) & Chromium/puppeteer (mermaid-cli)
+# 2. Playwright — install browser binaries & system dependencies
+# ==============================================================================
+header "Playwright Browser & System Dependencies"
+
+PLAYWRIGHT_BIN="$VENV_DIR/bin/playwright"
+
+if [[ -f "$PLAYWRIGHT_BIN" ]]; then
+    info "Menginstall Playwright Chromium browser binary ..."
+    if ! "$PLAYWRIGHT_BIN" install chromium; then
+        warning "playwright install chromium gagal. Fitur web browsing mungkin tidak berfungsi."
+    else
+        success "Playwright Chromium berhasil diinstall."
+    fi
+
+    if [[ "$OS" == "debian" || "$OS" == "fedora" || "$OS" == "arch" || "$OS" == "linux" ]]; then
+        info "Menginstall system dependencies untuk Playwright (playwright install-deps) ..."
+        if ! "$PLAYWRIGHT_BIN" install-deps chromium; then
+            warning "playwright install-deps gagal. Coba jalankan manual: playwright install-deps"
+        else
+            success "Playwright system dependencies berhasil diinstall."
+        fi
+    fi
+else
+    warning "playwright tidak ditemukan di $PLAYWRIGHT_BIN. Lewati instalasi browser Playwright."
+fi
+
+# ==============================================================================
+# 3. System libraries — WeasyPrint (PDF) & Chromium/puppeteer (mermaid-cli)
 # ==============================================================================
 header "System Libraries (WeasyPrint & Chromium)"
 
@@ -264,7 +291,7 @@ else
 fi
 
 # ==============================================================================
-# 3. Pandoc (sistem) — untuk konversi Markdown ke Word (.docx)
+# 4. Pandoc (sistem) — untuk konversi Markdown ke Word (.docx)
 # ==============================================================================
 header "Pandoc (Markdown → Word)"
 
@@ -327,7 +354,7 @@ else
 fi
 
 # ==============================================================================
-# 4. Node.js & mermaid-cli — untuk render diagram Mermaid ke PNG
+# 5. Node.js & mermaid-cli — untuk render diagram Mermaid ke PNG
 # ==============================================================================
 header "mermaid-cli / mmdc (diagram renderer)"
 
@@ -394,7 +421,7 @@ else
 fi
 
 # ==============================================================================
-# 5. Verifikasi akhir
+# 6. Verifikasi akhir
 # ==============================================================================
 header "Ringkasan Instalasi"
 
@@ -407,16 +434,17 @@ check() {
     fi
 }
 
-check "python"  "python3"
-check "pip"     "pip"
-check "pandoc"  "pandoc"
-check "node"    "node"
-check "mmdc"    "mmdc"
+check "python"     "python3"
+check "pip"        "pip"
+check "playwright" "playwright"
+check "pandoc"     "pandoc"
+check "node"       "node"
+check "mmdc"       "mmdc"
 
 echo ""
 
 # ==============================================================================
-# 6. Jalankan bot
+# 7. Jalankan bot
 # ==============================================================================
 case "$MODE" in
     install)
