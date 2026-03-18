@@ -82,13 +82,16 @@ def _get_pipeline():
     from src.agents.sysinfo_agent.agent import SysInfoAgent
     from src.agents.technical_writer.agent import TechnicalWriterAgent
     from src.agents.wbs_agent.agent import WBSAgent
+    from src.agents.web_automation.agent import WebAutomationAgent
     from src.memory.history import ConversationHistory
     from src.orchestrator.router import AgentRouter
+    from src.tools.browser_navigator import BrowserNavigatorTool
     from src.tools.diagram_renderer import DiagramRendererTool
     from src.tools.document_generator import DocumentGeneratorTool
     from src.tools.mandays_generator import MandaysGeneratorTool
     from src.tools.pdf_parser import PDFParserTool
     from src.tools.web_quiz_builder import WebQuizBuilderTool
+    from src.tools.web_reader import WebReaderTool
     from src.tools.wbs_generator import WBSGeneratorTool
 
     _history = ConversationHistory(max_messages=30)
@@ -105,6 +108,8 @@ def _get_pipeline():
         "document_generator": DocumentGeneratorTool(),
         "pdf_parser":         PDFParserTool(),
         "web_quiz_builder":   WebQuizBuilderTool(),
+        "web_reader":         WebReaderTool(),
+        "browser_navigator":  BrowserNavigatorTool(),
     }
 
     # Tavily is optional – only registered when API key is available.
@@ -130,6 +135,7 @@ def _get_pipeline():
         "sysinfo_agent":       SysInfoAgent(_history, _llm),
         "log_viewer_agent":    LogViewerAgent(_history, _llm),
         "quiz_agent":          QuizAgent(_llm),
+        "web_automation":      WebAutomationAgent(_llm),
     }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
