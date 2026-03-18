@@ -61,7 +61,7 @@ info "Direktori: $SCRIPT_DIR"
 info "Log      : $DEPLOY_LOG"
 
 # ── 1. Git pull ───────────────────────────────────────────────────────────────
-header "1/2 — Git Pull"
+header "1/4 — Git Pull"
 
 cd "$SCRIPT_DIR"
 
@@ -89,7 +89,7 @@ else
 fi
 
 # ── 2. Update Python dependencies ────────────────────────────────────────────
-header "2/3 — Update Python Dependencies"
+header "2/4 — Update Python Dependencies"
 
 VENV_DIR="$SCRIPT_DIR/.venv"
 PIP="$VENV_DIR/bin/pip"
@@ -109,12 +109,39 @@ else
     success "Python dependencies berhasil diupdate."
 fi
 
-# ── 3. Jadwalkan restart (fully detached) ─────────────────────────────────────
+# ── 3. Install Playwright browser binaries & system dependencies ──────────────
+header "3/4 — Playwright Browser & System Dependencies"
+
+PLAYWRIGHT_BIN="$VENV_DIR/bin/playwright"
+
+if $DRY_RUN; then
+    warning "[DRY-RUN] playwright install dilewati."
+elif [[ ! -f "$PLAYWRIGHT_BIN" ]]; then
+    warning "playwright tidak ditemukan di $PLAYWRIGHT_BIN. Lewati instalasi browser Playwright."
+else
+    info "Menginstall Playwright Chromium browser binary ..."
+    if ! "$PLAYWRIGHT_BIN" install chromium 2>&1 | tee -a "$DEPLOY_LOG"; then
+        warning "playwright install chromium gagal. Fitur web browsing mungkin tidak berfungsi."
+    else
+        success "Playwright Chromium berhasil diinstall."
+    fi
+
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        info "Menginstall system dependencies untuk Playwright ..."
+        if ! "$PLAYWRIGHT_BIN" install-deps chromium 2>&1 | tee -a "$DEPLOY_LOG"; then
+            warning "playwright install-deps gagal. Coba jalankan manual: playwright install-deps"
+        else
+            success "Playwright system dependencies berhasil diinstall."
+        fi
+    fi
+fi
+
+# ── 4. Jadwalkan restart (fully detached) ─────────────────────────────────────
 # PENTING: Tidak boleh memanggil start.sh --restart secara langsung dari sini,
 # karena start.sh akan membunuh proses bot yang sedang menjalankan handler ini.
 # Solusi: jadwalkan restart sebagai proses terpisah (setsid + disown + delay)
 # agar bot sempat mengirim hasil deploy ke Telegram sebelum mati.
-header "3/3 — Jadwalkan Restart Service"
+header "4/4 — Jadwalkan Restart Service"
 
 RESTART_LOG="$LOG_DIR/restart_$(date +%Y%m%d_%H%M%S).log"
 RESTART_DELAY=8  # detik — cukup untuk bot kirim pesan ke Telegram
