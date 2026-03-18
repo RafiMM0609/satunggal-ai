@@ -8,6 +8,8 @@ Implements the "Interaction" phase of the Autonomous Browsing brief:
   - type_text(selector, text) : fill a text field by CSS selector or label
   - scroll(direction)     : scroll up/down the page
   - screenshot()          : capture the current viewport as PNG bytes
+  - get_content()         : read text + accessibility tree from the current page
+  - extract_data(selector): extract structured list data via CSS selector
   - save_session(url)     : persist Playwright storage-state for future logins
 
 All actions run in a single Chromium context kept alive across sequential
@@ -37,7 +39,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _BLOCKED_RESOURCES = {"image", "media", "font", "stylesheet"}
-_TIMEOUT_MS        = 30_000
+_TIMEOUT_MS             = 30_000
+_CLICK_LOAD_TIMEOUT_MS  = 5_000   # post-click settle wait (shorter than full timeout)
+_MAX_PAGE_TEXT_CHARS    = 8_000   # truncation limit for get_content page text
 
 
 class BrowserNavigatorTool(BaseTool):
@@ -52,13 +56,18 @@ class BrowserNavigatorTool(BaseTool):
     The web_automation agent (or orchestrator) calls ``run(task)`` with::
 
         task.metadata["browser_action"]  = "navigate" | "click" | "type" |
-                                           "scroll" | "screenshot" | "save_session"
+                                           "scroll" | "screenshot" |
+                                           "get_content" | "extract_data" |
+                                           "save_session"
         task.metadata["target_url"]      = "https://..."          # for navigate
         task.metadata["click_text"]      = "Login"                # for click
         task.metadata["type_selector"]   = "#email"               # for type
         task.metadata["type_text"]       = "user@example.com"     # for type
         task.metadata["scroll_direction"]= "down" | "up"          # for scroll
         task.metadata["session_url"]     = "https://..."          # for save_session
+        task.metadata["extract_selector"]= "article h2 a"        # for extract_data (optional)
+        task.metadata["extract_attribute"]= "text" | "href"       # for extract_data (optional)
+        task.metadata["extract_limit"]   = 50                     # for extract_data (optional)
 
     Result keys
     -----------
@@ -66,6 +75,9 @@ class BrowserNavigatorTool(BaseTool):
     ``success``       : bool – whether the action succeeded
     ``screenshot_b64``: str  – base64-encoded PNG (only for "screenshot")
     ``session_path``  : str  – path to saved session file (only for "save_session")
+    ``page_text``     : str  – visible page text (only for "get_content")
+    ``a11y_tree``     : list – accessibility tree nodes (only for "get_content")
+    ``items``         : list – extracted data items (only for "extract_data")
     ``message``       : str  – human-readable outcome description
     ``error``         : str  – present only on failure
     """
@@ -101,6 +113,10 @@ class BrowserNavigatorTool(BaseTool):
                 return await self._action_scroll(task)
             elif action == "screenshot":
                 return await self._action_screenshot(task)
+            elif action == "get_content":
+                return await self._action_get_content(task)
+            elif action == "extract_data":
+                return await self._action_extract_data(task)
             elif action == "save_session":
                 return await self._action_save_session(task)
             else:
@@ -216,6 +232,12 @@ class BrowserNavigatorTool(BaseTool):
                 "action":  "click",
             }
 
+        # Wait for page to settle after click (handles navigation or dynamic content)
+        try:
+            await self._page.wait_for_load_state("domcontentloaded", timeout=_CLICK_LOAD_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001
+            pass  # Ignore – page may not have triggered navigation
+
         return {
             "action":  "click",
             "success": True,
@@ -286,6 +308,139 @@ class BrowserNavigatorTool(BaseTool):
             "url":            self._page.url,
             "message":        f"Screenshot captured ({len(png_bytes):,} bytes)",
         }
+
+    async def _action_get_content(self, task: "AgentTask") -> dict[str, Any]:
+        """Extract text content and accessibility tree from the current page."""
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "get_content",
+            }
+
+        title     = await self._page.title()
+        page_text = await self._extract_page_text()
+        a11y_tree = await self._extract_page_a11y()
+
+        return {
+            "action":    "get_content",
+            "success":   True,
+            "title":     title,
+            "url":       self._page.url,
+            "page_text": page_text[:_MAX_PAGE_TEXT_CHARS],
+            "a11y_tree": a11y_tree,
+            "message":   f"Content extracted from {self._page.url} – \"{title}\"",
+        }
+
+    async def _action_extract_data(self, task: "AgentTask") -> dict[str, Any]:
+        """Extract structured list data from the current page.
+
+        Uses a CSS selector when provided; otherwise auto-detects common list
+        patterns (``<li>``, ``<tr>``, ``<article>``, ARIA listitem/row).
+        """
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "extract_data",
+            }
+
+        selector:  str = task.metadata.get("extract_selector",  "").strip()
+        attribute: str = task.metadata.get("extract_attribute", "text").strip()
+        limit:     int = int(task.metadata.get("extract_limit", 50))
+
+        try:
+            if selector:
+                items: list[str] = await self._page.evaluate(
+                    """([sel, attr, lim]) => {
+                        const els = [...document.querySelectorAll(sel)].slice(0, lim);
+                        return els.map(el => {
+                            if (attr === 'href') return el.href || el.getAttribute('href') || '';
+                            if (attr === 'src')  return el.src  || el.getAttribute('src')  || '';
+                            return (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                        }).filter(v => v);
+                    }""",
+                    [selector, attribute, limit],
+                )
+            else:
+                # Auto-detect: try common list/row/article containers
+                items = await self._page.evaluate(
+                    """(lim) => {
+                        const candidates = [
+                            'article', '[role="listitem"]', '[role="row"]', 'li', 'tr'
+                        ];
+                        for (const sel of candidates) {
+                            const els = [...document.querySelectorAll(sel)].slice(0, lim);
+                            if (els.length > 2) {
+                                return els
+                                    .map(el => (el.innerText || el.textContent || '')
+                                        .replace(/\\s+/g, ' ').trim())
+                                    .filter(v => v.length > 3);
+                            }
+                        }
+                        return [];
+                    }""",
+                    limit,
+                )
+
+            return {
+                "action":   "extract_data",
+                "success":  True,
+                "items":    items,
+                "count":    len(items),
+                "selector": selector or "(auto)",
+                "url":      self._page.url,
+                "message":  f"Extracted {len(items)} items from {self._page.url}",
+            }
+        except Exception as exc:
+            return {
+                "action":  "extract_data",
+                "success": False,
+                "error":   str(exc),
+                "items":   [],
+            }
+
+    # ── Page content helpers ──────────────────────────────────────────────────
+
+    async def _extract_page_text(self) -> str:
+        """Extract visible text from the current page, stripping scripts/styles."""
+        assert self._page is not None  # noqa: S101
+        try:
+            text: str = await self._page.evaluate(
+                """() => {
+                    const clone = document.body.cloneNode(true);
+                    clone.querySelectorAll('script, style, noscript, svg').forEach(el => el.remove());
+                    return (clone.innerText || clone.textContent || '').replace(/\\s+/g, ' ').trim();
+                }"""
+            )
+            return text
+        except Exception as exc:
+            logger.warning("BrowserNavigatorTool: text extraction failed: %s", exc)
+            return ""
+
+    async def _extract_page_a11y(self) -> list[dict[str, str]]:
+        """Return a simplified accessibility tree from the current page."""
+        assert self._page is not None  # noqa: S101
+        try:
+            snapshot = await self._page.accessibility.snapshot(interesting_only=True)
+            if not snapshot:
+                return []
+
+            nodes: list[dict[str, str]] = []
+
+            def _walk(node: dict) -> None:
+                role = node.get("role", "")
+                name = (node.get("name") or "").strip()
+                if role and name:
+                    nodes.append({"role": role, "name": name})
+                for child in node.get("children", []):
+                    _walk(child)
+
+            _walk(snapshot)
+            return nodes
+        except Exception as exc:
+            logger.warning("BrowserNavigatorTool: a11y extraction failed: %s", exc)
+            return []
 
     async def _action_save_session(self, task: "AgentTask") -> dict[str, Any]:
         """Persist the current browser context's cookies & storage."""
