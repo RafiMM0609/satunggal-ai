@@ -13,6 +13,8 @@ Supported high-level tasks (intent: web_automation)
   • Scroll the page and report what appeared.
   • Take a screenshot and describe it (multimodal, when LLM supports vision).
   • Log in to a website and save the session for future reuse.
+  • Read the current page content after navigation or clicks (get_content).
+  • Extract structured list data from a page using CSS selectors (extract_data).
 
 Workflow (Orchestrator-driven)
 ──────────────────────────────
@@ -52,16 +54,29 @@ Kamu adalah Web Automation Planner. Tugasmu adalah menguraikan permintaan \
 pengguna menjadi serangkaian langkah browsing yang terurut dan dapat dieksekusi.
 
 Setiap langkah HARUS berupa JSON object dengan field berikut:
-  "action": satu dari ["read_url", "navigate", "click", "type", "scroll", "screenshot", "save_session", "done"]
+  "action": satu dari ["read_url", "navigate", "click", "type", "scroll", \
+"screenshot", "get_content", "extract_data", "save_session", "done"]
   "params": object parameter yang sesuai dengan action:
-    - read_url:    {"url": "..."}
-    - navigate:    {"url": "..."}
-    - click:       {"text": "..."}
-    - type:        {"selector": "...", "text": "..."}   (selector boleh kosong)
-    - scroll:      {"direction": "down"|"up"}
-    - screenshot:  {}
-    - save_session:{"url": "..."}
-    - done:        {"summary": "ringkasan hasil untuk pengguna"}
+    - read_url:     {"url": "..."}
+    - navigate:     {"url": "..."}
+    - click:        {"text": "..."}
+    - type:         {"selector": "...", "text": "..."}   (selector boleh kosong)
+    - scroll:       {"direction": "down"|"up"}
+    - screenshot:   {}
+    - get_content:  {}
+    - extract_data: {"selector": "...", "attribute": "text"|"href", "limit": 50}
+    - save_session: {"url": "..."}
+    - done:         {"summary": "ringkasan hasil untuk pengguna"}
+
+Panduan penggunaan action:
+  • Gunakan "navigate" untuk membuka URL, lalu "click" untuk berinteraksi,
+    kemudian "get_content" untuk membaca konten halaman terkini.
+  • Gunakan "get_content" setelah "navigate" atau "click" agar konten halaman
+    yang sudah diperbarui dapat dibaca (bukan "read_url" yang membuka tab baru).
+  • Gunakan "extract_data" dengan selector CSS untuk mengambil daftar item
+    terstruktur (misalnya: daftar repositori, berita, produk, baris tabel).
+    Jika selector tidak diketahui, kosongkan dan biarkan auto-detect bekerja.
+  • Gunakan "read_url" hanya jika tidak perlu interaksi klik/scroll sebelumnya.
 
 Aturan:
 1. Balas HANYA dengan JSON array dari langkah-langkah tersebut – tidak ada teks lain.
@@ -76,12 +91,16 @@ Berdasarkan log aksi dan konten halaman yang diberikan, buat ringkasan yang:
   - Jelas dan mudah dipahami.
   - Menyebutkan URL yang dikunjungi dan judul halamannya.
   - Menjelaskan elemen-elemen penting yang ditemukan (menu, tombol, form, dll.).
+  - Jika ada daftar item yang diekstrak (repositori, berita, produk, dll.),
+    tampilkan dalam format daftar yang terstruktur dan mudah dibaca.
   - Melaporkan status setiap aksi (berhasil / gagal).
   - Menggunakan bahasa yang sama dengan permintaan pengguna (Indonesia atau Inggris).
 """
 
-_MAX_STEPS    = 8   # hard cap excluding the final "done" step
-_MAX_TOKENS   = 2048
+_MAX_STEPS             = 8     # hard cap excluding the final "done" step
+_MAX_TOKENS            = 2048
+_SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
+_SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser
 
 
 class WebAutomationAgent(BaseAgent):
@@ -248,6 +267,29 @@ class WebAutomationAgent(BaseAgent):
             result = await navigator.run(task)
             log = f"[{step_num}] save_session → {result.get('message', result.get('error', '?'))}"
 
+        elif action == "get_content":
+            task.metadata["browser_action"] = "get_content"
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] get_content → "
+                f"title={result.get('title', '?')!r} "
+                f"chars={len(result.get('page_text', ''))} "
+                f"nodes={len(result.get('a11y_tree', []))}"
+            )
+
+        elif action == "extract_data":
+            task.metadata.update({
+                "browser_action":    "extract_data",
+                "extract_selector":  params.get("selector",  ""),
+                "extract_attribute": params.get("attribute", "text"),
+                "extract_limit":     params.get("limit",     50),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] extract_data selector={params.get('selector', 'auto')!r} → "
+                f"{result.get('count', 0)} items"
+            )
+
         else:
             result = {"error": f"Unknown action: {action}"}
             log    = f"[{step_num}] unknown action: {action}"
@@ -265,16 +307,32 @@ class WebAutomationAgent(BaseAgent):
         """Ask the LLM to produce a user-friendly summary of what happened."""
         log_text = "\n".join(action_log)
 
-        # Build a short context snippet from the last read_url result
-        page_snippet = ""
+        # Collect page content from read_url and get_content results
+        page_snippets: list[str] = []
+        extracted_data: list[str] = []
+
         for key, val in tool_results.items():
-            if isinstance(val, dict) and "page_text" in val:
-                page_snippet = val["page_text"][:2000]
-                break
+            if not isinstance(val, dict):
+                continue
+            # Page text from read_url or get_content
+            if val.get("page_text"):
+                title = val.get("title", "")
+                url   = val.get("url",   "")
+                header = f"[{key}] {title} ({url})" if (title or url) else f"[{key}]"
+                page_snippets.append(f"{header}:\n{val['page_text'][:_SUMMARISE_TEXT_CHARS]}")
+            # Structured items from extract_data
+            if val.get("items"):
+                items_text = "\n".join(f"  - {item}" for item in val["items"][:_SUMMARISE_ITEMS_LIMIT])
+                extracted_data.append(
+                    f"[{key}] {val.get('count', len(val['items']))} items "
+                    f"dari {val.get('url', '')}:\n{items_text}"
+                )
 
         context = f"Log aksi:\n{log_text}"
-        if page_snippet:
-            context += f"\n\nCuplikan konten halaman:\n{page_snippet}"
+        if page_snippets:
+            context += "\n\nKonten halaman:\n" + "\n\n".join(page_snippets)
+        if extracted_data:
+            context += "\n\nData yang diekstrak:\n" + "\n\n".join(extracted_data)
 
         messages = [
             {"role": "system", "content": _SUMMARISER_SYSTEM},
