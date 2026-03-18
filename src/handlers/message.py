@@ -1,15 +1,17 @@
-"""Message handlers: text, photo, and unknown messages."""
+"""Message handlers: text, photo, document (PDF), and unknown messages."""
 
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 
 import telegramify_markdown
 from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from src.orchestrator.main_loop import process_message
+from src.orchestrator.main_loop import process_message, process_pdf_quiz
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,167 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(
                 "⚠️ Gagal mengirim file dokumen. Coba lagi nanti.", quote=True
             )
+
+
+async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle PDF document uploads – converts PDF to an interactive HTML quiz.
+
+    Flow:
+      1. Download the PDF to a temp file
+      2. Show a live progress message (edited at each stage)
+      3. Run process_pdf_quiz() through the orchestrator
+      4. Send the resulting .html file back to the user
+    """
+    message = update.message
+    user    = update.effective_user
+    doc     = message.document
+
+    original_filename = doc.file_name or "document.pdf"
+    logger.info(
+        "PDF from user=%s filename=%r size=%d bytes",
+        user.id, original_filename, doc.file_size or 0,
+    )
+
+    # ── Size guard (max 20 MB to protect VPS RAM) ──────────────────────────
+    max_bytes = 20 * 1024 * 1024
+    if doc.file_size and doc.file_size > max_bytes:
+        await message.reply_text(
+            "⚠️ File PDF terlalu besar (maks. 20 MB). Coba kompres dulu.",
+            quote=True,
+        )
+        return
+
+    # ── Send initial progress message ──────────────────────────────────────
+    progress_msg = await message.reply_text(
+        telegramify_markdown.markdownify(
+            "⏳ *Memproses PDF...*\n`[░░░░░░░░░░]` *0%*\n\nMengunduh file..."
+        ),
+        parse_mode="MarkdownV2",
+        quote=True,
+    )
+
+    async def _progress_callback(rendered_text: str) -> None:
+        try:
+            formatted = telegramify_markdown.markdownify(rendered_text)
+            await context.bot.edit_message_text(
+                chat_id=progress_msg.chat_id,
+                message_id=progress_msg.message_id,
+                text=formatted,
+                parse_mode="MarkdownV2",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("PDF progress edit skipped: %s", exc)
+
+    # ── Download PDF to temp file ──────────────────────────────────────────
+    tmp_dir = os.path.join(tempfile.gettempdir(), "advance_ai_pdf_uploads")
+    os.makedirs(tmp_dir, exist_ok=True)
+    # Sanitize filename: keep only alphanumeric, dots, hyphens, underscores
+    # and reject any path traversal sequences
+    safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in original_filename)
+    # Strip leading dots/slashes to prevent path traversal
+    safe_name = safe_name.lstrip("._/\\") or "upload.pdf"
+    if ".." in safe_name:
+        safe_name = "upload.pdf"
+    pdf_path  = os.path.join(tmp_dir, f"{user.id}_{safe_name}")
+    # Verify the final path stays inside tmp_dir (defence-in-depth)
+    pdf_path  = os.path.realpath(pdf_path)
+    if not pdf_path.startswith(os.path.realpath(tmp_dir)):
+        logger.warning("Path traversal attempt detected for user=%s filename=%r", user.id, original_filename)
+        pdf_path = os.path.join(os.path.realpath(tmp_dir), f"{user.id}_upload.pdf")
+
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(pdf_path)
+        logger.info("PDF downloaded to %s for user=%s", pdf_path, user.id)
+    except Exception as exc:
+        logger.exception("Failed to download PDF for user=%s: %s", user.id, exc)
+        try:
+            await context.bot.delete_message(
+                chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        await message.reply_text(
+            "❌ Gagal mengunduh PDF. Coba kirim ulang.", quote=True
+        )
+        return
+
+    # ── Run the quiz pipeline ──────────────────────────────────────────────
+    try:
+        task = await process_pdf_quiz(
+            session_id=str(user.id),
+            pdf_path=pdf_path,
+            original_filename=original_filename,
+            status_callback=_progress_callback,
+        )
+    except Exception as exc:
+        logger.exception("process_pdf_quiz raised for user=%s: %s", user.id, exc)
+        task = None
+    finally:
+        # Clean up the downloaded PDF regardless of outcome
+        try:
+            os.remove(pdf_path)
+        except OSError:
+            pass
+
+    # ── Delete the progress message ────────────────────────────────────────
+    try:
+        await context.bot.delete_message(
+            chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not delete PDF progress message: %s", exc)
+
+    # ── Handle failure ─────────────────────────────────────────────────────
+    if task is None or task.status.value == "failed":
+        error_msg = (task.result if task else None) or "❌ Gagal memproses PDF. Coba lagi."
+        await _safe_reply(message, error_msg)
+        return
+
+    # ── Send text reply ────────────────────────────────────────────────────
+    reply = task.result or "✅ Kuis berhasil dibuat!"
+    await _safe_reply(message, reply)
+
+    # ── Send the HTML quiz file ────────────────────────────────────────────
+    html_path = task.metadata.get("html_path")
+    if html_path and os.path.isfile(html_path):
+        try:
+            await context.bot.send_chat_action(
+                chat_id=message.chat_id, action="upload_document"
+            )
+            quiz_title = task.metadata.get("quiz_title", "kuis")
+            html_filename = f"{quiz_title.replace('Kuis: ', '').replace(' ', '_').lower()}_quiz.html"
+            with open(html_path, "rb") as f:
+                await message.reply_document(
+                    document=f,
+                    filename=html_filename,
+                    caption=(
+                        "🎉 *Website Kuis Interaktif siap!*\n\n"
+                        "Buka file `.html` ini di browser untuk memulai kuis.\n"
+                        "Tidak perlu koneksi internet setelah dibuka! ✅"
+                    ),
+                    parse_mode="Markdown",
+                    quote=True,
+                )
+            logger.info("Sent HTML quiz to user=%s path=%s", user.id, html_path)
+        except Exception as exc:
+            logger.exception("Failed to send HTML quiz to user=%s: %s", user.id, exc)
+            await message.reply_text(
+                "⚠️ Kuis berhasil dibuat tapi gagal dikirim. Coba lagi.", quote=True
+            )
+        finally:
+            # Clean up HTML file after sending
+            try:
+                os.remove(html_path)
+            except OSError:
+                pass
+    else:
+        logger.warning("html_path missing in task.metadata for user=%s", user.id)
+        await message.reply_text(
+            "⚠️ File HTML tidak ditemukan. Ada kesalahan saat membangun kuis.", quote=True
+        )
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

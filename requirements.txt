@@ -32,3 +32,6 @@ weasyprint>=62.0          # Markdown → PDF via HTML+CSS
 markdown>=3.7             # Markdown parser (dibutuhkan WeasyPrint pipeline)
 # pandoc          → install via sistem: sudo apt install pandoc / brew install pandoc
 # mermaid-cli    → install via npm:    npm install -g @mermaid-js/mermaid-cli
+
+# ── PDF Processing (Quiz Generator) ───────────────────────────────────────────
+PyMuPDF>=1.24.0           # Ekstraksi teks dari PDF (fitz)

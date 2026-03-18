@@ -76,6 +76,7 @@ def _get_pipeline():
     from src.agents.llm_client import LLMClient
     from src.agents.log_viewer_agent.agent import LogViewerAgent
     from src.agents.mandays_agent.agent import MandaysAgent
+    from src.agents.quiz_agent.agent import QuizAgent
     from src.agents.researcher.agent import ResearcherAgent
     from src.agents.responder.agent import ResponderAgent
     from src.agents.sysinfo_agent.agent import SysInfoAgent
@@ -86,6 +87,8 @@ def _get_pipeline():
     from src.tools.diagram_renderer import DiagramRendererTool
     from src.tools.document_generator import DocumentGeneratorTool
     from src.tools.mandays_generator import MandaysGeneratorTool
+    from src.tools.pdf_parser import PDFParserTool
+    from src.tools.web_quiz_builder import WebQuizBuilderTool
     from src.tools.wbs_generator import WBSGeneratorTool
 
     _history = ConversationHistory(max_messages=30)
@@ -100,6 +103,8 @@ def _get_pipeline():
         "mandays_generator":  MandaysGeneratorTool(),
         "diagram_renderer":   DiagramRendererTool(),
         "document_generator": DocumentGeneratorTool(),
+        "pdf_parser":         PDFParserTool(),
+        "web_quiz_builder":   WebQuizBuilderTool(),
     }
 
     # Tavily is optional – only registered when API key is available.
@@ -124,6 +129,7 @@ def _get_pipeline():
         "technical_writer":    TechnicalWriterAgent(_history, _llm),
         "sysinfo_agent":       SysInfoAgent(_history, _llm),
         "log_viewer_agent":    LogViewerAgent(_history, _llm),
+        "quiz_agent":          QuizAgent(_llm),
     }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
@@ -281,4 +287,142 @@ async def clear_session(session_id: str) -> None:
     if _history is not None:
         _history.clear(session_id)
     logger.info("Session cleared: %s", session_id)
+
+
+async def process_pdf_quiz(
+    session_id: str,
+    pdf_path: str,
+    original_filename: str = "document.pdf",
+    status_callback: "StatusCallback" = None,
+) -> "AgentTask":
+    """
+    Dedicated pipeline for PDF → Interactive HTML Quiz generation.
+
+    Bypasses the gatekeeper (intent is already known: quiz_generation).
+    Flow:
+        1. PDFParserTool   → extract text chunks from PDF
+        2. QuizAgent       → generate questions batch by batch
+        3. WebQuizBuilderTool → compile questions into single-file HTML
+
+    Args:
+        session_id:        Unique identifier for the conversation.
+        pdf_path:          Absolute path to the downloaded PDF file.
+        original_filename: Original filename shown to the user.
+        status_callback:   Optional async callable for live progress updates.
+
+    Returns:
+        AgentTask with task.metadata["html_path"] set on success.
+    """
+    from src.memory.state import AgentTask
+
+    _, agents, _, _, tools = _get_pipeline()
+
+    task = AgentTask(
+        session_id=session_id,
+        user_input=f"Buat kuis dari PDF: {original_filename}",
+        intent="quiz_generation",
+    )
+    task.metadata["pdf_path"]         = pdf_path
+    task.metadata["quiz_title"]       = _make_quiz_title(original_filename)
+    task.metadata["status_callback"]  = status_callback
+
+    # ── Step 1: Parse PDF ──────────────────────────────────────────────────
+    await _notify(status_callback, _quiz_status_msg(original_filename, phase="parsing"))
+    pdf_tool = tools.get("pdf_parser")
+    if pdf_tool is None:
+        task.mark_failed("pdf_parser tool tidak terdaftar.")
+        task.result = "❌ Sistem tidak dapat memproses PDF saat ini."
+        return task
+
+    parser_result = await pdf_tool.run(task)
+    if "error" in parser_result:
+        task.mark_failed(parser_result["error"])
+        task.result = f"❌ Gagal membaca PDF: {parser_result['error']}"
+        return task
+
+    chunks: list[str] = parser_result["chunks"]
+    task.metadata["pdf_chunks"] = chunks
+
+    logger.info(
+        "PDF parsed: session=%s pages=%d words=%d chunks=%d",
+        session_id,
+        parser_result.get("total_pages", 0),
+        parser_result.get("total_words", 0),
+        len(chunks),
+    )
+
+    # ── Step 2: Run QuizAgent (batch processing) ───────────────────────────
+    quiz_agent = agents.get("quiz_agent")
+    if quiz_agent is None:
+        task.mark_failed("quiz_agent tidak terdaftar.")
+        task.result = "❌ Quiz agent tidak tersedia."
+        return task
+
+    task.mark_processing("quiz_agent")
+    task = await quiz_agent.run(task)
+
+    # Free parsed chunks from memory
+    task.metadata.pop("pdf_chunks", None)
+
+    if task.status.value == "failed":
+        return task
+
+    # ── Step 3: Build HTML (via pending_tools) ─────────────────────────────
+    await _notify(status_callback, _quiz_status_msg(original_filename, phase="building"))
+
+    for tool_name in list(task.pending_tools):
+        tool = tools.get(tool_name)
+        if tool is None:
+            logger.warning("process_pdf_quiz: tool '%s' not in registry; skipping.", tool_name)
+            continue
+        try:
+            tool_output = await tool.run(task)
+            task.tool_results[tool_name] = tool_output
+            if "html_path" in tool_output:
+                task.metadata["html_path"] = tool_output["html_path"]
+            logger.info(
+                "PDF quiz tool '%s' done for session=%s keys=%s",
+                tool_name, session_id, list(tool_output.keys()),
+            )
+        except Exception as exc:
+            logger.exception("PDF quiz tool '%s' raised: %s", tool_name, exc)
+            task.tool_results[tool_name] = {"error": str(exc)}
+
+    task.pending_tools.clear()
+
+    await _notify(status_callback, _quiz_status_msg(original_filename, phase="done"))
+
+    if not task.result:
+        task.result = "✅ Kuis berhasil dibuat!"
+
+    logger.info(
+        "process_pdf_quiz done | session=%s html=%s",
+        session_id, task.metadata.get("html_path", "MISSING"),
+    )
+    return task
+
+
+def _make_quiz_title(filename: str) -> str:
+    """Derive a human-friendly quiz title from the PDF filename."""
+    name = filename.rsplit(".", 1)[0]  # strip extension
+    # Replace underscores/hyphens with spaces, title-case
+    name = name.replace("_", " ").replace("-", " ")
+    return f"Kuis: {name.title()}"
+
+
+def _quiz_status_msg(filename: str, phase: str) -> str:
+    """Build a Markdown progress message for the PDF quiz pipeline."""
+    pdf_icon   = "✅" if phase in ("generating", "building", "done") else "🔄"
+    gen_icon   = "✅" if phase in ("building", "done") else ("🔄" if phase == "generating" else "⏳")
+    build_icon = "✅" if phase == "done" else ("🔄" if phase == "building" else "⏳")
+    final_icon = "✅" if phase == "done" else "⏳"
+
+    return (
+        f"⏳ *Proses Pembuatan Kuis Aktif*\n\n"
+        f"📝 *{_make_quiz_title(filename)}*\n\n"
+        f"  • 📄 Membaca PDF: {pdf_icon} {'Selesai' if pdf_icon == '✅' else 'Memproses...'}\n"
+        f"  • 🧠 Menghasilkan Soal: {gen_icon} {'Selesai' if gen_icon == '✅' else ('Memproses...' if gen_icon == '🔄' else 'Menunggu')}\n"
+        f"  • 🏗️ Membangun Website: {build_icon} {'Selesai' if build_icon == '✅' else ('Memproses...' if build_icon == '🔄' else 'Menunggu')}\n"
+        f"  • 📦 Finalisasi File: {final_icon} {'Selesai' if final_icon == '✅' else 'Menunggu'}"
+    )
 
