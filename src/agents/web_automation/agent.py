@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
@@ -45,7 +45,16 @@ from src.memory.state import AgentTask
 from src.tools.browser_navigator import BrowserNavigatorTool
 from src.tools.web_reader import WebReaderTool
 
+if TYPE_CHECKING:
+    from src.memory.history import ConversationHistory
+
 logger = logging.getLogger(__name__)
+
+# ── Per-session last-visited URL store ────────────────────────────────────────
+# Tracks the last successfully navigated URL for each session so that
+# follow-up commands (e.g. "Klik tombol Sign in") can resume browsing
+# on the correct page without the user having to repeat the URL.
+_session_last_url: dict[str, str] = {}
 
 # ── System prompts ─────────────────────────────────────────────────────────────
 
@@ -78,6 +87,15 @@ Panduan penggunaan action:
     Jika selector tidak diketahui, kosongkan dan biarkan auto-detect bekerja.
   • Gunakan "read_url" hanya jika tidak perlu interaksi klik/scroll sebelumnya.
 
+Penanganan perintah lanjutan (follow-up):
+  • Jika konteks percakapan atau metadata menunjukkan URL terakhir yang dikunjungi,
+    dan perintah saat ini TIDAK menyebutkan URL baru (misalnya perintah seperti
+    "klik tombol X", "scroll ke bawah", "isi form", dll.), tambahkan langkah
+    "navigate" ke URL tersebut sebagai langkah PERTAMA sebelum aksi lainnya.
+  • Pencocokan teks elemen (click) bersifat case-insensitive dan partial match,
+    sehingga "sign in", "Sign In", maupun "SIGN IN" akan mencocokkan tombol
+    yang sama.
+
 Aturan:
 1. Balas HANYA dengan JSON array dari langkah-langkah tersebut – tidak ada teks lain.
 2. Selalu akhiri dengan langkah "done" yang berisi ringkasan apa yang sudah dilakukan.
@@ -101,6 +119,7 @@ _MAX_STEPS             = 8     # hard cap excluding the final "done" step
 _MAX_TOKENS            = 2048
 _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
 _SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser
+_HISTORY_MSG_CHARS     = 500   # max characters per message included in planner context
 
 
 class WebAutomationAgent(BaseAgent):
@@ -113,8 +132,13 @@ class WebAutomationAgent(BaseAgent):
 
     name = "web_automation"
 
-    def __init__(self, llm: LLMClient | None = None) -> None:
+    def __init__(
+        self,
+        llm: LLMClient | None = None,
+        history: "ConversationHistory | None" = None,
+    ) -> None:
         self._llm = llm or LLMClient()
+        self._history = history
 
     async def run(self, task: AgentTask) -> AgentTask:
         task.mark_processing(self.name)
@@ -122,7 +146,7 @@ class WebAutomationAgent(BaseAgent):
         reader    = WebReaderTool()
 
         try:
-            steps = await self._plan_steps(task.user_input)
+            steps = await self._plan_steps(task.user_input, task.session_id)
             logger.info(
                 "WebAutomationAgent: %d steps planned for session=%s",
                 len(steps), task.session_id,
@@ -149,6 +173,12 @@ class WebAutomationAgent(BaseAgent):
                 )
                 action_log.append(log_entry)
                 task.tool_results[f"step_{i}_{action}"] = tool_result
+
+                # Track last visited URL per session for follow-up commands
+                if action in ("navigate", "read_url"):
+                    visited_url = tool_result.get("url") or params.get("url", "")
+                    if visited_url and not tool_result.get("error"):
+                        _session_last_url[task.session_id] = visited_url
 
                 if tool_result.get("error"):
                     logger.warning(
@@ -188,10 +218,41 @@ class WebAutomationAgent(BaseAgent):
 
     # ── Step planner ─────────────────────────────────────────────────────────
 
-    async def _plan_steps(self, user_input: str) -> list[dict[str, Any]]:
-        """Ask the LLM to produce a structured action plan."""
+    async def _plan_steps(self, user_input: str, session_id: str = "") -> list[dict[str, Any]]:
+        """Ask the LLM to produce a structured action plan.
+
+        Includes conversation history and the last visited URL as context so
+        the LLM can correctly plan follow-up commands (e.g. "Klik tombol Sign in"
+        after previously navigating to a page).
+        """
+        # ── Build context for follow-up command detection ──────────────────
+        context_parts: list[str] = []
+
+        last_url = _session_last_url.get(session_id, "")
+        if last_url:
+            context_parts.append(f"URL terakhir yang dikunjungi dalam sesi ini: {last_url}")
+
+        if self._history and session_id:
+            recent = self._history.get(session_id)
+            # Include up to 4 messages (2 user–assistant turns) before the current one
+            prev_messages = recent[:-1][-4:] if len(recent) > 1 else []
+            if prev_messages:
+                lines = "\n".join(
+                    f"[{m.role.upper()}]: {m.content[:_HISTORY_MSG_CHARS]}"
+                    for m in prev_messages
+                )
+                context_parts.append(f"Riwayat percakapan sebelumnya:\n{lines}")
+
+        system_content = (
+            _PLANNER_SYSTEM
+            + "\nKonteks tambahan untuk perintah ini:\n"
+            + "\n\n".join(context_parts)
+            if context_parts
+            else _PLANNER_SYSTEM
+        )
+
         messages = [
-            {"role": "system", "content": _PLANNER_SYSTEM},
+            {"role": "system", "content": system_content},
             {"role": "user",   "content": user_input},
         ]
         try:
@@ -212,6 +273,12 @@ class WebAutomationAgent(BaseAgent):
                 return [
                     {"action": "read_url", "params": {"url": url}},
                     {"action": "done",     "params": {"summary": "Konten URL telah dibaca."}},
+                ]
+            # Fallback for follow-up commands: navigate to last URL then click
+            if last_url and not self._extract_url(user_input):
+                return [
+                    {"action": "navigate", "params": {"url": last_url}},
+                    {"action": "done",     "params": {"summary": "Navigasi ke halaman sebelumnya."}},
                 ]
             return [{"action": "done", "params": {"summary": "Tidak dapat membuat rencana aksi."}}]
 
