@@ -158,6 +158,18 @@ class WebAutomationAgent(BaseAgent):
                     action_log.append(f"  ⚠ Gagal: {tool_result['error']}")
                     # Continue to next step instead of aborting (best-effort)
 
+            # Collect screenshots captured during the session so the interface
+            # layer (e.g. Telegram handler) can forward them to the user.
+            screenshots: list[str] = [
+                val["screenshot_b64"]
+                for val in task.tool_results.values()
+                if isinstance(val, dict)
+                and val.get("action") == "screenshot"
+                and val.get("screenshot_b64")
+            ]
+            if screenshots:
+                task.metadata["screenshots"] = screenshots
+
             # Build final reply using the LLM summariser
             reply = await self._summarise(task.user_input, action_log, task.tool_results)
             task.mark_done(reply)

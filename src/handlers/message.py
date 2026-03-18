@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import logging
 import os
 import tempfile
@@ -162,6 +164,39 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(
                 "⚠️ Gagal mengirim file dokumen. Coba lagi nanti.", quote=True
             )
+
+    # ── Kirim screenshot dari web automation jika ada ─────────────────────────
+    screenshots: list[str] = task.metadata.get("screenshots", [])
+    if screenshots:
+        try:
+            await context.bot.send_chat_action(
+                chat_id=message.chat_id, action="upload_photo"
+            )
+            for idx, screenshot_b64 in enumerate(screenshots, start=1):
+                caption = (
+                    f"📸 Screenshot {idx}/{len(screenshots)}"
+                    if len(screenshots) > 1
+                    else "📸 Screenshot"
+                )
+                try:
+                    png_bytes = base64.b64decode(screenshot_b64)
+                    screenshot_buffer = io.BytesIO(png_bytes)
+                    screenshot_buffer.name = f"screenshot_{idx}.png"
+                    await message.reply_photo(
+                        photo=screenshot_buffer,
+                        caption=caption,
+                        quote=True,
+                    )
+                    logger.info(
+                        "Sent screenshot %d/%d to user=%s",
+                        idx, len(screenshots), user.id,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to send screenshot %d to user=%s: %s", idx, user.id, exc
+                    )
+        except Exception as exc:
+            logger.exception("Failed to send screenshots to user=%s: %s", user.id, exc)
 
 
 async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
