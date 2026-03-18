@@ -38,6 +38,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - document_creation  (user wants to generate a technical document, PDF, or Word file — from a GitHub repo, topic, or data such as WBS/mandays output)
 - system_info        (user asks about server/host resource status: CPU usage, RAM, memory, storage, disk space, hardware info of this machine)
 - log_viewer         (user wants to see, inspect, or debug the bot's recent application logs)
+- web_automation     (user wants the bot to autonomously browse a website, click buttons, fill forms, take screenshots, read page content, or interact with a web page)
 - unknown
 
 Pre-agent tools the orchestrator can execute before the specialist agent:
@@ -94,6 +95,16 @@ Rules:
       lihat log terakhir, beri tahu log, tunjukkan log, log aplikasi, lihat catatan log
     - English: show log, view log, check log, bot log, recent log, last log lines, debug log, show me the logs, display logs,
       application log, log output, what does the log say, show last 10 lines of log
+16. Use "web_automation" when the user wants the bot to open, navigate, interact with, or extract information from a website:
+    - Indonesian: buka website, kunjungi URL, klik tombol di website, isi form, screenshot website, ambil isi halaman,
+      buka link, navigasi ke halaman, login ke website, klik menu, scraping, cek halaman, buka browser, akses URL,
+      pergi ke website, daftarkan akun di, isi formulir di, klik daftar, ambil konten dari, buka url ini
+    - English: open website, visit URL, click button on website, fill form, take screenshot, get page content,
+      navigate to page, login to website, click menu, scrape website, check page, open browser, access URL,
+      go to website, register account at, fill out form at, click sign up, get content from
+    - Key differentiator: user wants the bot to actually BROWSE and INTERACT with a live website, not just search for info.
+      If user says "buka website X dan klik tombol Y" / "login ke situs Z" / "isi form di URL ini" → web_automation.
+      If user just wants information found via web search → research.
 
 Example responses:
   {"intent": "data_analysis",      "confidence": 0.97, "tools": []}
@@ -105,6 +116,7 @@ Example responses:
   {"intent": "document_creation",  "confidence": 0.95, "tools": []}
   {"intent": "system_info",        "confidence": 0.97, "tools": []}
   {"intent": "log_viewer",         "confidence": 0.98, "tools": []}
+  {"intent": "web_automation",     "confidence": 0.96, "tools": []}
   {"intent": "general_inquiry",    "confidence": 0.88, "tools": []}
 """
 
