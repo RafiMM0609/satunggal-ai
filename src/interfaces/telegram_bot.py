@@ -19,6 +19,7 @@ from config.settings import get_settings
 from src.handlers import (
     deploy,
     echo_text,
+    handle_pdf_document,
     handle_photo,
     help_command,
     ping,
@@ -53,6 +54,10 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
 📄 <b>Technical Writer</b>
   • Export dokumen ke Word (.docx) & PDF
   • Render diagram Mermaid ke PNG
+
+🧩 <b>PDF-to-Quiz Generator</b>
+  • Kirim PDF (50–100 soal) untuk diubah menjadi Website Kuis Interaktif HTML
+  • Progress real-time, feedback instan, dark mode & scoreboard
 
 🖥️ <b>System Info</b>
   • <b>SysInfo Agent</b> — monitor CPU, RAM, disk, proses server
@@ -113,6 +118,7 @@ def _register_handlers(app: Application) -> None:
     # ── Message handlers ───────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_document))
 
     # ── Fallback ───────────────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.ALL, unknown_message))

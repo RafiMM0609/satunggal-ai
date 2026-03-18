@@ -27,6 +27,7 @@ class IntentCategory(str, Enum):
     DOCUMENT_CREATION  = "document_creation"    # buat dokumen teknis PDF/Word dari repo atau topik
     SYSTEM_INFO        = "system_info"        # tanya info CPU, RAM, storage server
     LOG_VIEWER         = "log_viewer"         # lihat log bot untuk debugging
+    QUIZ_GENERATION    = "quiz_generation"    # konversi PDF menjadi kuis interaktif HTML
     UNKNOWN            = "unknown"
 
 

@@ -47,6 +47,10 @@ STAGE_MAP: dict[str, tuple[int, str]] = {
     "post_tool:document_generator": (85, "📝 Generate dokumen..."),
     # Done
     "done":                        (100, "✅ Selesai!"),
+    # Quiz pipeline stages
+    "agent:quiz_agent":            (55, "🧠 Menghasilkan soal kuis..."),
+    "post_tool:web_quiz_builder":  (90, "🏗️ Membangun website kuis..."),
+    "post_tool:pdf_parser":        (25, "📄 Membaca dan memparse PDF..."),
 }
 
 
