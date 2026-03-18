@@ -107,6 +107,18 @@ else
         exit 1
     fi
     success "Python dependencies berhasil diupdate."
+
+    # Playwright browser binaries — dibutuhkan oleh Web Automation Agent
+    PLAYWRIGHT_BIN="$VENV_DIR/bin/playwright"
+    if [[ -f "$PLAYWRIGHT_BIN" ]]; then
+        info "Memverifikasi Playwright Chromium browser ..."
+        "$PLAYWRIGHT_BIN" install --with-deps chromium 2>&1 | tee -a "$DEPLOY_LOG"
+        if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+            success "Playwright Chromium browser siap."
+        else
+            warning "playwright install gagal. Web Automation Agent mungkin tidak berfungsi."
+        fi
+    fi
 fi
 
 # ── 3. Jadwalkan restart (fully detached) ─────────────────────────────────────

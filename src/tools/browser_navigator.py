@@ -109,8 +109,19 @@ class BrowserNavigatorTool(BaseTool):
                     "success": False,
                 }
         except Exception as exc:
+            err_msg = str(exc)
+            # Provide a clear hint when Playwright browser binaries are missing
+            if "Executable doesn't exist" in err_msg or "executable doesn't exist" in err_msg:
+                err_msg = (
+                    f"{err_msg}\n\n"
+                    "Browser Playwright belum terinstall. "
+                    "Jalankan perintah berikut untuk mengunduh browser:\n"
+                    "  playwright install chromium\n"
+                    "atau\n"
+                    "  playwright install --with-deps chromium"
+                )
             logger.exception("BrowserNavigatorTool: action=%s failed: %s", action, exc)
-            return {"error": str(exc), "success": False, "action": action}
+            return {"error": err_msg, "success": False, "action": action}
 
     # ── Browser lifecycle ─────────────────────────────────────────────────────
 

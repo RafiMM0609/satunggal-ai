@@ -194,6 +194,24 @@ fi
 success "Python dependencies terinstall."
 
 # ==============================================================================
+# 1b. Playwright browser binaries — dibutuhkan oleh Web Automation Agent
+# ==============================================================================
+header "Playwright Browser (Chromium)"
+
+PLAYWRIGHT_BIN="$VENV_DIR/bin/playwright"
+if [[ -f "$PLAYWRIGHT_BIN" ]]; then
+    info "Mendownload / memverifikasi Playwright Chromium browser ..."
+    if "$PLAYWRIGHT_BIN" install --with-deps chromium 2>&1; then
+        success "Playwright Chromium browser siap."
+    else
+        warning "playwright install gagal. Web Automation Agent mungkin tidak berfungsi."
+        warning "Jalankan secara manual: $PLAYWRIGHT_BIN install --with-deps chromium"
+    fi
+else
+    warning "playwright tidak ditemukan di $PLAYWRIGHT_BIN. Lewati instalasi browser."
+fi
+
+# ==============================================================================
 # 2. System libraries — WeasyPrint (PDF) & Chromium/puppeteer (mermaid-cli)
 # ==============================================================================
 header "System Libraries (WeasyPrint & Chromium)"
