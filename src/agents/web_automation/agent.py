@@ -69,7 +69,11 @@ Setiap langkah HARUS berupa JSON object dengan field berikut:
     - read_url:     {"url": "..."}
     - navigate:     {"url": "..."}
     - click:        {"text": "..."}
-    - type:         {"selector": "...", "text": "..."}   (selector boleh kosong)
+    - type:         {"selector": "...", "label": "...", "text": "..."}
+                    (selector = CSS selector jika diketahui; label = teks label/placeholder
+                     field tersebut agar dapat ditemukan secara akurat; keduanya boleh kosong
+                     tapi SANGAT DIANJURKAN untuk mengisi setidaknya salah satu agar field
+                     yang tepat dapat diidentifikasi, terutama saat mengisi lebih dari 1 field)
     - scroll:       {"direction": "down"|"up"}
     - screenshot:   {}
     - get_content:  {}
@@ -86,6 +90,15 @@ Panduan penggunaan action:
     terstruktur (misalnya: daftar repositori, berita, produk, baris tabel).
     Jika selector tidak diketahui, kosongkan dan biarkan auto-detect bekerja.
   • Gunakan "read_url" hanya jika tidak perlu interaksi klik/scroll sebelumnya.
+
+Panduan pengisian form (type):
+  • Saat mengisi lebih dari satu field, SELALU gunakan parameter "label" yang berisi
+    teks label atau placeholder field tersebut (contoh: "Email", "Nomor Ponsel",
+    "Password", "PIN") agar setiap langkah menargetkan field yang berbeda.
+  • Jika terdapat field "Nomor Ponsel atau Email", gunakan label: "Nomor Ponsel atau Email"
+    atau label: "Email".
+  • Jangan membiarkan "label" dan "selector" keduanya kosong saat ada beberapa field
+    yang harus diisi; hal ini dapat menyebabkan semua input masuk ke field yang sama.
 
 Penanganan perintah lanjutan (follow-up):
   • Jika konteks percakapan atau metadata menunjukkan URL terakhir yang dikunjungi,
@@ -323,6 +336,7 @@ class WebAutomationAgent(BaseAgent):
             task.metadata.update({
                 "browser_action":  "type",
                 "type_selector":   params.get("selector", ""),
+                "type_label":      params.get("label", ""),
                 "type_text":       params.get("text", ""),
             })
             result = await navigator.run(task)
