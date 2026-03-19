@@ -135,7 +135,7 @@ def _get_pipeline():
         "sysinfo_agent":       SysInfoAgent(_history, _llm),
         "log_viewer_agent":    LogViewerAgent(_history, _llm),
         "quiz_agent":          QuizAgent(_llm),
-        "web_automation":      WebAutomationAgent(_llm),
+        "web_automation":      WebAutomationAgent(_llm, history=_history),
     }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
