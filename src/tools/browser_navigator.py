@@ -26,8 +26,10 @@ Resource constraints (VPS-safe)
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import random
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -39,9 +41,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _BLOCKED_RESOURCES = {"image", "media", "font", "stylesheet"}
-_TIMEOUT_MS             = 30_000
-_CLICK_LOAD_TIMEOUT_MS  = 5_000   # post-click settle wait (shorter than full timeout)
-_MAX_PAGE_TEXT_CHARS    = 8_000   # truncation limit for get_content page text
+_TIMEOUT_MS              = 30_000
+_CLICK_LOAD_TIMEOUT_MS   = 5_000    # post-click domcontentloaded settle wait
+_NETWORK_IDLE_TIMEOUT_MS = 15_000   # post-click/navigate networkidle wait (SPA-safe)
+_MAX_PAGE_TEXT_CHARS     = 8_000    # truncation limit for get_content page text
+
+# Human-like delay range (milliseconds) to reduce bot-detection risk
+_HUMAN_DELAY_MIN_MS = 300
+_HUMAN_DELAY_MAX_MS = 1_200
+
+
+async def _random_delay(
+    min_ms: int = _HUMAN_DELAY_MIN_MS,
+    max_ms: int = _HUMAN_DELAY_MAX_MS,
+) -> None:
+    """Sleep for a random duration in [min_ms, max_ms] milliseconds.
+
+    Simulates human think-time between browser actions, reducing the likelihood
+    of bot-detection by server-side rate limiters and browser fingerprinting heuristics.
+    """
+    delay_s = random.SystemRandom().uniform(min_ms, max_ms) / 1_000
+    await asyncio.sleep(delay_s)
 
 
 class BrowserNavigatorTool(BaseTool):
@@ -193,6 +213,17 @@ class BrowserNavigatorTool(BaseTool):
         assert self._page is not None  # noqa: S101
 
         await self._page.goto(url, wait_until="domcontentloaded")
+
+        # Wait for network to become idle so that SPA bootstrapping and any
+        # redirects triggered by the page finish before we read the result.
+        try:
+            await self._page.wait_for_load_state("networkidle", timeout=_NETWORK_IDLE_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001
+            logger.debug("navigate: networkidle wait timed out after %dms", _NETWORK_IDLE_TIMEOUT_MS)
+
+        # Small human-like pause after navigation
+        await _random_delay(min_ms=200, max_ms=700)
+
         title = await self._page.title()
         return {
             "action":  "navigate",
@@ -220,6 +251,8 @@ class BrowserNavigatorTool(BaseTool):
         ):
             try:
                 loc = locator_fn()
+                # Small pre-click delay to simulate human reaction time
+                await _random_delay(min_ms=200, max_ms=600)
                 await loc.first.click(timeout=10_000)
                 located = True
                 break
@@ -233,11 +266,23 @@ class BrowserNavigatorTool(BaseTool):
                 "action":  "click",
             }
 
-        # Wait for page to settle after click (handles navigation or dynamic content)
+        # Step 1: wait for domcontentloaded in case the click triggered navigation
         try:
             await self._page.wait_for_load_state("domcontentloaded", timeout=_CLICK_LOAD_TIMEOUT_MS)
         except Exception:  # noqa: BLE001
             pass  # Ignore – page may not have triggered navigation
+
+        # Step 2: wait for networkidle so that SPA AJAX responses (login API calls,
+        # redirects, dynamic content updates) complete before we read the result.
+        # This is the key fix: without this wait the bot returns "click success"
+        # while the page is still processing the login request.
+        try:
+            await self._page.wait_for_load_state("networkidle", timeout=_NETWORK_IDLE_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001
+            logger.debug("click: networkidle wait timed out after %dms", _NETWORK_IDLE_TIMEOUT_MS)
+
+        # Step 3: human-like pause after action
+        await _random_delay()
 
         return {
             "action":  "click",
@@ -347,6 +392,9 @@ class BrowserNavigatorTool(BaseTool):
                     "success": False,
                     "action":  "type",
                 }
+
+        # Small random delay after typing to simulate human data-entry pace
+        await _random_delay(min_ms=200, max_ms=700)
 
         return {
             "action":   "type",
