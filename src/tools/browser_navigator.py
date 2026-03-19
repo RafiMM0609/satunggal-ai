@@ -61,7 +61,8 @@ class BrowserNavigatorTool(BaseTool):
                                            "save_session"
         task.metadata["target_url"]      = "https://..."          # for navigate
         task.metadata["click_text"]      = "Login"                # for click
-        task.metadata["type_selector"]   = "#email"               # for type
+        task.metadata["type_selector"]   = "#email"               # for type (CSS selector)
+        task.metadata["type_label"]      = "Email"                # for type (label/placeholder text)
         task.metadata["type_text"]       = "user@example.com"     # for type
         task.metadata["scroll_direction"]= "down" | "up"          # for scroll
         task.metadata["session_url"]     = "https://..."          # for save_session
@@ -246,9 +247,18 @@ class BrowserNavigatorTool(BaseTool):
         }
 
     async def _action_type(self, task: "AgentTask") -> dict[str, Any]:
-        """Fill a text field identified by CSS selector or label text."""
-        selector: str  = task.metadata.get("type_selector", "").strip()
-        text:     str  = task.metadata.get("type_text",     "").strip()
+        """Fill a text field identified by CSS selector, label/placeholder text, or auto-detect.
+
+        Resolution order:
+          1. ``type_selector`` – exact CSS selector (fastest, most reliable).
+          2. ``type_label``    – label text / placeholder / accessible name; tries
+                                 get_by_label, get_by_placeholder and get_by_role in turn.
+          3. Fallback          – fills the next unfilled visible input using
+                                 Playwright's ``fill()`` (handles React controlled components).
+        """
+        selector: str = task.metadata.get("type_selector", "").strip()
+        label:    str = task.metadata.get("type_label",    "").strip()
+        text:     str = task.metadata.get("type_text",     "").strip()
 
         if not text:
             return {"error": "type_text not provided", "success": False, "action": "type"}
@@ -256,23 +266,93 @@ class BrowserNavigatorTool(BaseTool):
         await self._ensure_browser()
         assert self._page is not None  # noqa: S101
 
-        if selector:
-            await self._page.fill(selector, text, timeout=_TIMEOUT_MS)
-        else:
-            # Fallback: focus on the first visible text input / textarea
-            await self._page.evaluate(
-                """(text) => {
-                    const el = document.querySelector('input:not([type=hidden]):not([type=submit]), textarea');
-                    if (el) { el.focus(); el.value = text; el.dispatchEvent(new Event('input', {bubbles:true})); }
-                }""",
-                text,
-            )
+        filled = False
+        used_target = selector or label or "(auto-detected)"
+
+        # ── 1. CSS selector ───────────────────────────────────────────────────
+        if selector and not filled:
+            try:
+                await self._page.fill(selector, text, timeout=_TIMEOUT_MS)
+                filled = True
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("type via selector %r failed: %s", selector, exc)
+
+        # ── 2. Label / placeholder / accessible name ──────────────────────────
+        if label and not filled:
+            for locator_fn in (
+                lambda: self._page.get_by_label(label, exact=False),
+                lambda: self._page.get_by_placeholder(label, exact=False),
+                lambda: self._page.get_by_role("textbox", name=label, exact=False),
+            ):
+                try:
+                    loc = locator_fn()
+                    await loc.first.fill(text, timeout=10_000)
+                    filled = True
+                    used_target = f"label: {label}"
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+
+        # ── 3. Auto-detect: next unfilled visible text input ──────────────────
+        if not filled:
+            try:
+                # Use Playwright's fill() via JS evaluation to find the first
+                # visible, non-disabled input that is currently empty (or has
+                # a value shorter than the text we want to type) so that when
+                # the agent sends two sequential type actions (e.g. email then
+                # PIN) each action targets a different field rather than always
+                # overwriting the same first input.
+                # We use the native HTMLInputElement value setter so that
+                # React / Vue controlled-component listeners fire correctly.
+                await self._page.evaluate(
+                    """(text) => {
+                        const SKIP_TYPES = new Set([
+                            'hidden', 'submit', 'button', 'checkbox', 'radio',
+                            'file', 'image', 'reset', 'range', 'color'
+                        ]);
+                        const inputs = [...document.querySelectorAll(
+                            'input:not([type=hidden]):not([type=submit]):not([type=button]),' +
+                            'input:not([type=checkbox]):not([type=radio]), textarea'
+                        )].filter(el => {
+                            if (SKIP_TYPES.has((el.type || '').toLowerCase())) return false;
+                            const style = window.getComputedStyle(el);
+                            return (
+                                style.display !== 'none' &&
+                                style.visibility !== 'hidden' &&
+                                parseFloat(style.opacity) > 0 &&
+                                !el.disabled &&
+                                !el.readOnly
+                            );
+                        });
+                        // Prefer the first empty input; if all are filled pick the first one
+                        const el = inputs.find(i => !i.value) || inputs[0];
+                        if (!el) return;
+                        el.focus();
+                        // Use the native setter so React/Vue synthetic events fire properly
+                        const nativeSetter = Object.getOwnPropertyDescriptor(
+                            window.HTMLInputElement.prototype, 'value'
+                        ).set;
+                        nativeSetter.call(el, text);
+                        el.dispatchEvent(new Event('input',  {bubbles: true, cancelable: true}));
+                        el.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+                        el.blur();
+                    }""",
+                    text,
+                )
+                filled = True
+                used_target = "(auto-detected)"
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "error":   f"Could not type text into any input field: {exc}",
+                    "success": False,
+                    "action":  "type",
+                }
 
         return {
             "action":   "type",
-            "success":  True,
-            "selector": selector or "(auto-detected)",
-            "message":  f"Typed text into {'selector: ' + selector if selector else 'first input'}",
+            "success":  filled,
+            "selector": used_target,
+            "message":  f"Typed text into {used_target}",
         }
 
     async def _action_scroll(self, task: "AgentTask") -> dict[str, Any]:
