@@ -46,10 +46,31 @@ _CLICK_LOAD_TIMEOUT_MS   = 15_000   # post-click domcontentloaded settle wait (c
 _NETWORK_IDLE_TIMEOUT_MS = 15_000   # post-click/navigate networkidle wait (SPA-safe)
 _MAX_PAGE_TEXT_CHARS     = 8_000    # truncation limit for get_content page text
 _CLICK_NAV_TEXT_CHARS    = 3_000    # page-text snippet captured inside click result on navigation
+_SPA_RENDER_WAIT_MS      = 3_000    # extra wait for SPA to render content after navigation/click
+_CLICK_LOCATE_TIMEOUT_MS = 8_000    # timeout for each individual click locator attempt
+# Maximum ratio of element text length to search text length for JS click fallback.
+# Elements whose text is more than this many times longer than the search term are
+# treated as containers (e.g. a nav bar holding many menu items) and skipped so
+# that the deepest, most-specific matching leaf element is clicked instead.
+_JS_CLICK_MAX_TEXT_RATIO = 10
 
 # Human-like delay range (milliseconds) to reduce bot-detection risk
 _HUMAN_DELAY_MIN_MS = 300
 _HUMAN_DELAY_MAX_MS = 1_200
+
+# URL path segments that indicate an error page (case-insensitive match)
+_ERROR_URL_SEGMENTS = frozenset(["/500", "/error", "/not-found", "/404", "/503"])
+
+# Content phrases that indicate an error state (lowercase, case-insensitive match).
+# Add site-specific strings here as new web applications are supported.
+_ERROR_CONTENT_PHRASES = (
+    "proses peningkatan layanan",   # MyPertamina 500 maintenance message
+    "something went wrong",         # generic English error
+    "internal server error",        # HTTP 500 body text
+    "service unavailable",          # HTTP 503 body text
+    "koneksi internet terputus",    # Indonesian "internet connection lost"
+    "cors",                         # CORS error message fragments
+)
 
 
 async def _random_delay(
@@ -222,6 +243,11 @@ class BrowserNavigatorTool(BaseTool):
         except Exception:  # noqa: BLE001
             logger.debug("navigate: networkidle wait timed out after %dms", _NETWORK_IDLE_TIMEOUT_MS)
 
+        # Extra wait for SPA frameworks (React/Vue/Angular) to complete their
+        # initial render cycle and mount interactive elements before we try to
+        # interact with the page.
+        await self._wait_for_spa_stable()
+
         # Small human-like pause after navigation
         await _random_delay(min_ms=200, max_ms=700)
 
@@ -235,7 +261,12 @@ class BrowserNavigatorTool(BaseTool):
         }
 
     async def _action_click(self, task: "AgentTask") -> dict[str, Any]:
-        """Click the first element whose accessible name contains *click_text*.
+        """Click the first element whose accessible name or text contains *click_text*.
+
+        Tries multiple locator strategies in order from most to least specific,
+        including ARIA roles used by SPA menu items (menuitem, option, tab,
+        treeitem) and a JavaScript-based text-content search as a final fallback
+        that works even for plain ``<div>``/``<span>`` elements with click handlers.
 
         When the click triggers a full-page navigation (e.g. a login form
         submission redirecting to a dashboard), the resulting page title and a
@@ -252,30 +283,59 @@ class BrowserNavigatorTool(BaseTool):
         # Remember URL before the click so we can detect post-click navigation
         url_before: str = self._page.url
 
-        # Try getByRole first (most reliable for buttons/links), then getByText
+        # Wait for the page to be interactive (SPA may still be mounting menus)
+        await self._wait_for_spa_stable()
+
+        # ── Try each locator strategy in order ────────────────────────────────
+        # Extended set: standard button/link roles first, then SPA-specific menu
+        # roles, then generic text match, and finally JS DOM walk as last resort.
         located = False
-        for locator_fn in (
-            lambda: self._page.get_by_role("button", name=click_text, exact=False),
-            lambda: self._page.get_by_role("link",   name=click_text, exact=False),
+        locator_factories = [
+            lambda: self._page.get_by_role("button",   name=click_text, exact=False),
+            lambda: self._page.get_by_role("link",     name=click_text, exact=False),
+            lambda: self._page.get_by_role("menuitem", name=click_text, exact=False),
+            lambda: self._page.get_by_role("option",   name=click_text, exact=False),
+            lambda: self._page.get_by_role("tab",      name=click_text, exact=False),
+            lambda: self._page.get_by_role("treeitem", name=click_text, exact=False),
             lambda: self._page.get_by_text(click_text, exact=False),
-        ):
+        ]
+
+        for locator_fn in locator_factories:
             try:
                 loc = locator_fn()
-                # Small pre-click delay to simulate human reaction time
+                # Wait for at least one matching element to be visible before clicking
+                await loc.first.wait_for(state="visible", timeout=_CLICK_LOCATE_TIMEOUT_MS)
                 await _random_delay(min_ms=200, max_ms=600)
-                await loc.first.click(timeout=10_000)
+                await loc.first.click(timeout=_CLICK_LOCATE_TIMEOUT_MS)
                 located = True
+                logger.debug("click: located '%s' via %s", click_text, locator_fn)
                 break
             except Exception:  # noqa: BLE001
                 continue
 
+        # ── JS fallback: walk DOM for any element whose text contains click_text ──
         if not located:
-            return {
+            located = await self._click_by_js_text(click_text)
+            if located:
+                logger.debug("click: located '%s' via JS text walk", click_text)
+
+        if not located:
+            # Take a screenshot to aid debugging before returning failure
+            try:
+                png_bytes = await self._page.screenshot(type="png", full_page=False)
+                debug_b64 = base64.b64encode(png_bytes).decode()
+            except Exception:  # noqa: BLE001
+                debug_b64 = ""
+            result: dict[str, Any] = {
                 "error":   f"Element with text '{click_text}' not found",
                 "success": False,
                 "action":  "click",
             }
+            if debug_b64:
+                result["screenshot_b64"] = debug_b64
+            return result
 
+        # ── Post-click: wait for page/SPA to settle ───────────────────────────
         # Step 1: wait for domcontentloaded in case the click triggered navigation.
         # Timeout is intentionally generous (15 s) to cover server-side login
         # processing + redirect chains (e.g. 302 → dashboard page).
@@ -291,14 +351,20 @@ class BrowserNavigatorTool(BaseTool):
         except Exception:  # noqa: BLE001
             logger.debug("click: networkidle wait timed out after %dms", _NETWORK_IDLE_TIMEOUT_MS)
 
-        # Step 3: human-like pause after action
+        # Step 3: extra SPA render wait so dynamic content (menus, modals) finishes
+        await self._wait_for_spa_stable()
+
+        # Step 4: human-like pause after action
         await _random_delay()
 
         url_after: str = self._page.url
         navigated: bool = url_after != url_before
         title: str = await self._page.title()
 
-        result: dict[str, Any] = {
+        # ── Detect error pages ────────────────────────────────────────────────
+        error_info = await self._detect_error_page()
+
+        result = {
             "action":    "click",
             "success":   True,
             "message":   f"Clicked element: \"{click_text}\"",
@@ -306,6 +372,12 @@ class BrowserNavigatorTool(BaseTool):
             "title":     title,
             "navigated": navigated,
         }
+
+        if error_info:
+            result["page_error"] = error_info
+            logger.warning(
+                "click: error page detected after clicking '%s': %s", click_text, error_info
+            )
 
         # When a full-page navigation occurred (e.g. login redirect), eagerly
         # capture the landing page text so the summariser can describe the
@@ -559,6 +631,119 @@ class BrowserNavigatorTool(BaseTool):
             }
 
     # ── Page content helpers ──────────────────────────────────────────────────
+
+    async def _wait_for_spa_stable(self) -> None:
+        """Wait for SPA frameworks (React/Vue/Angular) to finish rendering.
+
+        After a navigate or click, SPAs may need additional time beyond
+        ``networkidle`` to complete their virtual-DOM reconciliation and mount
+        interactive elements (menu items, modals, etc.) into the DOM.  This
+        helper uses a short polling loop that checks whether the number of DOM
+        nodes has stabilised, and falls back to a fixed delay if the page is
+        already stable or if no browser page is open.
+        """
+        if self._page is None:
+            return
+        try:
+            prev_count: int = -1
+            for _ in range(6):  # up to ~3 s of polling
+                await asyncio.sleep(0.5)
+                count: int = await self._page.evaluate(
+                    "() => document.querySelectorAll('*').length"
+                )
+                if count == prev_count:
+                    break
+                prev_count = count
+        except Exception:  # noqa: BLE001
+            # If evaluation fails (e.g. page navigating), just sleep briefly
+            await asyncio.sleep(1.0)
+
+    async def _click_by_js_text(self, text: str) -> bool:
+        """Click the first visible DOM element whose text content contains *text*.
+
+        This is the most permissive fallback for SPA menu items rendered as
+        ``<div>`` or ``<span>`` elements with JavaScript click handlers that
+        cannot be reached by Playwright's ARIA-role locators.  It searches the
+        entire DOM tree, skips script/style/input elements, and prefers the most
+        specific (deepest) matching element to avoid accidentally clicking a
+        container that holds multiple items.
+
+        Returns ``True`` if an element was found and clicked, ``False`` otherwise.
+        """
+        if self._page is None:
+            return False
+        try:
+            clicked: bool = await self._page.evaluate(
+                """([searchText, maxRatio]) => {
+                    const lower = searchText.toLowerCase();
+                    const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'INPUT', 'TEXTAREA']);
+
+                    // Collect all elements whose direct/inner text matches.
+                    // querySelectorAll('*') returns elements in document order (depth-first
+                    // pre-order traversal), so later entries are deeper in the DOM tree.
+                    const allEls = [...document.querySelectorAll('*')];
+                    const candidates = allEls.filter(el => {
+                        if (SKIP_TAGS.has(el.tagName)) return false;
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden') return false;
+                        if (parseFloat(style.opacity) <= 0) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) return false;
+                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        // Skip container elements whose combined text is much longer than
+                        // the search term (they hold many children, not just the target item).
+                        return txt.includes(lower) && txt.length < lower.length * maxRatio;
+                    });
+
+                    if (candidates.length === 0) return false;
+
+                    // The last candidate in document order is the deepest (most specific)
+                    // matching element – prefer it to avoid clicking a parent container
+                    // that merely contains the target text among other children.
+                    const target = candidates[candidates.length - 1];
+                    target.click();
+                    return true;
+                }""",
+                [text, _JS_CLICK_MAX_TEXT_RATIO],
+            )
+            return bool(clicked)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("_click_by_js_text: failed for '%s': %s", text, exc)
+            return False
+
+    async def _detect_error_page(self) -> str:
+        """Check whether the current page is displaying an error state.
+
+        Returns a human-readable description of the error if detected, or an
+        empty string if the page appears normal.  Recognises common patterns
+        using the module-level ``_ERROR_URL_SEGMENTS`` and
+        ``_ERROR_CONTENT_PHRASES`` constants, which can be extended to support
+        additional sites without modifying this method.
+        """
+        if self._page is None:
+            return ""
+        try:
+            url = self._page.url
+            url_lower = url.lower()
+            page_text_raw = await self._extract_page_text()
+            snippet = page_text_raw[:300] if page_text_raw else ""
+
+            # URL-based detection (e.g. /500, /error, /not-found)
+            if any(seg in url_lower for seg in _ERROR_URL_SEGMENTS):
+                title = await self._page.title()
+                return f"Error page detected at {url} (title: {title!r}). {snippet}"
+
+            # Content-based detection: look for known error phrases
+            page_text_lower = page_text_raw.lower()
+            matched = [p for p in _ERROR_CONTENT_PHRASES if p in page_text_lower]
+            if matched:
+                return (
+                    f"Possible error page at {url} "
+                    f"(matched phrases: {matched}). Content: {snippet}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("_detect_error_page: check failed: %s", exc)
+        return ""
 
     async def _extract_page_text(self) -> str:
         """Extract visible text from the current page, stripping scripts/styles."""

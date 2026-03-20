@@ -111,6 +111,17 @@ Penanganan login dan navigasi pasca-klik:
   • Tambahkan langkah "screenshot" setelah login untuk memvisualisasikan
     tampilan halaman pasca-login (opsional namun dianjurkan).
 
+Penanganan menu SPA (Single Page Application):
+  • Setelah login berhasil ke aplikasi berbasis SPA (React/Vue/Angular), menu
+    mungkin dirender secara dinamis. Gunakan langkah "get_content" terlebih dahulu
+    untuk memastikan menu sudah dimuat sebelum mengklik.
+  • SELALU tambahkan langkah "get_content" SETELAH mengklik item menu SPA untuk
+    memverifikasi bahwa halaman berhasil dimuat (bukan menampilkan error 500).
+  • Jika hasil klik menunjukkan error halaman (misalnya pesan error sistem, halaman
+    500, atau CORS error), laporkan dalam summary dan jangan coba klik ulang.
+  • Untuk klik pada item menu navigasi dalam SPA, gunakan teks yang TEPAT sesuai
+    tampilan di halaman (persis seperti yang terlihat, termasuk kapitalisasi).
+
 Penanganan perintah lanjutan (follow-up):
   • Jika konteks percakapan atau metadata menunjukkan URL terakhir yang dikunjungi,
     dan perintah saat ini TIDAK menyebutkan URL baru (misalnya perintah seperti
@@ -138,6 +149,9 @@ Berdasarkan log aksi dan konten halaman yang diberikan, buat ringkasan yang:
   - Melaporkan status setiap aksi (berhasil / gagal).
   - Jika terjadi navigasi/redirect setelah login (ditandai dengan "navigated: true"
     dalam log), tampilkan informasi halaman tujuan redirect (URL, judul, konten).
+  - Jika terdapat "page_error" dalam hasil klik (ditandai dengan kunci "page_error"
+    dalam log), laporkan dengan jelas bahwa halaman menampilkan error setelah klik
+    tersebut, beserta detail pesan error yang ditemukan.
   - Menggunakan bahasa yang sama dengan permintaan pengguna (Indonesia atau Inggris).
 """
 
@@ -146,6 +160,7 @@ _MAX_TOKENS            = 2048
 _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
 _SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser
 _HISTORY_MSG_CHARS     = 500   # max characters per message included in planner context
+_MAX_ERROR_MSG_CHARS   = 200   # max error message characters included in action log entries
 
 
 class WebAutomationAgent(BaseAgent):
@@ -345,14 +360,23 @@ class WebAutomationAgent(BaseAgent):
             result = await navigator.run(task)
             if result.get("navigated"):
                 # Navigation occurred (e.g. login redirect): include destination info in log
+                page_error_note = ""
+                if result.get("page_error"):
+                    page_error_note = f" ⚠ PAGE_ERROR: {result['page_error'][:_MAX_ERROR_MSG_CHARS]}"
                 log = (
                     f"[{step_num}] click '{text}' → navigated to {result.get('url', '?')} "
                     f"title={result.get('title', '?')!r} "
                     f"chars={len(result.get('page_text', ''))}"
+                    f"{page_error_note}"
                 )
                 # Update the last-visited URL so follow-up commands target the new page
                 if result.get("url") and not result.get("error"):
                     _session_last_url[task.session_id] = result["url"]
+            elif result.get("page_error"):
+                log = (
+                    f"[{step_num}] click '{text}' → {result.get('message', '?')} "
+                    f"⚠ PAGE_ERROR: {result['page_error'][:_MAX_ERROR_MSG_CHARS]}"
+                )
             else:
                 log = f"[{step_num}] click '{text}' → {result.get('message', result.get('error', '?'))}"
 
@@ -437,6 +461,9 @@ class WebAutomationAgent(BaseAgent):
                 url   = val.get("url",   "")
                 header = f"[{key}] {title} ({url})" if (title or url) else f"[{key}]"
                 page_snippets.append(f"{header}:\n{val['page_text'][:_SUMMARISE_TEXT_CHARS]}")
+            # Error page info from click results
+            if val.get("page_error"):
+                page_snippets.append(f"[{key}] PAGE_ERROR: {val['page_error'][:_SUMMARISE_TEXT_CHARS]}")
             # Structured items from extract_data
             if val.get("items"):
                 items_text = "\n".join(f"  - {item}" for item in val["items"][:_SUMMARISE_ITEMS_LIMIT])
