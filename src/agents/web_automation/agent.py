@@ -97,8 +97,19 @@ Panduan pengisian form (type):
     "Password", "PIN") agar setiap langkah menargetkan field yang berbeda.
   • Jika terdapat field "Nomor Ponsel atau Email", gunakan label: "Nomor Ponsel atau Email"
     atau label: "Email".
+  • Untuk field PIN gunakan label: "PIN" atau label: "Kode PIN".
   • Jangan membiarkan "label" dan "selector" keduanya kosong saat ada beberapa field
     yang harus diisi; hal ini dapat menyebabkan semua input masuk ke field yang sama.
+
+Penanganan login dan navigasi pasca-klik:
+  • Setelah mengklik tombol submit login (contoh: "Masuk", "Login", "Sign In",
+    "Submit"), sistem akan otomatis menunggu navigasi/redirect selesai dan
+    menangkap konten halaman yang baru. Tambahkan langkah "get_content"
+    SETELAH tombol submit diklik agar detail halaman pasca-login dapat ditampilkan.
+  • Jika halaman melakukan redirect setelah login, langkah "get_content"
+    berikutnya akan membaca konten dari halaman tujuan redirect tersebut.
+  • Tambahkan langkah "screenshot" setelah login untuk memvisualisasikan
+    tampilan halaman pasca-login (opsional namun dianjurkan).
 
 Penanganan perintah lanjutan (follow-up):
   • Jika konteks percakapan atau metadata menunjukkan URL terakhir yang dikunjungi,
@@ -125,6 +136,8 @@ Berdasarkan log aksi dan konten halaman yang diberikan, buat ringkasan yang:
   - Jika ada daftar item yang diekstrak (repositori, berita, produk, dll.),
     tampilkan dalam format daftar yang terstruktur dan mudah dibaca.
   - Melaporkan status setiap aksi (berhasil / gagal).
+  - Jika terjadi navigasi/redirect setelah login (ditandai dengan "navigated: true"
+    dalam log), tampilkan informasi halaman tujuan redirect (URL, judul, konten).
   - Menggunakan bahasa yang sama dengan permintaan pengguna (Indonesia atau Inggris).
 """
 
@@ -330,7 +343,18 @@ class WebAutomationAgent(BaseAgent):
             text = params.get("text", "")
             task.metadata.update({"browser_action": "click", "click_text": text})
             result = await navigator.run(task)
-            log = f"[{step_num}] click '{text}' → {result.get('message', result.get('error', '?'))}"
+            if result.get("navigated"):
+                # Navigation occurred (e.g. login redirect): include destination info in log
+                log = (
+                    f"[{step_num}] click '{text}' → navigated to {result.get('url', '?')} "
+                    f"title={result.get('title', '?')!r} "
+                    f"chars={len(result.get('page_text', ''))}"
+                )
+                # Update the last-visited URL so follow-up commands target the new page
+                if result.get("url") and not result.get("error"):
+                    _session_last_url[task.session_id] = result["url"]
+            else:
+                log = f"[{step_num}] click '{text}' → {result.get('message', result.get('error', '?'))}"
 
         elif action == "type":
             task.metadata.update({

@@ -42,9 +42,10 @@ logger = logging.getLogger(__name__)
 
 _BLOCKED_RESOURCES = {"image", "media", "font", "stylesheet"}
 _TIMEOUT_MS              = 30_000
-_CLICK_LOAD_TIMEOUT_MS   = 5_000    # post-click domcontentloaded settle wait
+_CLICK_LOAD_TIMEOUT_MS   = 15_000   # post-click domcontentloaded settle wait (covers login redirects)
 _NETWORK_IDLE_TIMEOUT_MS = 15_000   # post-click/navigate networkidle wait (SPA-safe)
 _MAX_PAGE_TEXT_CHARS     = 8_000    # truncation limit for get_content page text
+_CLICK_NAV_TEXT_CHARS    = 3_000    # page-text snippet captured inside click result on navigation
 
 # Human-like delay range (milliseconds) to reduce bot-detection risk
 _HUMAN_DELAY_MIN_MS = 300
@@ -234,13 +235,22 @@ class BrowserNavigatorTool(BaseTool):
         }
 
     async def _action_click(self, task: "AgentTask") -> dict[str, Any]:
-        """Click the first element whose accessible name contains *click_text*."""
+        """Click the first element whose accessible name contains *click_text*.
+
+        When the click triggers a full-page navigation (e.g. a login form
+        submission redirecting to a dashboard), the resulting page title and a
+        brief text snippet are captured automatically so callers can report
+        the post-login state without a separate ``get_content`` call.
+        """
         click_text: str = task.metadata.get("click_text", "").strip()
         if not click_text:
             return {"error": "click_text not provided", "success": False, "action": "click"}
 
         await self._ensure_browser()
         assert self._page is not None  # noqa: S101
+
+        # Remember URL before the click so we can detect post-click navigation
+        url_before: str = self._page.url
 
         # Try getByRole first (most reliable for buttons/links), then getByText
         located = False
@@ -266,7 +276,9 @@ class BrowserNavigatorTool(BaseTool):
                 "action":  "click",
             }
 
-        # Step 1: wait for domcontentloaded in case the click triggered navigation
+        # Step 1: wait for domcontentloaded in case the click triggered navigation.
+        # Timeout is intentionally generous (15 s) to cover server-side login
+        # processing + redirect chains (e.g. 302 → dashboard page).
         try:
             await self._page.wait_for_load_state("domcontentloaded", timeout=_CLICK_LOAD_TIMEOUT_MS)
         except Exception:  # noqa: BLE001
@@ -274,8 +286,6 @@ class BrowserNavigatorTool(BaseTool):
 
         # Step 2: wait for networkidle so that SPA AJAX responses (login API calls,
         # redirects, dynamic content updates) complete before we read the result.
-        # This is the key fix: without this wait the bot returns "click success"
-        # while the page is still processing the login request.
         try:
             await self._page.wait_for_load_state("networkidle", timeout=_NETWORK_IDLE_TIMEOUT_MS)
         except Exception:  # noqa: BLE001
@@ -284,12 +294,32 @@ class BrowserNavigatorTool(BaseTool):
         # Step 3: human-like pause after action
         await _random_delay()
 
-        return {
-            "action":  "click",
-            "success": True,
-            "message": f"Clicked element: \"{click_text}\"",
-            "url":     self._page.url,
+        url_after: str = self._page.url
+        navigated: bool = url_after != url_before
+        title: str = await self._page.title()
+
+        result: dict[str, Any] = {
+            "action":    "click",
+            "success":   True,
+            "message":   f"Clicked element: \"{click_text}\"",
+            "url":       url_after,
+            "title":     title,
+            "navigated": navigated,
         }
+
+        # When a full-page navigation occurred (e.g. login redirect), eagerly
+        # capture the landing page text so the summariser can describe the
+        # post-login state without requiring a separate get_content step.
+        if navigated:
+            page_text = await self._extract_page_text()
+            result["page_text"] = (page_text or "")[:_CLICK_NAV_TEXT_CHARS]
+            result["url_before"] = url_before
+            logger.info(
+                "click: navigation detected %s → %s title=%r",
+                url_before, url_after, title,
+            )
+
+        return result
 
     async def _action_type(self, task: "AgentTask") -> dict[str, Any]:
         """Fill a text field identified by CSS selector, label/placeholder text, or auto-detect.
