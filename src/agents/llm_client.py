@@ -11,6 +11,7 @@ import logging
 import httpx
 
 from config.settings import Settings, get_settings
+from src.memory.key_store import effective_openrouter_auth_header
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,10 @@ class LLMClient:
             timeout=self._settings.openrouter_timeout,
             headers=self._settings.openrouter_headers,
         )
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Return Authorization header, preferring key_store override over .env."""
+        return {"Authorization": effective_openrouter_auth_header(self._settings.openrouter_api_key)}
 
     async def chat(
         self,
@@ -56,7 +61,9 @@ class LLMClient:
             payload["top_p"] = top_p
         logger.debug("LLMClient.chat → model=%s, messages_count=%d", payload["model"], len(messages))
         try:
-            response = await self._http.post("/chat/completions", json=payload)
+            response = await self._http.post(
+                "/chat/completions", json=payload, headers=self._auth_headers()
+            )
             logger.debug("LLMClient HTTP status=%s", response.status_code)
             # Prefer to log the response text at DEBUG level for diagnosis
             try:

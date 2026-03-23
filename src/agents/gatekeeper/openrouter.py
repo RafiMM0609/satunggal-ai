@@ -14,6 +14,7 @@ import httpx
 
 from config.settings import Settings
 from src.agents.gatekeeper.schemas import IntentCategory
+from src.memory.key_store import effective_openrouter_auth_header
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,7 @@ class OpenRouterClient:
         )
 
     async def classify_intent(self, user_text: str) -> LLMIntentResponse:
+        auth = effective_openrouter_auth_header(self._settings.openrouter_api_key)
         payload = {
             "model": self._settings.openrouter_model,
             "max_tokens": 128,
@@ -184,7 +186,9 @@ class OpenRouterClient:
             ],
         }
         logger.debug("OpenRouter classify → model=%s", self._settings.openrouter_model)
-        response = await self._http.post("/chat/completions", json=payload)
+        response = await self._http.post(
+            "/chat/completions", json=payload, headers={"Authorization": auth}
+        )
         response.raise_for_status()
         return self._parse(response.json())
 

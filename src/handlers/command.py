@@ -1,4 +1,4 @@
-"""Command handlers: /start, /help, /ping, /reset, /deploy."""
+"""Command handlers: /start, /help, /ping, /reset, /deploy, /setapikey."""
 
 from __future__ import annotations
 
@@ -10,6 +10,11 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config.settings import get_settings
+from src.memory.key_store import (
+    clear_openrouter_key,
+    get_openrouter_key,
+    set_openrouter_key,
+)
 from src.orchestrator.main_loop import clear_session
 
 _DEPLOY_SCRIPT = Path(__file__).resolve().parents[2] / "helper_deploy.sh"
@@ -43,7 +48,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Jawab pertanyaan umum\n"
         "• Dukungan teknis & riset\n"
         "• Buat WBS & estimasi man-days proyek\n"
-        "/deploy  — Pull kode & restart service (admin)"
+        "/deploy     — Pull kode & restart service (admin)\n"
+        "/setapikey  — Atur API key OpenRouter (admin)"
     )
     await update.message.reply_html(help_text)
 
@@ -116,3 +122,81 @@ async def deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Deploy error: %s", exc)
         await status_msg.edit_text(f"❌ Error tak terduga: {exc}")
+
+
+async def setapikey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setapikey — simpan atau hapus override API key OpenRouter (admin only).
+
+    Usage:
+        /setapikey <API_KEY>   — simpan key baru (menggantikan yang di .env)
+        /setapikey clear       — hapus override, kembali ke key di .env
+        /setapikey status      — lihat apakah override aktif
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    # ── Cek izin admin ────────────────────────────────────────────────────────
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setapikey tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur API key.")
+        return
+
+    args = context.args  # list of words after the command
+
+    # ── Tidak ada argumen → tampilkan panduan ─────────────────────────────────
+    if not args:
+        current = get_openrouter_key()
+        status = "✅ Override aktif" if current else "ℹ️ Tidak ada override (menggunakan .env)"
+        await update.message.reply_html(
+            f"{status}\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setapikey &lt;API_KEY&gt;</code>  — simpan key baru\n"
+            "<code>/setapikey clear</code>       — hapus override\n"
+            "<code>/setapikey status</code>      — cek status override",
+        )
+        return
+
+    sub = args[0].strip()
+
+    # ── status ─────────────────────────────────────────────────────────────────
+    if sub.lower() == "status":
+        current = get_openrouter_key()
+        if current:
+            masked = current[:8] + "..." + current[-4:] if len(current) > 12 else "***"
+            await update.message.reply_text(f"✅ Override aktif: {masked}")
+        else:
+            await update.message.reply_text("ℹ️ Tidak ada override — menggunakan key dari .env")
+        return
+
+    # ── clear ──────────────────────────────────────────────────────────────────
+    if sub.lower() == "clear":
+        clear_openrouter_key()
+        logger.info("User %s menghapus OpenRouter API key override.", user.id)
+        await update.message.reply_text("🗑️ Override API key dihapus. Kembali menggunakan key dari .env.")
+        return
+
+    # ── simpan key baru ────────────────────────────────────────────────────────
+    new_key = sub
+    if not new_key.startswith("sk-"):
+        await update.message.reply_text(
+            "⚠️ API key tidak valid — key OpenRouter biasanya diawali dengan `sk-`.\n"
+            "Pastikan key yang dimasukkan benar.",
+            parse_mode="Markdown",
+        )
+        return
+
+    set_openrouter_key(new_key)
+    logger.info("User %s memperbarui OpenRouter API key override.", user.id)
+
+    masked = new_key[:8] + "..." + new_key[-4:] if len(new_key) > 12 else "***"
+    # Hapus pesan asli agar key tidak tersimpan di chat history
+    try:
+        await update.message.delete()
+    except Exception:  # noqa: BLE001
+        pass  # tidak semua chat izinkan penghapusan pesan
+
+    await update.effective_chat.send_message(
+        f"✅ API key OpenRouter berhasil disimpan ({masked}).\n"
+        "Override akan digunakan untuk semua permintaan berikutnya tanpa perlu restart bot."
+    )
+

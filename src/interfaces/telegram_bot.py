@@ -24,6 +24,7 @@ from src.handlers import (
     help_command,
     ping,
     reset,
+    setapikey,
     start,
     unknown_message,
 )
@@ -117,10 +118,11 @@ def _register_handlers(app: Application) -> None:
 
     # ── Command handlers ───────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help",   help_command))
-    app.add_handler(CommandHandler("ping",   ping))
-    app.add_handler(CommandHandler("reset",  reset))
-    app.add_handler(CommandHandler("deploy", deploy))
+    app.add_handler(CommandHandler("help",      help_command))
+    app.add_handler(CommandHandler("ping",      ping))
+    app.add_handler(CommandHandler("reset",     reset))
+    app.add_handler(CommandHandler("deploy",    deploy))
+    app.add_handler(CommandHandler("setapikey", setapikey))
 
     # ── Message handlers ───────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))

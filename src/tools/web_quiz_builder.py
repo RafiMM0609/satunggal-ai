@@ -43,7 +43,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       theme: {{
         extend: {{
           colors: {{
-            brand: {{ 50:'#eff6ff', 500:'#3b82f6', 600:'#2563eb', 700:'#1d4ed8' }}
+            brand: {{ 50:'#eff6ff', 100:'#dbeafe', 200:'#bfdbfe', 300:'#93c5fd', 400:'#60a5fa', 500:'#3b82f6', 600:'#2563eb', 700:'#1d4ed8', 800:'#1e40af', 900:'#1e3a8a' }}
           }}
         }}
       }}
@@ -59,6 +59,15 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   </style>
 </head>
 <body class="min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-sans">
+
+  <!-- Preload dynamic Tailwind classes used by Alpine.js at runtime -->
+  <div class="hidden
+    border-green-400 bg-green-50 text-green-600 text-green-700 text-green-800 dark:bg-green-900/30 dark:text-green-200 dark:text-green-400
+    border-red-400 bg-red-50 text-red-500 text-red-700 dark:bg-red-900/30 dark:text-red-300 dark:text-red-400
+    border-yellow-400 text-yellow-500 text-yellow-600 dark:text-yellow-400
+    border-green-300 border-red-300 dark:border-green-700 dark:border-red-700
+    hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-900/30 dark:text-brand-400
+    opacity-60"></div>
 
   <!-- ── Header ──────────────────────────────────────────────────────── -->
   <header class="sticky top-0 z-10 bg-white/80 dark:bg-slate-800/80 backdrop-blur border-b border-slate-200 dark:border-slate-700 shadow-sm">
@@ -370,6 +379,8 @@ class WebQuizBuilderTool(BaseTool):
             "questions": questions,
         }
         quiz_json = json.dumps(quiz_payload, ensure_ascii=False, indent=2)
+        # Prevent </script> in JSON from breaking out of the <script> block
+        quiz_json = quiz_json.replace("</script>", "<\/script>")
 
         # Inject data into template
         # Use .format() so that {{ }} escapes in the template resolve to literal { }
