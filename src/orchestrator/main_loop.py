@@ -312,73 +312,53 @@ async def clear_session(session_id: str) -> None:
     logger.info("Session cleared: %s", session_id)
 
 
-async def process_pdf_quiz(
+async def _run_pdf_quiz_pipeline(
+    task: "AgentTask",
+    agents: dict,
+    tools: dict,
     session_id: str,
-    pdf_path: str,
-    original_filename: str = "document.pdf",
-    status_callback: "StatusCallback" = None,
+    original_filename: str,
+    status_callback: "StatusCallback",
+    history,
 ) -> "AgentTask":
     """
-    Dedicated pipeline for PDF → Interactive HTML Quiz generation.
-
-    Bypasses the gatekeeper (intent is already known: quiz_generation).
-    Flow:
-        1. PDFParserTool   → extract text chunks from PDF
-        2. QuizAgent       → generate questions batch by batch
-        3. WebQuizBuilderTool → compile questions into single-file HTML
-
-    Args:
-        session_id:        Unique identifier for the conversation.
-        pdf_path:          Absolute path to the downloaded PDF file.
-        original_filename: Original filename shown to the user.
-        status_callback:   Optional async callable for live progress updates.
-
-    Returns:
-        AgentTask with task.metadata["html_path"] set on success.
+    Inner pipeline: PDF → Interactive HTML Quiz.
+    Called by process_pdf after gatekeeper confirms quiz_generation intent.
+    Runs pdf_parser (full document), QuizAgent, then WebQuizBuilderTool.
     """
-    from src.memory.state import AgentTask
-
-    _, agents, _, _, tools = _get_pipeline()
-
-    task = AgentTask(
-        session_id=session_id,
-        user_input=f"Buat kuis dari PDF: {original_filename}",
-        intent="quiz_generation",
-    )
-    task.metadata["pdf_path"]         = pdf_path
-    task.metadata["quiz_title"]       = _make_quiz_title(original_filename)
-    task.metadata["status_callback"]  = status_callback
-
-    # ── Step 1: Parse PDF ──────────────────────────────────────────────────
+    # ── Full Parse ─────────────────────────────────────────────────────────
     await _notify(status_callback, _quiz_status_msg(original_filename, phase="parsing"))
     pdf_tool = tools.get("pdf_parser")
     if pdf_tool is None:
         task.mark_failed("pdf_parser tool tidak terdaftar.")
         task.result = "❌ Sistem tidak dapat memproses PDF saat ini."
+        history.add(session_id, "assistant", task.result)
         return task
 
     parser_result = await pdf_tool.run(task)
     if "error" in parser_result:
         task.mark_failed(parser_result["error"])
         task.result = f"❌ Gagal membaca PDF: {parser_result['error']}"
+        history.add(session_id, "assistant", task.result)
         return task
 
     chunks: list[str] = parser_result["chunks"]
     task.metadata["pdf_chunks"] = chunks
 
     logger.info(
-        "PDF parsed: session=%s pages=%d words=%d chunks=%d",
+        "PDF full-parse: session=%s pages=%d words=%d chunks=%d",
         session_id,
         parser_result.get("total_pages", 0),
         parser_result.get("total_words", 0),
         len(chunks),
     )
 
-    # ── Step 2: Run QuizAgent (batch processing) ───────────────────────────
+    # ── QuizAgent ──────────────────────────────────────────────────────────
     quiz_agent = agents.get("quiz_agent")
     if quiz_agent is None:
         task.mark_failed("quiz_agent tidak terdaftar.")
         task.result = "❌ Quiz agent tidak tersedia."
+        history.add(session_id, "assistant", task.result)
         return task
 
     task.mark_processing("quiz_agent")
@@ -388,15 +368,16 @@ async def process_pdf_quiz(
     task.metadata.pop("pdf_chunks", None)
 
     if task.status.value == "failed":
+        history.add(session_id, "assistant", task.result or "")
         return task
 
-    # ── Step 3: Build HTML (via pending_tools) ─────────────────────────────
+    # ── Build HTML (via pending_tools) ─────────────────────────────────────
     await _notify(status_callback, _quiz_status_msg(original_filename, phase="building"))
 
     for tool_name in list(task.pending_tools):
         tool = tools.get(tool_name)
         if tool is None:
-            logger.warning("process_pdf_quiz: tool '%s' not in registry; skipping.", tool_name)
+            logger.warning("_run_pdf_quiz_pipeline: tool '%s' not in registry; skipping.", tool_name)
             continue
         try:
             tool_output = await tool.run(task)
@@ -418,11 +399,149 @@ async def process_pdf_quiz(
     if not task.result:
         task.result = "✅ Kuis berhasil dibuat!"
 
+    history.add(session_id, "assistant", task.result)
     logger.info(
-        "process_pdf_quiz done | session=%s html=%s",
+        "_run_pdf_quiz_pipeline done | session=%s html=%s",
         session_id, task.metadata.get("html_path", "MISSING"),
     )
     return task
+
+
+async def process_pdf(
+    session_id: str,
+    pdf_path: str,
+    original_filename: str = "document.pdf",
+    user_caption: str = "",
+    status_callback: "StatusCallback" = None,
+) -> "AgentTask":
+    """
+    Intent-aware pipeline for any PDF document.
+
+    Replaces the hardcoded process_pdf_quiz with a 3-step approach:
+        1. Quick Peek  – parse only page 1 to get a document preview (fast, low RAM)
+        2. Gatekeeper  – LLM classifies intent from user_caption + document preview
+        3. Full Process – run the matched pipeline (currently: quiz_generation)
+
+    Args:
+        session_id:        Unique identifier for the conversation.
+        pdf_path:          Absolute path to the downloaded PDF file.
+        original_filename: Original filename shown to the user.
+        user_caption:      Text the user sent together with the PDF (may be empty).
+        status_callback:   Optional async callable for live progress updates.
+
+    Returns:
+        AgentTask with appropriate metadata set on success.
+    """
+    from src.memory.state import AgentTask
+
+    history, agents, _, gatekeeper, tools = _get_pipeline()
+
+    task = AgentTask(
+        session_id=session_id,
+        user_input=user_caption.strip() or f"[PDF: {original_filename}]",
+    )
+    task.metadata["pdf_path"]        = pdf_path
+    task.metadata["status_callback"] = status_callback
+
+    # Record the user turn in history
+    history.add(
+        session_id, "user",
+        user_caption.strip() or f"[PDF dikirim: {original_filename}]",
+    )
+
+    # ── Step 1: Quick Peek (halaman pertama saja) ──────────────────────────
+    await _notify(status_callback, _pdf_scanning_msg(original_filename, phase="scanning"))
+
+    pdf_tool = tools.get("pdf_parser")
+    if pdf_tool is None:
+        task.mark_failed("pdf_parser tool tidak terdaftar.")
+        task.result = "❌ Sistem tidak dapat memproses PDF saat ini."
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    task.metadata["pdf_max_pages"] = 1
+    peek_result = await pdf_tool.run(task)
+    task.metadata.pop("pdf_max_pages", None)
+
+    if "error" in peek_result:
+        task.mark_failed(peek_result["error"])
+        task.result = f"❌ Gagal membaca PDF: {peek_result['error']}"
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    preview_chunks = peek_result.get("chunks", [])
+    preview_text   = preview_chunks[0][:1500] if preview_chunks else ""
+
+    logger.info(
+        "PDF quick-peek: session=%s total_pages=%d preview_chars=%d",
+        session_id, peek_result.get("total_pages", 0), len(preview_text),
+    )
+
+    # ── Step 2: Gatekeeper Decision ────────────────────────────────────────
+    await _notify(status_callback, _pdf_scanning_msg(original_filename, phase="analyzing"))
+
+    caption_part  = user_caption.strip() or "(tidak ada pesan dari pengguna)"
+    enriched_text = f"[Pesan user: {caption_part}]\n[Preview dokumen: {preview_text}]"
+    intent_result = await gatekeeper.classify_intent(enriched_text, session_id=session_id)
+    task.mark_routed(intent_result.intent.value)
+
+    logger.info(
+        "PDF intent: session=%s intent=%s confidence=%.2f needs_clarification=%s",
+        session_id, intent_result.intent.value, intent_result.confidence,
+        intent_result.needs_clarification,
+    )
+
+    await _notify(status_callback, _pdf_scanning_msg(original_filename, phase="routing"))
+
+    # ── Step 2b: Gatekeeper needs clarification ────────────────────────────
+    if intent_result.needs_clarification:
+        clarification = (
+            intent_result.clarification_question
+            or "Mau diapakan dokumen ini? Misalnya: buat kuis interaktif, ringkasan, atau keperluan lain?"
+        )
+        task.result = clarification
+        history.add(session_id, "assistant", task.result)
+        logger.info("PDF intent clarification requested: session=%s", session_id)
+        return task
+
+    # ── Step 3: Route to appropriate pipeline ─────────────────────────────
+    intent_value = intent_result.intent.value
+
+    if intent_value == "quiz_generation":
+        task.metadata["quiz_title"] = _make_quiz_title(original_filename)
+        return await _run_pdf_quiz_pipeline(
+            task, agents, tools, session_id, original_filename, status_callback, history,
+        )
+
+    # Unsupported intent – friendly explanation
+    task.result = (
+        f"ℹ️ Saya menerima PDF *{original_filename}* dan mendeteksi permintaan: *{intent_value}*.\n\n"
+        f"Saat ini PDF hanya mendukung pembuatan *kuis interaktif*.\n"
+        f"Kirim ulang PDF dengan pesan _\"buat kuis dari dokumen ini\"_ untuk memulai. 🎯"
+    )
+    logger.info("PDF intent '%s' not yet supported: session=%s", intent_value, session_id)
+    history.add(session_id, "assistant", task.result)
+    return task
+
+
+async def process_pdf_quiz(
+    session_id: str,
+    pdf_path: str,
+    original_filename: str = "document.pdf",
+    status_callback: "StatusCallback" = None,
+) -> "AgentTask":
+    """
+    Backward-compatible alias for process_pdf.
+    Always routes to quiz_generation by passing a fixed caption.
+    Existing callers continue to work without modification.
+    """
+    return await process_pdf(
+        session_id=session_id,
+        pdf_path=pdf_path,
+        original_filename=original_filename,
+        user_caption="buat kuis",
+        status_callback=status_callback,
+    )
 
 
 def _make_quiz_title(filename: str) -> str:
@@ -431,6 +550,21 @@ def _make_quiz_title(filename: str) -> str:
     # Replace underscores/hyphens with spaces, title-case
     name = name.replace("_", " ").replace("-", " ")
     return f"Kuis: {name.title()}"
+
+
+def _pdf_scanning_msg(filename: str, phase: str) -> str:
+    """Build a Markdown progress message for the Quick Peek + Gatekeeper phase."""
+    scan_icon    = "✅" if phase in ("analyzing", "routing", "done") else "🔄"
+    analyze_icon = "✅" if phase in ("routing", "done") else ("🔄" if phase == "analyzing" else "⏳")
+    route_icon   = "✅" if phase == "done" else ("🔄" if phase == "routing" else "⏳")
+
+    return (
+        f"⏳ *Memproses PDF...*\n\n"
+        f"📄 *{filename}*\n\n"
+        f"  • 🔍 Memindai dokumen:       {scan_icon} {'Selesai' if scan_icon == '✅' else 'Memproses...'}\n"
+        f"  • 🧭 Menganalisis permintaan: {analyze_icon} {'Selesai' if analyze_icon == '✅' else ('Memproses...' if analyze_icon == '🔄' else 'Menunggu')}\n"
+        f"  • 🚦 Mengarahkan ke pipeline: {route_icon} {'Selesai' if route_icon == '✅' else ('Memproses...' if route_icon == '🔄' else 'Menunggu')}"
+    )
 
 
 def _quiz_status_msg(filename: str, phase: str) -> str:

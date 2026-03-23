@@ -13,7 +13,7 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from src.orchestrator.main_loop import process_message, process_pdf_quiz
+from src.orchestrator.main_loop import process_message, process_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -214,9 +214,10 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
     doc     = message.document
 
     original_filename = doc.file_name or "document.pdf"
+    user_caption      = message.caption or ""
     logger.info(
-        "PDF from user=%s filename=%r size=%d bytes",
-        user.id, original_filename, doc.file_size or 0,
+        "PDF from user=%s filename=%r size=%d bytes caption=%r",
+        user.id, original_filename, doc.file_size or 0, user_caption,
     )
 
     # ── Size guard (max 20 MB to protect VPS RAM) ──────────────────────────
@@ -286,10 +287,11 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # ── Run the quiz pipeline ──────────────────────────────────────────────
     try:
-        task = await process_pdf_quiz(
+        task = await process_pdf(
             session_id=str(user.id),
             pdf_path=pdf_path,
             original_filename=original_filename,
+            user_caption=user_caption,
             status_callback=_progress_callback,
         )
     except Exception as exc:

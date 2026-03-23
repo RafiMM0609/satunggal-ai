@@ -28,6 +28,7 @@ class IntentCategory(str, Enum):
     SYSTEM_INFO        = "system_info"        # tanya info CPU, RAM, storage server
     LOG_VIEWER         = "log_viewer"         # lihat log bot untuk debugging
     QUIZ_GENERATION    = "quiz_generation"    # konversi PDF menjadi kuis interaktif HTML
+    PDF_SUMMARIZATION  = "pdf_summarization"  # ringkas / QnA / pahami isi dokumen PDF
     WEB_AUTOMATION     = "web_automation"     # autonomous browsing: buka URL, klik, isi form, screenshot
     UNKNOWN            = "unknown"
 

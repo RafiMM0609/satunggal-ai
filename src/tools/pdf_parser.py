@@ -70,8 +70,11 @@ class PDFParserTool(BaseTool):
         all_text_parts: list[str] = []
 
         # Baca halaman per kelompok untuk membatasi penggunaan RAM
-        for start in range(0, total_pages, _PAGES_PER_READ):
-            end = min(start + _PAGES_PER_READ, total_pages)
+        # pdf_max_pages: jika di-set, hanya baca N halaman pertama (Quick Peek mode)
+        max_pages = task.metadata.get("pdf_max_pages", None)
+        read_up_to = min(total_pages, max_pages) if max_pages else total_pages
+        for start in range(0, read_up_to, _PAGES_PER_READ):
+            end = min(start + _PAGES_PER_READ, read_up_to)
             page_texts: list[str] = []
             for page_num in range(start, end):
                 try:
@@ -104,8 +107,8 @@ class PDFParserTool(BaseTool):
         total_words = len(clean_text.split())
 
         logger.info(
-            "PDFParserTool: parsed OK – pages=%d words=%d chunks=%d session=%s",
-            total_pages, total_words, len(chunks), task.session_id,
+            "PDFParserTool: parsed OK – pages=%d read_up_to=%d words=%d chunks=%d is_partial=%s session=%s",
+            total_pages, read_up_to, total_words, len(chunks), bool(max_pages and max_pages < total_pages), task.session_id,
         )
 
         return {
@@ -113,6 +116,10 @@ class PDFParserTool(BaseTool):
             "total_pages": total_pages,
             "total_words": total_words,
             "filename":    filename,
+            **({
+                "is_partial": True,
+                "peeked_pages": read_up_to,
+            } if max_pages and max_pages < total_pages else {}),
         }
 
 

@@ -39,6 +39,8 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - system_info        (user asks about server/host resource status: CPU usage, RAM, memory, storage, disk space, hardware info of this machine)
 - log_viewer         (user wants to see, inspect, or debug the bot's recent application logs)
 - web_automation     (user wants the bot to autonomously browse a website, click buttons, fill forms, take screenshots, read page content, or interact with a web page)
+- quiz_generation    (user wants to convert a PDF into an interactive HTML quiz or a set of MCQ questions from educational/study material)
+- pdf_summarization  (user wants to summarize, ask questions about, or understand the content of a PDF document)
 - unknown
 
 Pre-agent tools the orchestrator can execute before the specialist agent:
@@ -119,6 +121,18 @@ Rules:
     - Key differentiator: user wants the bot to actually BROWSE and INTERACT with a live website, not just search for info.
       If user says "buka website X dan klik tombol Y" / "login ke situs Z" / "isi form di URL ini" → web_automation.
       If user just wants information found via web search → research.
+17. When the input starts with "[Pesan user:" it means a PDF document was uploaded by the user.
+    "[Pesan user: ...]" contains the caption that user typed when sending the PDF
+    (or "(tidak ada pesan dari pengguna)" when no caption was provided).
+    "[Preview dokumen: ...]" contains the beginning of the document's actual text content.
+    Classify based on BOTH the caption intent AND the document preview:
+    - Caption contains "kuis" / "soal" / "quiz" / "pertanyaan" / "latihan" OR preview looks like structured educational/study material (chapters, definitions, numbered items) → quiz_generation
+    - Caption contains "ringkas" / "rangkum" / "summarize" / "apa isi" / "ceritakan" / "jelaskan" / "apa yang ada" / "kesimpulan" → pdf_summarization
+    - Caption is "(tidak ada pesan dari pengguna)" or vague and document type is unclear → needs_clarification asking what they want done with the PDF
+    Examples:
+      Input has "[Pesan user: buat kuis dari ini]" → {"intent": "quiz_generation", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+      Input has "[Pesan user: ringkas dokumen ini]" → {"intent": "pdf_summarization", "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
+      Input has "[Pesan user: (tidak ada pesan dari pengguna)]" → {"intent": "unknown", "confidence": 0.20, "tools": [], "needs_clarification": true, "clarification_question": "Mau diapakan dokumen ini? Misalnya: buat kuis interaktif, ringkasan, atau ada keperluan lain?"}
 
 Example responses:
   {"intent": "data_analysis",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
@@ -133,6 +147,8 @@ Example responses:
   {"intent": "web_automation",     "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "general_inquiry",    "confidence": 0.88, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "unknown",            "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?"}
+  {"intent": "quiz_generation",    "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "pdf_summarization",  "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
 """
 
 
