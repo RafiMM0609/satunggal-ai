@@ -20,6 +20,7 @@ _STORE_PATH = Path(__file__).resolve().parents[2] / "runtime_keys.json"
 
 _KEY_OPENROUTER     = "openrouter_api_key"
 _KEY_MAX_TOKENS     = "openrouter_max_tokens"
+_KEY_MODEL_NAME     = "openrouter_model_name"
 
 
 def _load() -> dict:
@@ -101,3 +102,32 @@ def effective_openrouter_max_tokens(env_max_tokens: int) -> int:
     """Return the max_tokens to use, preferring the store over ``env_max_tokens``."""
     stored = get_openrouter_max_tokens()
     return stored if stored is not None else env_max_tokens
+
+
+# ── Model Name override ───────────────────────────────────────────────────────
+
+def get_openrouter_model() -> Optional[str]:
+    """Return the stored model name override, or None if not set."""
+    return _load().get(_KEY_MODEL_NAME) or None
+
+
+def set_openrouter_model(model_name: str) -> None:
+    """Persist *model_name* as the active OpenRouter model override."""
+    data = _load()
+    data[_KEY_MODEL_NAME] = model_name.strip()
+    _save(data)
+    logger.info("key_store: OpenRouter model name updated to %s.", model_name)
+
+
+def clear_openrouter_model() -> None:
+    """Remove the model name override so the .env value is used again."""
+    data = _load()
+    data.pop(_KEY_MODEL_NAME, None)
+    _save(data)
+    logger.info("key_store: OpenRouter model name override cleared.")
+
+
+def effective_openrouter_model(env_model: str) -> str:
+    """Return the model name to use, preferring the store over ``env_model``."""
+    stored = get_openrouter_model()
+    return stored if stored else env_model
