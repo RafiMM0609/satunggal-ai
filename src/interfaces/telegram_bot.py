@@ -25,6 +25,7 @@ from src.handlers import (
     ping,
     reset,
     setapikey,
+    setllmmodel,
     setmaxtokens,
     start,
     unknown_message,
@@ -125,6 +126,7 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("deploy",    deploy))
     app.add_handler(CommandHandler("setapikey",   setapikey))
     app.add_handler(CommandHandler("setmaxtokens", setmaxtokens))
+    app.add_handler(CommandHandler("setllmmodel",  setllmmodel))
 
     # ── Message handlers ───────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))

@@ -11,7 +11,7 @@ import logging
 import httpx
 
 from config.settings import Settings, get_settings
-from src.memory.key_store import effective_openrouter_auth_header, effective_openrouter_max_tokens
+from src.memory.key_store import effective_openrouter_auth_header, effective_openrouter_max_tokens, effective_openrouter_model
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class LLMClient:
             top_p:       Nucleus sampling threshold.
         """
         payload: dict = {
-            "model":      model      or self._settings.openrouter_model,
+            "model":      model      or effective_openrouter_model(self._settings.openrouter_model),
             "max_tokens": max_tokens or effective_openrouter_max_tokens(self._settings.openrouter_max_tokens),
             "messages":   messages,
         }

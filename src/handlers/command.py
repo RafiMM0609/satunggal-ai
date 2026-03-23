@@ -13,10 +13,13 @@ from config.settings import get_settings
 from src.memory.key_store import (
     clear_openrouter_key,
     clear_openrouter_max_tokens,
+    clear_openrouter_model,
     get_openrouter_key,
     get_openrouter_max_tokens,
+    get_openrouter_model,
     set_openrouter_key,
     set_openrouter_max_tokens,
+    set_openrouter_model,
 )
 from src.orchestrator.main_loop import clear_session
 
@@ -53,7 +56,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Buat WBS & estimasi man-days proyek\n"
         "/deploy        — Pull kode & restart service (admin)\n"
         "/setapikey     — Atur API key OpenRouter (admin)\n"
-        "/setmaxtokens  — Atur max tokens OpenRouter (admin)"
+        "/setmaxtokens  — Atur max tokens OpenRouter (admin)\n"
+        "/setllmmodel   — Atur nama model LLM OpenRouter (admin)"
     )
     await update.message.reply_html(help_text)
 
@@ -277,6 +281,74 @@ async def setmaxtokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     logger.info("User %s memperbarui OpenRouter max_tokens override ke %d.", user.id, new_value)
     await update.message.reply_text(
         f"✅ max_tokens OpenRouter berhasil disimpan: <b>{new_value}</b> tokens.\n"
+        "Override berlaku untuk semua permintaan berikutnya tanpa perlu restart bot.",
+        parse_mode="HTML",
+    )
+
+
+async def setllmmodel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setllmmodel — simpan atau hapus override nama model LLM OpenRouter (admin only).
+
+    Usage:
+        /setllmmodel <MODEL_NAME>  — simpan nama model baru (misal: /setllmmodel openai/gpt-4o)
+        /setllmmodel clear         — hapus override, kembali ke model di .env
+        /setllmmodel status        — lihat nama model yang sedang aktif
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    # ── Cek izin admin ────────────────────────────────────────────────────────
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setllmmodel tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur model LLM.")
+        return
+
+    args = context.args
+
+    # ── Tidak ada argumen → tampilkan panduan ─────────────────────────────────
+    if not args:
+        stored = get_openrouter_model()
+        if stored:
+            status_line = f"✅ Override aktif: <b>{stored}</b>"
+        else:
+            status_line = f"ℹ️ Tidak ada override (menggunakan .env: <b>{settings.openrouter_model}</b>)"
+        await update.message.reply_html(
+            f"{status_line}\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setllmmodel &lt;MODEL_NAME&gt;</code>  — simpan nama model baru\n"
+            "<code>/setllmmodel clear</code>           — hapus override\n"
+            "<code>/setllmmodel status</code>          — cek status override",
+        )
+        return
+
+    sub = args[0].strip()
+
+    # ── status ─────────────────────────────────────────────────────────────────
+    if sub.lower() == "status":
+        stored = get_openrouter_model()
+        if stored:
+            await update.message.reply_text(f"✅ Override aktif: {stored}")
+        else:
+            await update.message.reply_text(
+                f"ℹ️ Tidak ada override — menggunakan model dari .env: {settings.openrouter_model}"
+            )
+        return
+
+    # ── clear ──────────────────────────────────────────────────────────────────
+    if sub.lower() == "clear":
+        clear_openrouter_model()
+        logger.info("User %s menghapus OpenRouter model name override.", user.id)
+        await update.message.reply_text(
+            f"🗑️ Override model LLM dihapus. Kembali menggunakan model dari .env ({settings.openrouter_model})."
+        )
+        return
+
+    # ── simpan nama model baru ────────────────────────────────────────────────
+    new_model = sub
+    set_openrouter_model(new_model)
+    logger.info("User %s memperbarui OpenRouter model name override ke %s.", user.id, new_model)
+    await update.message.reply_text(
+        f"✅ Model LLM OpenRouter berhasil disimpan: <b>{new_model}</b>.\n"
         "Override berlaku untuk semua permintaan berikutnya tanpa perlu restart bot.",
         parse_mode="HTML",
     )
