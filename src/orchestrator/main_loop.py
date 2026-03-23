@@ -509,6 +509,9 @@ async def process_pdf(
 
     if intent_value == "quiz_generation":
         task.metadata["quiz_title"] = _make_quiz_title(original_filename)
+        question_count = _extract_question_count(user_caption)
+        if question_count:
+            task.metadata["quiz_question_count"] = question_count
         return await _run_pdf_quiz_pipeline(
             task, agents, tools, session_id, original_filename, status_callback, history,
         )
@@ -550,6 +553,23 @@ def _make_quiz_title(filename: str) -> str:
     # Replace underscores/hyphens with spaces, title-case
     name = name.replace("_", " ").replace("-", " ")
     return f"Kuis: {name.title()}"
+
+
+def _extract_question_count(text: str) -> int | None:
+    """
+    Extract desired quiz question count from user caption.
+
+    Examples:
+        "buat 30 soal dari PDF ini" → 30
+        "buat kuis 50 pertanyaan"   → 50
+        "buat kuis"                 → None (auto)
+    """
+    import re as _re
+    match = _re.search(r"(\d+)\s*(?:soal|pertanyaan|question|soals?)", text, _re.IGNORECASE)
+    if match:
+        count = int(match.group(1))
+        return max(5, min(count, 150))  # clamp to a sane range
+    return None
 
 
 def _pdf_scanning_msg(filename: str, phase: str) -> str:

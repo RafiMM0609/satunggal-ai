@@ -40,7 +40,7 @@ hafalan verbatim dari teks.
 ## ATURAN KETAT ##
 
 1. OUTPUT HARUS BERUPA JSON VALID SAJA. Tidak ada teks, penjelasan, atau komentar di luar JSON.
-2. Kembalikan array JSON dengan 10 hingga 15 objek soal. Tidak kurang, tidak lebih.
+2. Kembalikan TEPAT sejumlah soal yang diminta dalam pesan user. Tidak kurang, tidak lebih.
 3. Setiap soal WAJIB memiliki TEPAT 4 pilihan jawaban (A, B, C, D).
 4. Field "correct" adalah INTEGER INDEX (0=A, 1=B, 2=C, 3=D) dari jawaban yang benar.
 5. JANGAN pernah memberi kunci jawaban yang salah. Verifikasi kembali sebelum output.
@@ -98,6 +98,7 @@ class QuizAgent(BaseAgent):
         chunks: list[str] = task.metadata.get("pdf_chunks", [])
         if not chunks:
             task.mark_failed("Tidak ada konten PDF yang dapat diproses.")
+
             task.result = (
                 "❌ Gagal membuat kuis: teks PDF kosong atau tidak dapat dibaca. "
                 "Pastikan PDF berisi teks (bukan gambar hasil scan)."
@@ -107,7 +108,19 @@ class QuizAgent(BaseAgent):
         quiz_title: str = task.metadata.get("quiz_title", "Kuis dari PDF")
         status_cb = task.metadata.get("status_callback")
 
+        # Desired total question count (user-specified, e.g. "buat 30 soal")
+        desired_total: int | None = task.metadata.get("quiz_question_count")
+
         total_batches = len(chunks)
+        # Calculate how many questions to request per batch
+        if desired_total:
+            import math as _math
+            per_batch_count = _math.ceil(desired_total / total_batches)
+            # Keep per-batch reasonable: min 5, max 50
+            per_batch_count = max(5, min(per_batch_count, 50))
+        else:
+            per_batch_count = 10  # conservative default to ensure quality
+
         all_questions: list[dict[str, Any]] = []
         question_counter = 0
 
@@ -133,6 +146,7 @@ class QuizAgent(BaseAgent):
                 batch_index=batch_idx,
                 session_id=task.session_id,
                 existing_count=question_counter,
+                questions_per_batch=per_batch_count,
             )
 
             # Free the chunk text from memory immediately after processing
@@ -200,6 +214,7 @@ class QuizAgent(BaseAgent):
         batch_index: int,
         session_id: str,
         existing_count: int,
+        questions_per_batch: int = 10,
     ) -> list[dict[str, Any]]:
         """
         Call the LLM with one text chunk and extract the questions JSON.
@@ -208,7 +223,7 @@ class QuizAgent(BaseAgent):
         """
         user_prompt = (
             f"Berikut adalah teks sumber untuk Batch {batch_index}.\n"
-            f"Buat 10-15 soal pilihan ganda dari teks ini.\n"
+            f"Buat TEPAT {questions_per_batch} soal pilihan ganda dari teks ini.\n"
             f"ID soal dimulai dari {existing_count + 1}.\n\n"
             f"TEKS:\n{chunk_text}"
         )
@@ -218,10 +233,14 @@ class QuizAgent(BaseAgent):
             {"role": "user",   "content": user_prompt},
         ]
 
+        # Scale max_tokens with the number of questions requested;
+        # each question uses roughly 150 tokens of output.
+        max_tokens = max(4096, questions_per_batch * 200)
+
         try:
             raw_reply = await self._llm.chat(
                 messages,
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 temperature=0.3,  # low temperature for consistent JSON format
                 top_p=0.9,
             )
