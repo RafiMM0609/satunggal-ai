@@ -34,10 +34,12 @@ class IntentCategory(str, Enum):
 
 class IntentResult(BaseModel):
     """Classification result produced by GatekeeperAgent."""
-    session_id: str
-    raw_text:   str              = Field(..., description="Normalised input text.")
-    intent:     IntentCategory
-    confidence: float            = Field(..., ge=0.0, le=1.0)
-    tools:      list[str]        = Field(default_factory=list, description="Ordered list of tool names to execute before calling the specialist agent.")
-    model_used: Optional[str]   = None
-    metadata:   dict             = Field(default_factory=dict)
+    session_id:           str
+    raw_text:             str              = Field(..., description="Normalised input text.")
+    intent:               IntentCategory
+    confidence:           float            = Field(..., ge=0.0, le=1.0)
+    tools:                list[str]        = Field(default_factory=list, description="Ordered list of tool names to execute before calling the specialist agent.")
+    model_used:           Optional[str]   = None
+    metadata:             dict             = Field(default_factory=dict)
+    needs_clarification:  bool             = Field(default=False, description="True when the intent is ambiguous and the bot should ask the user for more detail instead of proceeding.")
+    clarification_question: Optional[str] = Field(default=None, description="Question to send back to the user when needs_clarification is True.")

@@ -46,9 +46,23 @@ Pre-agent tools the orchestrator can execute before the specialist agent:
 
 Rules:
 1. Reply with a JSON object ONLY – no markdown, no explanation.
-2. Schema: {"intent": "<category>", "confidence": <float 0.0–1.0>, "tools": [<tool_name>, ...]}
+2. Schema: {"intent": "<category>", "confidence": <float 0.0–1.0>, "tools": [<tool_name>, ...], "needs_clarification": <bool>, "clarification_question": "<question or null>"}
 3. "tools" must be a list; only include "tavily_search" when intent is "research".
 4. Use "unknown" when the intent is genuinely unclear.
+4a. Self-Correction – when you set intent to "unknown" OR confidence < 0.50, you MUST also set:
+    - "needs_clarification": true
+    - "clarification_question": a concise, helpful question in the SAME language the user used (Indonesian or English)
+      that will help disambiguate exactly what they want.
+    Example Indonesian clarification questions:
+      - "Maksud Anda ingin membuat WBS, estimasi mandays, atau ada kebutuhan lain?" 
+      - "Boleh saya tahu lebih detail? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada permintaan teknis tertentu?"
+      - "Apakah Anda ingin saya mencari info di internet, atau langsung menjawab berdasarkan pengetahuan yang saya miliki?"
+    Example English clarification questions:
+      - "Could you clarify what you'd like me to do — research a topic, generate a document, or something else?"
+      - "Could you give me more detail about what you need?"
+    When needs_clarification is true the orchestrator will return your clarification_question directly to the user
+    WITHOUT running any tools or specialist agent. Do NOT invent a clarification_question when confidence ≥ 0.50.
+    When needs_clarification is false, set clarification_question to null.
 5. Use "mandays_planning" when the user asks about mandays, effort, person-days, or resource estimation specifically.
 6. Use "data_analysis" when the user explicitly asks for a WBS or project breakdown structure.
 7. Use "research" ONLY when the user uses explicit investigative/research keywords such as:
@@ -107,26 +121,29 @@ Rules:
       If user just wants information found via web search → research.
 
 Example responses:
-  {"intent": "data_analysis",      "confidence": 0.97, "tools": []}
-  {"intent": "mandays_planning",   "confidence": 0.95, "tools": []}
-  {"intent": "research",           "confidence": 0.91, "tools": ["tavily_search"]}
-  {"intent": "code_development",   "confidence": 0.96, "tools": []}
-  {"intent": "code_inspection",    "confidence": 0.95, "tools": []}
-  {"intent": "code_understanding", "confidence": 0.94, "tools": []}
-  {"intent": "document_creation",  "confidence": 0.95, "tools": []}
-  {"intent": "system_info",        "confidence": 0.97, "tools": []}
-  {"intent": "log_viewer",         "confidence": 0.98, "tools": []}
-  {"intent": "web_automation",     "confidence": 0.96, "tools": []}
-  {"intent": "general_inquiry",    "confidence": 0.88, "tools": []}
+  {"intent": "data_analysis",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "mandays_planning",   "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "research",           "confidence": 0.91, "tools": ["tavily_search"], "needs_clarification": false, "clarification_question": null}
+  {"intent": "code_development",   "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "code_inspection",    "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "code_understanding", "confidence": 0.94, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "document_creation",  "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "system_info",        "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "log_viewer",         "confidence": 0.98, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "web_automation",     "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "general_inquiry",    "confidence": 0.88, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "unknown",            "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?"}
 """
 
 
 @dataclass(frozen=True, slots=True)
 class LLMIntentResponse:
-    intent:     IntentCategory
-    confidence: float
-    model_used: str
-    tools:      tuple[str, ...] = ()
+    intent:                 IntentCategory
+    confidence:             float
+    model_used:             str
+    tools:                  tuple[str, ...] = ()
+    needs_clarification:    bool            = False
+    clarification_question: str | None      = None
 
 
 class OpenRouterClient:
@@ -187,15 +204,21 @@ class OpenRouterClient:
             intent = IntentCategory(intent_str)
             raw_tools = parsed.get("tools", [])
             tools = tuple(t for t in raw_tools if isinstance(t, str))
+            needs_clarification    = bool(parsed.get("needs_clarification", False))
+            clarification_question = parsed.get("clarification_question") or None
         except (json.JSONDecodeError, ValueError, KeyError) as exc:
             logger.warning("Failed to parse LLM response (%s): %r", exc, raw_content)
-            intent     = IntentCategory.UNKNOWN
-            confidence = 0.0
-            tools      = ()
+            intent                 = IntentCategory.UNKNOWN
+            confidence             = 0.0
+            tools                  = ()
+            needs_clarification    = True
+            clarification_question = None
 
         return LLMIntentResponse(
             intent=intent,
             confidence=confidence,
             model_used=model_used,
             tools=tools,
+            needs_clarification=needs_clarification,
+            clarification_question=clarification_question,
         )

@@ -45,6 +45,24 @@ class GatekeeperAgent:
 
         llm_response = await self._llm_client.classify_intent(normalised)
 
+        # ── Self-Correction: fallback clarification question ──────────────
+        clarification_question = llm_response.clarification_question
+        needs_clarification    = llm_response.needs_clarification
+
+        # Force clarification when intent is UNKNOWN or confidence is very low,
+        # even if the LLM forgot to set needs_clarification in its response.
+        if (
+            llm_response.intent == IntentCategory.UNKNOWN
+            or llm_response.confidence < 0.50
+        ):
+            needs_clarification = True
+            if not clarification_question:
+                clarification_question = (
+                    "Maaf, saya belum sepenuhnya memahami permintaan Anda. "
+                    "Boleh Anda jelaskan lebih detail apa yang ingin Anda lakukan? "
+                    "Misalnya: membuat dokumen, mencari informasi, menganalisis data, atau kebutuhan lainnya?"
+                )
+
         result = IntentResult(
             session_id=session_id,
             raw_text=normalised,
@@ -52,6 +70,8 @@ class GatekeeperAgent:
             confidence=llm_response.confidence,
             tools=list(llm_response.tools),
             model_used=llm_response.model_used,
+            needs_clarification=needs_clarification,
+            clarification_question=clarification_question,
         )
         logger.info(
             "Gatekeeper → intent=%s confidence=%.2f",

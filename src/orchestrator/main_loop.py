@@ -188,11 +188,28 @@ async def process_message(
     intent_result = await gatekeeper.classify_intent(user_text, session_id=session_id)
     task.mark_routed(intent_result.intent.value)
     logger.info(
-        "Intent: session=%s intent=%s confidence=%.2f tools=%s",
+        "Intent: session=%s intent=%s confidence=%.2f tools=%s needs_clarification=%s",
         session_id, intent_result.intent.value, intent_result.confidence,
-        intent_result.tools,
+        intent_result.tools, intent_result.needs_clarification,
     )
     tracker.complete_current()
+
+    # 3b. Self-Correction: if the gatekeeper is unsure, ask the user back
+    #     instead of forwarding to a specialist agent that might misfire.
+    if intent_result.needs_clarification:
+        clarification = (
+            intent_result.clarification_question
+            or "Maaf, saya belum memahami permintaan Anda. Boleh dijelaskan lebih detail?"
+        )
+        task.result = clarification
+        history.add(session_id, "assistant", task.result)
+        logger.info(
+            "Self-correction triggered: session=%s → returning clarification question",
+            session_id,
+        )
+        tracker.advance("done")
+        await _notify(status_callback, tracker.render())
+        return task
 
     # 4. Execute tools declared by gatekeeper (before calling specialist agent)
     for tool_name in intent_result.tools:

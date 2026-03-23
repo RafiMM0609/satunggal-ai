@@ -63,242 +63,83 @@ Orchestrator adalah satu-satunya yang memanggil tools — agent **tidak** memang
 ### 2. Klasifikasi Intent (GatekeeperAgent)
 
 Bot secara otomatis mendeteksi maksud pesan pengguna dan meneruskannya ke agent yang tepat.
+ # AdvanceAI — Ringkasan Kemampuan & Roadmap (terbarui)
 
-| Intent | Deskripsi | Agent | Pre-agent Tool |
-|--------|-----------|-------|----------------|
-| `general_inquiry` | Pertanyaan umum | ResponderAgent | — |
-| `product_question` | Pertanyaan seputar produk | ResponderAgent | — |
-| `complaint` | Keluhan pengguna | ResponderAgent | — |
-| `order_status` | Status pesanan | ResponderAgent | — |
-| `billing` | Pertanyaan tagihan/pembayaran | ResponderAgent | — |
-| `technical_support` | Masalah teknis (tanpa kata riset eksplisit) | ResponderAgent | — |
-| `image_query` | Pertanyaan terkait gambar/foto | ResponderAgent | — |
-| `unknown` | Intent tidak dikenali | ResponderAgent | — |
-| `research` | Riset mendalam dengan kata kunci investigatif eksplisit | ResearcherAgent | `tavily_search` |
-| `content_creation` | Buat konten untuk platform digital | ContentCreatorAgent | — |
-| `data_analysis` | WBS / Gantt chart proyek | WBSAgent | — |
-| `mandays_planning` | Estimasi mandays, effort, alokasi resource | MandaysAgent | — |
-| `code_development` | Clone repo, edit kode via AI, jalankan di Docker sandbox | DeveloperAgent | — |
+ Dokumen ini merangkum kemampuan yang saat ini diimplementasikan di repo dan rencana pengembangan singkat.
 
-> **Catatan `research`:** Hanya dipicu oleh kata kunci investigatif eksplisit (riset, selidiki, deep dive, dll).  
-> Pertanyaan teknis biasa tanpa kata kunci tersebut → `technical_support` → ResponderAgent.
+ **Referensi teknis:** lihat `APP_LOGIC_WORKFLOW.md` untuk detail alur agent dan `src/` untuk implementasi.
 
----
+ ---
 
-### 3. Agent Spesialis
+ **Arsitektur singkat**
 
-#### ResponderAgent
-- Menjawab percakapan umum, pertanyaan produk, keluhan, status order, billing, dan technical support ringan.
-- Menggunakan riwayat percakapan (last 10 pesan) sebagai konteks.
-- Mendukung bahasa **Indonesia dan Inggris** secara otomatis.
-- **Tidak** menggunakan Tavily web search.
+ User (Telegram / REST API) → GatekeeperAgent → AgentRouter → Specialist Agent → Orchestrator (tools) → Interface (kirim teks/file)
 
-#### ResearcherAgent
-- Menangani permintaan riset mendalam yang menggunakan kata kunci investigatif eksplisit.
-- **Diperkaya data web real-time** melalui `TavilySearchTool` (dijalankan orchestrator sebelum agent dipanggil).
-- Memberikan jawaban komprehensif dengan analisis step-by-step.
-- Menggunakan riwayat percakapan (last 8 pesan) sebagai konteks.
-- Fallback ke LLM-only jika Tavily tidak dikonfigurasi.
+ - Sistem multi-agent berbasis LLM (OpenRouter client). Semua panggilan tool dikelola oleh orchestrator; agent mengisi `AgentTask` (blackboard).
 
-#### ContentCreatorAgent
-- Mengubah ide atau riset menjadi konten siap-publikasi untuk platform digital.
-- Output terstruktur: `hook`, `body`, `cta`, `hashtags`, `platform`.
-- Mendukung platform: **LinkedIn**, **Twitter/X**, **Blog**, dan platform lain.
-- Menghasilkan preview teks langsung di Telegram.
+ ---
 
-#### WBSAgent
-- Membuat **Work Breakdown Structure (WBS)** dalam format **Gantt chart** dari deskripsi pengguna.
-- Alur: Agent → LLM → JSON → `pending_tools` → Orchestrator → `WBSGeneratorTool` → Excel.
-- Output: **file Excel (.xlsx)** dengan layout Gantt-style (timeline per hari kerja, sprint header, sel aktif berwarna) dikirim langsung ke pengguna.
-- Dipicu oleh intent `data_analysis`.
+ **Ringkasan kemampuan saat ini**
 
-#### MandaysAgent
-- Membuat **rencana estimasi mandays** dan alokasi sumber daya dari deskripsi proyek.
-- Alur: Agent → LLM → JSON → `pending_tools` → Orchestrator → `MandaysGeneratorTool` → Excel.
-- Output: **file Excel (.xlsx)** dengan tabel mandays per role per sprint + grand total.
-- Mendukung 13 role standar: `SA`, `TL`, `BA`, `SM`, `UI`, `DBA`, `BE1`, `BE2`, `FE1`, `FE2`, `QA`, `DevOps`, `TW`.
-- Dipicu oleh intent `mandays_planning`.
+ - Interface: Telegram Bot (polling & webhook) dan REST API (`/chat`, `/clear/{session_id}`) aktif.
+ - Intent classification: `GatekeeperAgent` memilih agent spesialis berdasarkan intent pesan.
+ - Bahasa: mendukung bahasa Indonesia dan Inggris.
 
-#### DeveloperAgent
-- **Senior Developer Orchestrator** – mengeksekusi tugas coding end-to-end dari pesan pengguna.
-- Dipicu oleh intent `code_development` (kata kunci: clone repo, perbaiki kode, tambah fitur, jalankan di sandbox, daftar repo).
+ **Agent utama yang tersedia (implementasi di `src/agents/`)**
+ - `ResponderAgent`: percakapan umum, support ringan, keluhan, billing.
+ - `ResearcherAgent`: riset mendalam; dapat menggunakan `TavilySearchTool` untuk hasil web real-time.
+ - `ContentCreatorAgent`: buat konten terstruktur (hook/body/cta/hashtags) untuk platform digital.
+ - `WBSAgent`: hasilkan WBS → JSON → `WBSGeneratorTool` → Excel Gantt (.xlsx).
+ - `MandaysAgent`: hasilkan estimasi mandays → `MandaysGeneratorTool` → Excel (.xlsx).
+ - `DeveloperAgent`: alur coding end‑to‑end (clone/pull, edit via LLM, sandbox run, commit & push).
 
-**Alur kerja internal DeveloperAgent:**
+ **Intent penting yang dikenali**
+ - `research`, `content_creation`, `data_analysis`, `mandays_planning`, `code_development`, plus intent percakapan umum (`general_inquiry`, `technical_support`, dll.).
 
-```
-1. Parse instruksi  → LLM ekstrak repo_url + task dari pesan pengguna
-2. Clone / Pull     → git clone (repo baru) atau git pull (sudah ada)
-                      · Inject GITHUB_PAT ke HTTPS URL otomatis
-                      · Simpan ke RepoTracker (SQLite)
-3. Environment      → Cek Dockerfile & docker-compose.yml
-                      · Jika tidak ada → generate fallback otomatis
-4. Edit Kode        → Mode LLM-direct (primary):
-                        · Scan struktur repo (find .)
-                        · Grep file relevan berdasarkan keyword task
-                        · Baca isi file (max 80 KB)
-                        · Kirim ke OpenRouter → JSON patch
-                        · Tulis file ke disk
-                      Mode claude CLI (opsional, jika claude terinstall):
-                        · claude -p "<task>" --allowedTools "Read,Edit,Write,Bash"
-5. Verifikasi       → docker compose up --build --abort-on-container-exit
-                      · Deteksi Python traceback di log
-                      · Jika gagal → kirim error log ke LLM → retry (max 3x)
-6. Commit & Push    → git add -A → git commit → git push (dengan PAT auth)
-7. Report           → Summary / Files Changed / Commit Message / Docker Status / Push Status
-```
+ ---
 
-**Catatan penting:**
-- `gh copilot suggest` **tidak digunakan** karena hanya menyarankan perintah shell interaktif, bukan mengedit file.
-- Semua logika tool (CLIExecutor, SandboxRunner, GitManager) dikelola **internal** di dalam agent — tidak melalui pipeline orchestrator.
-- Jika user mengirim pesan tanpa repo URL (contoh: "tampilkan daftar repo"), agent menampilkan semua repo dari SQLite tracker.
+ **Tools & utilitas (lokasi di `src/tools/`)**
+ - Pre/Post-agent tools: `TavilySearchTool`, `WBSGeneratorTool`, `MandaysGeneratorTool`.
+ - Developer-agent tools (internal): `CLIExecutor`, `SandboxRunner`, `GitManager`.
+ - Utility: extractor untuk WBS/mandays di `src/tools/wbs/` dan `src/tools/mandays/`.
 
----
+ ---
 
-### 4. Tools Internal
+ **DeveloperAgent — alur singkat**
+ 1) Parse instruksi → ekstrak repo_url + task
+ 2) Clone/Pull repos (inject `GITHUB_PAT` bila perlu) → simpan di `RepoTracker`
+ 3) Cek environment (Dockerfile/docker-compose) → buat fallback bila perlu
+ 4) Edit kode via LLM → tulis patch ke disk
+ 5) Jalankan sandbox (docker compose) → jika error kirim log ke LLM → retry (max 3x)
+ 6) Commit & push (git)
 
-Semua tools merupakan subclass dari `BaseTool` dan hanya dipanggil oleh **orchestrator**.
+ ---
 
-| Tool | Tipe | Kapan Dijalankan | Fungsi |
-|------|------|------------------|--------|
-| `TavilySearchTool` | Pre-agent | Sebelum ResearcherAgent | Live web search, hasilnya masuk `task.tool_results["tavily_search"]` |
-| `WBSGeneratorTool` | Post-agent | Setelah WBSAgent selesai | Build Excel Gantt chart dari JSON di `task.metadata["wbs_json_data"]` |
-| `MandaysGeneratorTool` | Post-agent | Setelah MandaysAgent selesai | Build Excel mandays dari JSON di `task.metadata["mandays_json_data"]` |
+ **Output yang dikirim ke pengguna**
+ - Teks berbentuk Markdown (Telegram MarkdownV2)
+ - File Excel `.xlsx` untuk WBS dan Mandays
+ - Laporan coding (file changed, commit hash, status sandbox, push URL)
 
-Tools internal DeveloperAgent (dikelola langsung oleh agent, **tidak** melalui pipeline orchestrator):
+ ---
 
-| Tool | File | Fungsi |
-|------|------|--------|
-| `CLIExecutor` | `src/tools/cli_executor.py` | Jalankan perintah shell non-interaktif dengan timeout 5 menit, capture stdout+stderr |
-| `SandboxRunner` | `src/tools/sandbox_runner.py` | Build & run Docker container; generate Dockerfile/compose fallback jika tidak ada; deteksi traceback |
-| `GitManager` | `src/tools/git_manager.py` | Konfigurasi identitas git, inject PAT ke URL, `git add -A → commit → push` |
+ **Konfigurasi & variabel lingkungan penting**
+ - `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `TAVILY_API_KEY`, `GITHUB_PAT`, `SANDBOX_REPOS_DIR`, `PORT`, dll.
 
-Tools utility (standalone, tidak dalam pipeline):
+ ---
 
-| File | Fungsi |
-|------|--------|
-| `src/tools/wbs/extract_wbs.py` | Parse Excel WBS → JSON (untuk reverse engineering) |
-| `src/tools/mandays/extract_mandays.py` | Parse Excel Mandays → JSON |
+ **Dependensi inti**
+ - `python-telegram-bot`, `fastapi` + `uvicorn`, `httpx`, `pydantic`, `openpyxl`, `python-dotenv` (lihat `requirements.txt`).
 
----
+ ---
 
-### 5. Memori & Sesi
+ **Rencana pengembangan (prioritas tinggi)**
+ - Persistensi memori (simpan riwayat ke DB)
+ - Confidence threshold untuk klasifikasi intent
+ - Error recovery untuk LLM-generated JSON
+ - Unit & integration tests
+ - Autentikasi pada REST API
 
-- Setiap pengguna memiliki **sesi percakapan terpisah** berdasarkan `session_id`.
-- Riwayat percakapan disimpan **in-memory** selama bot berjalan.
-- Sesi dapat di-reset via `/reset` (Telegram) atau `DELETE /clear/{session_id}` (REST API).
-
----
-
-### 6. Output
-
-| Tipe Output | Siapa yang Menghasilkan | Format |
-|-------------|------------------------|--------|
-| Teks Markdown | Semua agent | Telegram MarkdownV2 |
-| File Excel Gantt | WBSAgent + WBSGeneratorTool | `.xlsx` dikirim via Telegram |
-| File Excel Mandays | MandaysAgent + MandaysGeneratorTool | `.xlsx` dikirim via Telegram |
-| Draft konten | ContentCreatorAgent | Teks terstruktur (hook/body/cta/hashtags) |
-| Laporan coding | DeveloperAgent | Teks: file changed, commit hash, sandbox status, push URL |
-
----
-
-## Rencana Pengembangan
-
-### Prioritas Tinggi
-
-- [ ] **Persistensi Memori** – simpan riwayat percakapan ke database (SQLite / Redis / PostgreSQL).
-- [ ] **Confidence Threshold** – tolak atau minta klarifikasi jika confidence intent < 0.5.
-- [ ] **Error Recovery LLM** – jika LLM menghasilkan JSON tidak valid, retry otomatis dengan prompt koreksi.
-- [ ] **Unit & Integration Tests** – test suite untuk semua agent dan tools.
-- [ ] **Autentikasi REST API** – API key atau JWT untuk mengamankan endpoint.
-
-### Pengembangan Agent Baru
-
-- [ ] **DocumentAgent** – summarize, ekstrak, atau analisis dokumen (PDF, DOCX) yang di-upload pengguna.
-- [ ] **RAGAgent** – Retrieval-Augmented Generation dari basis pengetahuan internal (FAQ, SOP, dokumentasi produk).
-- [ ] **ImageAnalysisAgent** – proses gambar dengan model vision; saat ini `image_query` ditangani ResponderAgent.
-- [ ] **ReportAgent** – buat laporan progres berdasarkan data mandays aktual vs. rencana.
-- [ ] **ScheduleAgent** – konversi WBS menjadi jadwal proyek dengan export PDF.
-
-### Peningkatan WBSAgent & MandaysAgent
-
-- [ ] **Template Proyek** – template WBS per jenis proyek (e-commerce, mobile app, ERP, dll).
-- [ ] **Multi-turn Refinement** – pengguna bisa minta revisi WBS/mandays secara iteratif dalam satu sesi.
-- [ ] **Export PDF** – opsi export selain Excel.
-- [ ] **Input dari Dokumen** – pengguna upload briefing, agent buat WBS/mandays dari isinya.
-- [ ] **Kalkulasi Biaya** – estimasi biaya per role berdasarkan rate yang dikonfigurasi.
-
-### Pengembangan Interface
-
-- [ ] **Web Dashboard** – frontend (React/Next.js) untuk monitor sesi, riwayat chat, dan output file.
-- [ ] **WhatsApp Interface** – via Twilio atau WhatsApp Business API.
-- [ ] **Slack / Discord Bot** – integrasi ke platform kolaborasi tim.
-- [ ] **Voice Input** – speech-to-text sebelum diproses pipeline.
-
-### Kualitas & Operasional
-
-- [ ] **Rate Limiting** – batasi request per sesi untuk mencegah abuse.
-- [ ] **Logging & Monitoring** – integrasi Sentry / Grafana / Prometheus untuk produksi.
-- [ ] **Health Check Endpoint** – endpoint `/health` dengan status semua komponen.
-
----
-
-## Konfigurasi & Variabel Lingkungan
-
-| Variabel | Keterangan |
-|----------|------------|
-| `TELEGRAM_BOT_TOKEN` | Token bot Telegram |
-| `OPENROUTER_API_KEY` | API key untuk LLM via OpenRouter |
-| `OPENROUTER_MODEL` | Model LLM yang digunakan |
-| `TAVILY_API_KEY` | API key Tavily (opsional – research intent) |
-| `WEBHOOK_URL` | URL publik untuk Telegram webhook (opsional) |
-| `PORT` | Port server (default: 8000) |
-| `GITHUB_PAT` | Personal Access Token GitHub (scope: `repo`). Kosong = pakai SSH key |
-| `GIT_USER_NAME` | Nama penulis commit (default: `AdvanceAI Bot`) |
-| `GIT_USER_EMAIL` | Email penulis commit (default: `bot@advanceai.local`) |
-| `SANDBOX_REPOS_DIR` | Direktori clone repo lokal (default: `~/sandbox_repos`) |
-| `SANDBOX_PYTHON_IMAGE` | Docker image fallback Dockerfile (default: `python:3.11-slim`) |
-| `SANDBOX_TIMEOUT` | Timeout per perintah Docker dalam detik (default: `300`) |
-| `SANDBOX_MAX_RETRIES` | Maks iterasi retry sandbox jika container gagal (default: `3`) |
-
----
-
-## Dependensi Utama
-
-| Package | Kegunaan |
-|---------|----------|
-| `python-telegram-bot` | Interface Telegram |
-| `fastapi` + `uvicorn` | REST API server |
-| `httpx` | HTTP client untuk panggilan LLM & Tavily |
-| `pydantic` | Validasi skema data |
-| `openpyxl` | Generate & parse file Excel |
-| `tavily-python` | Live web search (opsional) |
-| `python-dotenv` | Manajemen konfigurasi `.env` |
-
-
----
-
-## Arsitektur Sistem
-
-```
-User (Telegram / REST API)
-        │
-        ▼
-  GatekeeperAgent          ← klasifikasi intent
-        │
-        ▼
-   AgentRouter             ← pilih agent yang sesuai
-        │
-        ├── ResponderAgent      → percakapan umum
-        ├── ResearcherAgent     → riset mendalam + Tavily web search
-        ├── ContentCreatorAgent → pembuatan konten platform (LinkedIn, dll)
-        ├── WBSAgent            → WBS Gantt chart + export Excel
-        ├── MandaysAgent        → estimasi mandays + export Excel
-        └── DeveloperAgent      → clone repo → edit kode via LLM → Docker sandbox
-```
-
-Bot menggunakan sistem **multi-agent** berbasis LLM (via OpenRouter). Setiap pesan diklasifikasikan terlebih dahulu oleh GatekeeperAgent, lalu diteruskan ke agent spesialis yang paling sesuai.
-
----
+ Untuk detail tugas implementasi, saya bisa memecah ke TODO pekerjaan atau memperbarui bagian roadmap sesuai prioritas Anda.
 
 ## Kemampuan Saat Ini
 
