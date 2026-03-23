@@ -11,7 +11,7 @@ import logging
 import httpx
 
 from config.settings import Settings, get_settings
-from src.memory.key_store import effective_openrouter_auth_header
+from src.memory.key_store import effective_openrouter_auth_header, effective_openrouter_max_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class LLMClient:
         """
         payload: dict = {
             "model":      model      or self._settings.openrouter_model,
-            "max_tokens": max_tokens or self._settings.openrouter_max_tokens,
+            "max_tokens": max_tokens or effective_openrouter_max_tokens(self._settings.openrouter_max_tokens),
             "messages":   messages,
         }
         if temperature is not None:

@@ -1,4 +1,4 @@
-"""Command handlers: /start, /help, /ping, /reset, /deploy, /setapikey."""
+"""Command handlers: /start, /help, /ping, /reset, /deploy, /setapikey, /setmaxtokens."""
 
 from __future__ import annotations
 
@@ -12,8 +12,11 @@ from telegram.ext import ContextTypes
 from config.settings import get_settings
 from src.memory.key_store import (
     clear_openrouter_key,
+    clear_openrouter_max_tokens,
     get_openrouter_key,
+    get_openrouter_max_tokens,
     set_openrouter_key,
+    set_openrouter_max_tokens,
 )
 from src.orchestrator.main_loop import clear_session
 
@@ -48,8 +51,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Jawab pertanyaan umum\n"
         "• Dukungan teknis & riset\n"
         "• Buat WBS & estimasi man-days proyek\n"
-        "/deploy     — Pull kode & restart service (admin)\n"
-        "/setapikey  — Atur API key OpenRouter (admin)"
+        "/deploy        — Pull kode & restart service (admin)\n"
+        "/setapikey     — Atur API key OpenRouter (admin)\n"
+        "/setmaxtokens  — Atur max tokens OpenRouter (admin)"
     )
     await update.message.reply_html(help_text)
 
@@ -198,5 +202,82 @@ async def setapikey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_chat.send_message(
         f"✅ API key OpenRouter berhasil disimpan ({masked}).\n"
         "Override akan digunakan untuk semua permintaan berikutnya tanpa perlu restart bot."
+    )
+
+
+async def setmaxtokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setmaxtokens — simpan atau hapus override max_tokens OpenRouter (admin only).
+
+    Usage:
+        /setmaxtokens <NILAI>   — simpan nilai baru (misal: /setmaxtokens 4096)
+        /setmaxtokens clear     — hapus override, kembali ke nilai di .env
+        /setmaxtokens status    — lihat nilai yang sedang aktif
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    # ── Cek izin admin ────────────────────────────────────────────────────────
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setmaxtokens tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur max tokens.")
+        return
+
+    args = context.args
+
+    # ── Tidak ada argumen → tampilkan panduan ─────────────────────────────────
+    if not args:
+        stored = get_openrouter_max_tokens()
+        if stored is not None:
+            status_line = f"✅ Override aktif: <b>{stored}</b> tokens"
+        else:
+            status_line = f"ℹ️ Tidak ada override (menggunakan .env: <b>{settings.openrouter_max_tokens}</b> tokens)"
+        await update.message.reply_html(
+            f"{status_line}\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setmaxtokens &lt;NILAI&gt;</code>  — simpan nilai baru (contoh: 4096)\n"
+            "<code>/setmaxtokens clear</code>       — hapus override\n"
+            "<code>/setmaxtokens status</code>      — cek status override",
+        )
+        return
+
+    sub = args[0].strip()
+
+    # ── status ─────────────────────────────────────────────────────────────────
+    if sub.lower() == "status":
+        stored = get_openrouter_max_tokens()
+        if stored is not None:
+            await update.message.reply_text(f"✅ Override aktif: {stored} tokens")
+        else:
+            await update.message.reply_text(
+                f"ℹ️ Tidak ada override — menggunakan nilai dari .env: {settings.openrouter_max_tokens} tokens"
+            )
+        return
+
+    # ── clear ──────────────────────────────────────────────────────────────────
+    if sub.lower() == "clear":
+        clear_openrouter_max_tokens()
+        logger.info("User %s menghapus OpenRouter max_tokens override.", user.id)
+        await update.message.reply_text(
+            f"🗑️ Override max_tokens dihapus. Kembali menggunakan nilai dari .env ({settings.openrouter_max_tokens} tokens)."
+        )
+        return
+
+    # ── simpan nilai baru ──────────────────────────────────────────────────────
+    try:
+        new_value = int(sub)
+        if new_value < 1:
+            raise ValueError("must be positive")
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Nilai tidak valid. Masukkan bilangan bulat positif, misal: /setmaxtokens 4096"
+        )
+        return
+
+    set_openrouter_max_tokens(new_value)
+    logger.info("User %s memperbarui OpenRouter max_tokens override ke %d.", user.id, new_value)
+    await update.message.reply_text(
+        f"✅ max_tokens OpenRouter berhasil disimpan: <b>{new_value}</b> tokens.\n"
+        "Override berlaku untuk semua permintaan berikutnya tanpa perlu restart bot.",
+        parse_mode="HTML",
     )
 
