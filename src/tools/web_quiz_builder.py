@@ -176,7 +176,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
       <div>
         <h2 class="text-2xl font-bold" x-text="scoreLabel"></h2>
-        <p class="text-slate-500 dark:text-slate-400 mt-1" x-text="`Skor kamu: ${scorePct}%`"></p>
+        <p class="text-slate-500 dark:text-slate-400 mt-1" x-text="`Skor kamu: ${{scorePct}}%`"></p>
       </div>
 
       <!-- Action buttons -->
