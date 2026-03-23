@@ -111,16 +111,33 @@ class QuizAgent(BaseAgent):
         # Desired total question count (user-specified, e.g. "buat 30 soal")
         desired_total: int | None = task.metadata.get("quiz_question_count")
 
-        total_batches = len(chunks)
-        # Calculate how many questions to request per batch
-        if desired_total:
-            import math as _math
-            per_batch_count = _math.ceil(desired_total / total_batches)
-            # Keep per-batch reasonable: min 5, max 50
-            per_batch_count = max(5, min(per_batch_count, 50))
-        else:
-            per_batch_count = 10  # conservative default to ensure quality
+        import math as _math
 
+        # Per-batch cap: asking for more than 15 at once causes LLM to truncate.
+        _MAX_PER_BATCH = 15
+        _DEFAULT_PER_BATCH = 10
+
+        if desired_total:
+            per_batch_count = min(desired_total, _MAX_PER_BATCH)
+            # Ensure we have enough chunks/batches to cover the desired total.
+            # If the PDF produced fewer chunks than needed, tile the existing
+            # chunks so each batch can contribute per_batch_count questions.
+            needed_batches = _math.ceil(desired_total / per_batch_count)
+            if len(chunks) < needed_batches:
+                # Repeat chunks cyclically until we have enough batches
+                tiled = []
+                for i in range(needed_batches):
+                    tiled.append(chunks[i % len(chunks)])
+                chunks = tiled
+                logger.info(
+                    "QuizAgent: tiled %d original chunk(s) into %d batches for %d desired questions. session=%s",
+                    len(task.metadata.get("pdf_chunks", chunks)), needed_batches,
+                    desired_total, task.session_id,
+                )
+        else:
+            per_batch_count = _DEFAULT_PER_BATCH
+
+        total_batches = len(chunks)
         all_questions: list[dict[str, Any]] = []
         question_counter = 0
 
@@ -147,6 +164,7 @@ class QuizAgent(BaseAgent):
                 session_id=task.session_id,
                 existing_count=question_counter,
                 questions_per_batch=per_batch_count,
+                existing_questions=all_questions,
             )
 
             # Free the chunk text from memory immediately after processing
@@ -160,6 +178,13 @@ class QuizAgent(BaseAgent):
                     batch_idx, total_batches, len(batch_questions),
                     question_counter, task.session_id,
                 )
+                # Stop early if we've reached (or exceeded) the desired total
+                if desired_total and question_counter >= desired_total:
+                    logger.info(
+                        "QuizAgent: reached desired total %d (have %d), stopping early. session=%s",
+                        desired_total, question_counter, task.session_id,
+                    )
+                    break
             else:
                 logger.warning(
                     "QuizAgent batch %d/%d: no questions extracted, skipping. session=%s",
@@ -184,7 +209,9 @@ class QuizAgent(BaseAgent):
             )
             return task
 
-        # Re-number questions sequentially
+        # Re-number questions sequentially (trim to desired total if over)
+        if desired_total and len(all_questions) > desired_total:
+            all_questions = all_questions[:desired_total]
         for idx, q in enumerate(all_questions, start=1):
             q["id"] = idx
 
@@ -215,16 +242,30 @@ class QuizAgent(BaseAgent):
         session_id: str,
         existing_count: int,
         questions_per_batch: int = 10,
+        existing_questions: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Call the LLM with one text chunk and extract the questions JSON.
 
         Returns a (possibly empty) list of question dicts.
         """
+        # Build anti-duplication hint when we already have questions from this text
+        avoid_hint = ""
+        if existing_questions:
+            existing_stems = "\n".join(
+                f"- {q['question']}" for q in existing_questions[-30:]
+            )
+            avoid_hint = (
+                f"\n\nHINDARILAH soal yang mirip atau sama dengan soal yang sudah dibuat berikut ini:\n"
+                f"{existing_stems}\n"
+                f"Buat soal yang BERBEDA dari semua soal di atas."
+            )
+
         user_prompt = (
             f"Berikut adalah teks sumber untuk Batch {batch_index}.\n"
             f"Buat TEPAT {questions_per_batch} soal pilihan ganda dari teks ini.\n"
-            f"ID soal dimulai dari {existing_count + 1}.\n\n"
+            f"ID soal dimulai dari {existing_count + 1}.\n"
+            f"{avoid_hint}\n\n"
             f"TEKS:\n{chunk_text}"
         )
 

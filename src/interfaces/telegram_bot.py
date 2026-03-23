@@ -129,7 +129,10 @@ def _register_handlers(app: Application) -> None:
     # ── Message handlers ───────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_document))
+    app.add_handler(MessageHandler(
+        filters.Document.PDF | filters.Document.FileExtension("pdf"),
+        handle_pdf_document,
+    ))
 
     # ── Fallback ───────────────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.ALL, unknown_message))

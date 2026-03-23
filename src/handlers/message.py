@@ -215,6 +215,16 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     original_filename = doc.file_name or "document.pdf"
     user_caption      = message.caption or ""
+
+    # Reject clearly non-PDF files (defence-in-depth against filter bypass)
+    mime_ok = doc.mime_type in (None, "application/pdf", "application/octet-stream")
+    ext_ok  = original_filename.lower().endswith(".pdf")
+    if not mime_ok and not ext_ok:
+        await message.reply_text(
+            "⚠️ Hanya file PDF yang didukung. Kirim file dengan format `.pdf`.", quote=True
+        )
+        return
+
     logger.info(
         "PDF from user=%s filename=%r size=%d bytes caption=%r",
         user.id, original_filename, doc.file_size or 0, user_caption,

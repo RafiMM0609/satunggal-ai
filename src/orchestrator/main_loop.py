@@ -509,7 +509,15 @@ async def process_pdf(
 
     if intent_value == "quiz_generation":
         task.metadata["quiz_title"] = _make_quiz_title(original_filename)
+        # Try caption first, then recent conversation history (user may have typed
+        # "buat kuis 30 soal" as a text message before sending the PDF).
         question_count = _extract_question_count(user_caption)
+        if not question_count:
+            for msg in reversed(history.get(session_id)[-6:]):
+                if msg.role == "user":
+                    question_count = _extract_question_count(msg.content)
+                    if question_count:
+                        break
         if question_count:
             task.metadata["quiz_question_count"] = question_count
         return await _run_pdf_quiz_pipeline(
