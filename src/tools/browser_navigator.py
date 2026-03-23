@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_BLOCKED_RESOURCES = {"image", "media", "font", "stylesheet"}
+_BLOCKED_RESOURCES = {"media"}
 _TIMEOUT_MS              = 30_000
 _CLICK_LOAD_TIMEOUT_MS   = 15_000   # post-click domcontentloaded settle wait (covers login redirects)
 _NETWORK_IDLE_TIMEOUT_MS = 15_000   # post-click/navigate networkidle wait (SPA-safe)
