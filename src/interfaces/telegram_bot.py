@@ -43,7 +43,8 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
 
 💻 <b>Developer Suite</b>
   • <b>Developer Agent</b> — buat & edit kode, push ke GitHub/GitLab
-  • <b>Developer Inspector</b> — review kode & deteksi bug
+  • <b>Developer Inspector</b> — inspeksi mendalam & root cause analysis bug
+  • <b>Developer Q&amp;A</b> — tanya jawab isi repo: API, tech stack, alur, model data
   • <b>Sandbox Runner</b> — eksekusi aman via Docker
 
 📋 <b>Project Management</b>
@@ -56,11 +57,17 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
   • Render diagram Mermaid ke PNG
 
 🧩 <b>PDF-to-Quiz Generator</b>
-  • Kirim PDF (50–100 soal) untuk diubah menjadi Website Kuis Interaktif HTML
+  • Kirim PDF untuk diubah menjadi Website Kuis Interaktif HTML
   • Progress real-time, feedback instan, dark mode & scoreboard
 
-🖥️ <b>System Info</b>
+🌐 <b>Web Automation</b>
+  • Buka URL & ringkas konten halaman web
+  • Navigasi, klik tombol & isi form secara otomatis
+  • Ekstrak data terstruktur dari halaman web
+
+🖥️ <b>Monitoring &amp; Debugging</b>
   • <b>SysInfo Agent</b> — monitor CPU, RAM, disk, proses server
+  • <b>Log Viewer</b> — tampilkan log bot real-time untuk debugging
 
 ⚙️ <b>Admin Commands</b>
   • /deploy — pull kode terbaru & restart otomatis

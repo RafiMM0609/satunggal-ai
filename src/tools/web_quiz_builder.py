@@ -372,7 +372,8 @@ class WebQuizBuilderTool(BaseTool):
         quiz_json = json.dumps(quiz_payload, ensure_ascii=False, indent=2)
 
         # Inject data into template
-        html_content = _HTML_TEMPLATE.replace("{quiz_data_json}", quiz_json)
+        # Use .format() so that {{ }} escapes in the template resolve to literal { }
+        html_content = _HTML_TEMPLATE.format(quiz_data_json=quiz_json)
 
         # Write to temp file
         html_path = _make_html_path(task.session_id)
