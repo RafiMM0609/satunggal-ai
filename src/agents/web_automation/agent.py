@@ -141,6 +141,10 @@ Aturan:
 _SUMMARISER_SYSTEM = """\
 Kamu adalah asisten yang merangkum hasil browsing web untuk pengguna.
 Berdasarkan log aksi dan konten halaman yang diberikan, buat ringkasan yang:
+  - SELALU awali jawaban dengan baris "📍 URL Aktif: <url>" menggunakan nilai
+    "URL aktif saat ini" dari konteks. Baris ini WAJIB ada di bagian paling atas
+    jawaban agar pengguna tahu halaman mana yang sedang aktif dan perintah
+    lanjutan dapat menggunakan konteks URL tersebut secara otomatis.
   - Jelas dan mudah dipahami.
   - Menyebutkan URL yang dikunjungi dan judul halamannya.
   - Menjelaskan elemen-elemen penting yang ditemukan (menu, tombol, form, dll.).
@@ -242,7 +246,8 @@ class WebAutomationAgent(BaseAgent):
                 task.metadata["screenshots"] = screenshots
 
             # Build final reply using the LLM summariser
-            reply = await self._summarise(task.user_input, action_log, task.tool_results)
+            final_url = _session_last_url.get(task.session_id, "")
+            reply = await self._summarise(task.user_input, action_log, task.tool_results, final_url)
             task.mark_done(reply)
 
         except Exception as exc:
@@ -411,6 +416,8 @@ class WebAutomationAgent(BaseAgent):
         elif action == "get_content":
             task.metadata["browser_action"] = "get_content"
             result = await navigator.run(task)
+            if result.get("url") and not result.get("error"):
+                _session_last_url[task.session_id] = result["url"]
             log = (
                 f"[{step_num}] get_content → "
                 f"title={result.get('title', '?')!r} "
@@ -444,6 +451,7 @@ class WebAutomationAgent(BaseAgent):
         user_input: str,
         action_log: list[str],
         tool_results: dict[str, Any],
+        current_url: str = "",
     ) -> str:
         """Ask the LLM to produce a user-friendly summary of what happened."""
         log_text = "\n".join(action_log)
@@ -473,6 +481,8 @@ class WebAutomationAgent(BaseAgent):
                 )
 
         context = f"Log aksi:\n{log_text}"
+        if current_url:
+            context = f"URL aktif saat ini: {current_url}\n\n" + context
         if page_snippets:
             context += "\n\nKonten halaman:\n" + "\n\n".join(page_snippets)
         if extracted_data:
@@ -486,7 +496,8 @@ class WebAutomationAgent(BaseAgent):
             return await self._llm.chat(messages, max_tokens=_MAX_TOKENS)
         except Exception as exc:
             logger.warning("WebAutomationAgent: summariser failed: %s", exc)
-            return f"Web automation selesai.\n\nLog:\n{log_text}"
+            prefix = f"📍 URL Aktif: {current_url}\n\n" if current_url else ""
+            return f"{prefix}Web automation selesai.\n\nLog:\n{log_text}"
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
