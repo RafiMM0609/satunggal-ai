@@ -185,7 +185,15 @@ async def process_message(
     tracker.advance("gatekeeper")
     await _notify(status_callback, tracker.render())
 
-    intent_result = await gatekeeper.classify_intent(user_text, session_id=session_id)
+    # Pass recent conversation history (excluding the just-added current message)
+    # so the gatekeeper can correctly classify follow-up commands (e.g.
+    # "berikan screenshot" after a previous web_automation turn).
+    # Pass None (not an empty list) when there are no prior messages so the
+    # gatekeeper skips injecting an empty history section into its prompt.
+    recent_history = history.get_as_llm_messages(session_id)[:-1][-4:] or None
+    intent_result = await gatekeeper.classify_intent(
+        user_text, session_id=session_id, history=recent_history
+    )
     task.mark_routed(intent_result.intent.value)
     logger.info(
         "Intent: session=%s intent=%s confidence=%.2f tools=%s needs_clarification=%s",

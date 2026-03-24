@@ -26,13 +26,24 @@ class GatekeeperAgent:
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
-    async def classify_intent(self, text: str, session_id: str = "") -> IntentResult:
+    async def classify_intent(
+        self,
+        text: str,
+        session_id: str = "",
+        history: "list[dict] | None" = None,
+    ) -> IntentResult:
         """
         Classify a single text string.
 
         Args:
             text:       Raw user text.
             session_id: Optional identifier for logging.
+            history:    Optional list of recent conversation messages in
+                        OpenAI chat-completion format (role/content dicts).
+                        When provided, these are injected into the LLM
+                        system prompt so follow-up commands (e.g.
+                        "berikan screenshot" after a web_automation turn)
+                        are classified correctly.
 
         Returns:
             IntentResult with intent category and confidence score.
@@ -43,7 +54,7 @@ class GatekeeperAgent:
         normalised = text.strip()
         logger.info("Gatekeeper classifying session=%s text=%.80s…", session_id, normalised)
 
-        llm_response = await self._llm_client.classify_intent(normalised)
+        llm_response = await self._llm_client.classify_intent(normalised, history=history)
 
         # ── Self-Correction: fallback clarification question ──────────────
         clarification_question = llm_response.clarification_question
