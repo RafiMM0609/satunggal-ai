@@ -135,6 +135,16 @@ Rules:
       Input has "[Pesan user: ringkas dokumen ini]" → {"intent": "pdf_summarization", "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
       Input has "[Pesan user: (tidak ada pesan dari pengguna)]" → {"intent": "unknown", "confidence": 0.20, "tools": [], "needs_clarification": true, "clarification_question": "Mau diapakan dokumen ini? Misalnya: buat kuis interaktif, ringkasan, atau ada keperluan lain?"}
 
+18. When "Riwayat percakapan terakhir" is present in the context, use it to detect follow-up commands:
+    - If the most recent [Asisten] response clearly involved web browsing, clicking, form filling, login,
+      screenshot, or navigation (i.e., the previous intent was web_automation), AND the current user message
+      is a short follow-up that does NOT mention a completely different topic (e.g. "berikan screenshot",
+      "klik tombol X", "scroll ke bawah", "ambil foto halaman", "tangkap layar", "lanjutkan",
+      "isi form", "klik menu", "screenshot dong", "screenshoot", "foto halaman"), classify the current
+      message as "web_automation" with high confidence.
+    - Similarly, if the most recent [Asisten] response was a research/code task and the current message
+      is clearly a follow-up to that task, keep the same intent classification.
+
 Example responses:
   {"intent": "data_analysis",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "mandays_planning",   "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
@@ -174,14 +184,38 @@ class OpenRouterClient:
             headers=settings.openrouter_headers,
         )
 
-    async def classify_intent(self, user_text: str) -> LLMIntentResponse:
+    async def classify_intent(
+        self,
+        user_text: str,
+        history: "list[dict] | None" = None,
+    ) -> LLMIntentResponse:
         auth = effective_openrouter_auth_header(self._settings.openrouter_api_key)
+
+        # Inject recent conversation history into system prompt so the LLM can
+        # correctly classify follow-up commands (e.g. "berikan screenshot" after
+        # a previous web_automation turn).
+        if history:
+            lines = []
+            for msg in history:
+                role = "Pengguna" if msg.get("role") == "user" else "Asisten"
+                # Truncate to 300 chars to keep the prompt within max_tokens budget
+                # while still providing enough context for intent disambiguation.
+                content = msg.get("content", "")[:300]
+                lines.append(f"[{role}]: {content}")
+            system_content = (
+                _SYSTEM_PROMPT
+                + "\n\nRiwayat percakapan terakhir:\n"
+                + "\n".join(lines)
+            )
+        else:
+            system_content = _SYSTEM_PROMPT
+
         payload = {
             "model": self._settings.openrouter_model,
             "max_tokens": 128,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user",   "content": user_text},
             ],
         }
