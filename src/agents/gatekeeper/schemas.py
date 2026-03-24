@@ -30,6 +30,7 @@ class IntentCategory(str, Enum):
     QUIZ_GENERATION    = "quiz_generation"    # konversi PDF menjadi kuis interaktif HTML
     PDF_SUMMARIZATION  = "pdf_summarization"  # ringkas / QnA / pahami isi dokumen PDF
     WEB_AUTOMATION     = "web_automation"     # autonomous browsing: buka URL, klik, isi form, screenshot
+    DOC_AUDIT          = "doc_audit"          # analisis / QnA isi dokumen .docx yang sudah dikirim
     UNKNOWN            = "unknown"
 
 

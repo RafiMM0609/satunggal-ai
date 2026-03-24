@@ -19,6 +19,7 @@ from config.settings import get_settings
 from src.handlers import (
     deploy,
     echo_text,
+    handle_docx_document,
     handle_pdf_document,
     handle_photo,
     help_command,
@@ -62,6 +63,11 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
 🧩 <b>PDF-to-Quiz Generator</b>
   • Kirim PDF untuk diubah menjadi Website Kuis Interaktif HTML
   • Progress real-time, feedback instan, dark mode & scoreboard
+
+📑 <b>Doc Auditor (Quality Auditor)</b>
+  • Kirim file <b>.docx</b> untuk analisis mendalam
+  • Ekstrak Daftar Isi otomatis & ringkasan per bab
+  • Tanya-jawab interaktif tentang isi dokumen tanpa kirim ulang
 
 🌐 <b>Web Automation</b>
   • Buka URL & ringkas konten halaman web
@@ -134,6 +140,10 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(
         filters.Document.PDF | filters.Document.FileExtension("pdf"),
         handle_pdf_document,
+    ))
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("docx"),
+        handle_docx_document,
     ))
 
     # ── Fallback ───────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import base64
 import io
 import logging
 import os
+import re
 import tempfile
 
 import telegramify_markdown
@@ -13,12 +14,14 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from src.orchestrator.main_loop import process_message, process_pdf
+from src.orchestrator.main_loop import process_message, process_pdf, process_docx
 
 logger = logging.getLogger(__name__)
 
 
 _MAX_MSG_LEN = 4096
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 20 MB upload limit for all file types
+_SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
 
 def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
@@ -231,8 +234,7 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     # ── Size guard (max 20 MB to protect VPS RAM) ──────────────────────────
-    max_bytes = 20 * 1024 * 1024
-    if doc.file_size and doc.file_size > max_bytes:
+    if doc.file_size and doc.file_size > _MAX_UPLOAD_BYTES:
         await message.reply_text(
             "⚠️ File PDF terlalu besar (maks. 20 MB). Coba kompres dulu.",
             quote=True,
@@ -265,8 +267,7 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
     os.makedirs(tmp_dir, exist_ok=True)
     # Sanitize filename: keep only alphanumeric, dots, hyphens, underscores
     # and reject any path traversal sequences
-    safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in original_filename)
-    # Strip leading dots/slashes to prevent path traversal
+    safe_name = _SAFE_FILENAME_RE.sub("_", original_filename)
     safe_name = safe_name.lstrip("._/\\") or "upload.pdf"
     if ".." in safe_name:
         safe_name = "upload.pdf"
@@ -384,6 +385,133 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode="HTML",
         quote=True,
     )
+
+
+async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle .docx document uploads – menganalisis dokumen dan membangun indeks bab.
+
+    Flow:
+      1. Download file .docx ke temp file
+      2. Tampilkan progress message
+      3. Jalankan process_docx() (DocxParserTool → DocAuditorAgent)
+      4. Kirim laporan: judul + daftar isi + ringkasan per bab
+    """
+    message = update.message
+    user    = update.effective_user
+    doc     = message.document
+
+    original_filename = doc.file_name or "document.docx"
+    user_caption      = message.caption or ""
+
+    # Validasi ekstensi
+    if not original_filename.lower().endswith(".docx"):
+        await message.reply_text(
+            "⚠️ Hanya file Word (.docx) yang didukung oleh fitur ini.", quote=True
+        )
+        return
+
+    logger.info(
+        "DOCX from user=%s filename=%r size=%d bytes caption=%r",
+        user.id, original_filename, doc.file_size or 0, user_caption,
+    )
+
+    # ── Size guard (max 20 MB) ─────────────────────────────────────────────
+    if doc.file_size and doc.file_size > _MAX_UPLOAD_BYTES:
+        await message.reply_text(
+            "⚠️ File terlalu besar (maks. 20 MB). Coba kompres atau perpendek dokumennya.",
+            quote=True,
+        )
+        return
+
+    # ── Progress message ───────────────────────────────────────────────────
+    progress_msg = await message.reply_text(
+        telegramify_markdown.markdownify(
+            "⏳ *Memproses dokumen Word...*\n`[░░░░░░░░░░]` *0%*\n\nMengunduh file..."
+        ),
+        parse_mode="MarkdownV2",
+        quote=True,
+    )
+
+    async def _progress_callback(rendered_text: str) -> None:
+        try:
+            formatted = telegramify_markdown.markdownify(rendered_text)
+            await context.bot.edit_message_text(
+                chat_id=progress_msg.chat_id,
+                message_id=progress_msg.message_id,
+                text=formatted,
+                parse_mode="MarkdownV2",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("DOCX progress edit skipped: %s", exc)
+
+    # ── Download DOCX ──────────────────────────────────────────────────────
+    tmp_dir = os.path.join(tempfile.gettempdir(), "advance_ai_docx_uploads")
+    os.makedirs(tmp_dir, exist_ok=True)
+    safe_name = _SAFE_FILENAME_RE.sub("_", original_filename)
+    safe_name = safe_name.lstrip("._/\\") or "upload.docx"
+    if ".." in safe_name:
+        safe_name = "upload.docx"
+    docx_path = os.path.join(tmp_dir, f"{user.id}_{safe_name}")
+    docx_path = os.path.realpath(docx_path)
+    if not docx_path.startswith(os.path.realpath(tmp_dir)):
+        logger.warning(
+            "Path traversal attempt detected for user=%s filename=%r", user.id, original_filename
+        )
+        docx_path = os.path.join(os.path.realpath(tmp_dir), f"{user.id}_upload.docx")
+
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(docx_path)
+        logger.info("DOCX downloaded to %s for user=%s", docx_path, user.id)
+    except Exception as exc:
+        logger.exception("Failed to download DOCX for user=%s: %s", user.id, exc)
+        try:
+            await context.bot.delete_message(
+                chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        await message.reply_text("❌ Gagal mengunduh dokumen. Coba kirim ulang.", quote=True)
+        return
+
+    # ── Jalankan pipeline ──────────────────────────────────────────────────
+    try:
+        task = await process_docx(
+            session_id=str(user.id),
+            docx_path=docx_path,
+            original_filename=original_filename,
+            user_caption=user_caption,
+            status_callback=_progress_callback,
+        )
+    except Exception as exc:
+        logger.exception("process_docx raised for user=%s: %s", user.id, exc)
+        task = None
+    finally:
+        # Hapus file temp setelah diproses
+        try:
+            os.remove(docx_path)
+        except OSError:
+            pass
+
+    # ── Hapus progress message ─────────────────────────────────────────────
+    try:
+        await context.bot.delete_message(
+            chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not delete DOCX progress message: %s", exc)
+
+    # ── Handle failure ─────────────────────────────────────────────────────
+    if task is None or task.status.value == "failed":
+        error_msg = (task.result if task else None) or "❌ Gagal memproses dokumen. Coba lagi."
+        await _safe_reply(message, error_msg)
+        return
+
+    # ── Kirim laporan ──────────────────────────────────────────────────────
+    reply = task.result or "✅ Analisis dokumen selesai."
+    await _safe_reply(message, reply)
 
 
 async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

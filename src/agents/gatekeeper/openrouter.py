@@ -42,6 +42,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - web_automation     (user wants the bot to autonomously browse a website, click buttons, fill forms, take screenshots, read page content, or interact with a web page)
 - quiz_generation    (user wants to convert a PDF into an interactive HTML quiz or a set of MCQ questions from educational/study material)
 - pdf_summarization  (user wants to summarize, ask questions about, or understand the content of a PDF document)
+- doc_audit          (user wants to ask questions about, explore, or get details about a .docx document that was previously uploaded and analyzed in this session)
 - unknown
 
 Pre-agent tools the orchestrator can execute before the specialist agent:
@@ -144,6 +145,17 @@ Rules:
       message as "web_automation" with high confidence.
     - Similarly, if the most recent [Asisten] response was a research/code task and the current message
       is clearly a follow-up to that task, keep the same intent classification.
+    - If the most recent [Asisten] response contains a document analysis report (indicated by phrases such as
+      "Laporan Analisis Dokumen", "Daftar Isi", "Ringkasan per Bab", or "Tip: Balas pesan ini untuk bertanya"),
+      AND the current user message is a question or request about the document content (e.g. "jelaskan bab 3",
+      "apa maksud X di bab 4", "detail tentang bagian ini", "cek konsistensi"), classify as "doc_audit".
+
+19. Use "doc_audit" when the user asks follow-up questions about a .docx document that was previously analyzed:
+    - Indonesian: jelaskan bab ini, detail tentang bagian X, apa yang dibahas di bab Y, cek konsistensi,
+      bandingkan bab, apa maksud X, detail bab, ringkasan ulang bab, pertanyaan tentang dokumen
+    - English: explain chapter X, what does section Y say, detail about part Z, check consistency,
+      compare chapters, what is discussed in chapter N, questions about the document
+    - This intent is only valid when there is a previously analyzed document in the session.
 
 Example responses:
   {"intent": "data_analysis",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
@@ -160,6 +172,7 @@ Example responses:
   {"intent": "unknown",            "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?"}
   {"intent": "quiz_generation",    "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "pdf_summarization",  "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "doc_audit",          "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
 """
 
 
