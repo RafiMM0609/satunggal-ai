@@ -36,5 +36,8 @@ markdown>=3.7             # Markdown parser (dibutuhkan WeasyPrint pipeline)
 # ── PDF Processing (Quiz Generator) ───────────────────────────────────────────
 PyMuPDF>=1.24.0           # Ekstraksi teks dari PDF (fitz)
 
+# ── DOCX Processing (Doc Auditor Agent) ───────────────────────────────────────
+python-docx>=1.1.0        # Baca & bedah file .docx (Heading → sections)
+
 # ── Web Automation (Autonomous Browsing Agent) ─────────────────────────────────
 playwright>=1.51.0         # Headless browser automation (Chromium/Firefox/WebKit)

@@ -45,6 +45,7 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.LOG_VIEWER:        "log_viewer_agent",     #← tampilkan log bot untuk debugging
     IntentCategory.QUIZ_GENERATION:   "quiz_agent",           #← konversi PDF → kuis HTML interaktif
     IntentCategory.WEB_AUTOMATION:    "web_automation",       #← autonomous browsing & web interaction
+    IntentCategory.DOC_AUDIT:         "doc_auditor",          #← analisis & QnA dokumen .docx
 }
 
 

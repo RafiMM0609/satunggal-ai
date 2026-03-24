@@ -72,6 +72,7 @@ def _get_pipeline():
     from src.agents.developer.agent import DeveloperAgent
     from src.agents.developer_inspector.agent import DeveloperInspectorAgent
     from src.agents.developer_qna.agent import DeveloperQnAAgent
+    from src.agents.doc_auditor.agent import DocAuditorAgent
     from src.agents.gatekeeper.agent import GatekeeperAgent
     from src.agents.llm_client import LLMClient
     from src.agents.log_viewer_agent.agent import LogViewerAgent
@@ -87,6 +88,7 @@ def _get_pipeline():
     from src.orchestrator.router import AgentRouter
     from src.tools.browser_navigator import BrowserNavigatorTool
     from src.tools.diagram_renderer import DiagramRendererTool
+    from src.tools.docx_parser import DocxParserTool
     from src.tools.document_generator import DocumentGeneratorTool
     from src.tools.mandays_generator import MandaysGeneratorTool
     from src.tools.pdf_parser import PDFParserTool
@@ -107,6 +109,7 @@ def _get_pipeline():
         "diagram_renderer":   DiagramRendererTool(),
         "document_generator": DocumentGeneratorTool(),
         "pdf_parser":         PDFParserTool(),
+        "docx_parser":        DocxParserTool(),
         "web_quiz_builder":   WebQuizBuilderTool(),
         "web_reader":         WebReaderTool(),
         "browser_navigator":  BrowserNavigatorTool(),
@@ -136,6 +139,7 @@ def _get_pipeline():
         "log_viewer_agent":    LogViewerAgent(_history, _llm),
         "quiz_agent":          QuizAgent(_llm),
         "web_automation":      WebAutomationAgent(_llm, history=_history),
+        "doc_auditor":         DocAuditorAgent(_history, _llm),
     }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
@@ -314,9 +318,15 @@ async def process_message(
 
 
 async def clear_session(session_id: str) -> None:
-    """Wipe conversation history for a session (e.g. on /reset command)."""
+    """Wipe conversation history and document index for a session (e.g. on /reset command)."""
     if _history is not None:
         _history.clear(session_id)
+    # Also clear any indexed documents for this session
+    try:
+        from src.memory.doc_index import get_doc_index
+        get_doc_index().clear_session(session_id)
+    except (ImportError, AttributeError, Exception) as exc:
+        logger.warning("Failed to clear doc index for session=%s: %s", session_id, exc)
     logger.info("Session cleared: %s", session_id)
 
 
@@ -618,4 +628,109 @@ def _quiz_status_msg(filename: str, phase: str) -> str:
         f"  • 🏗️ Membangun Website: {build_icon} {'Selesai' if build_icon == '✅' else ('Memproses...' if build_icon == '🔄' else 'Menunggu')}\n"
         f"  • 📦 Finalisasi File: {final_icon} {'Selesai' if final_icon == '✅' else 'Menunggu'}"
     )
+
+
+async def process_docx(
+    session_id: str,
+    docx_path: str,
+    original_filename: str = "document.docx",
+    user_caption: str = "",
+    status_callback: "StatusCallback" = None,
+) -> "AgentTask":
+    """
+    Pipeline untuk file .docx – memparse, meringkas, mengindeks, dan melaporkan.
+
+    Alur:
+        1. Jalankan DocxParserTool → dapatkan seksi-seksi dokumen
+        2. Serahkan ke DocAuditorAgent (step-planned):
+           a. Ringkas setiap bab (LLM)
+           b. Simpan ke SQLite (DocIndex)
+           c. Kirim laporan (judul + daftar isi + ringkasan)
+
+    Args:
+        session_id:        Identifier sesi (Telegram user_id).
+        docx_path:         Path absolut ke file .docx yang sudah diunduh.
+        original_filename: Nama file asli.
+        user_caption:      Pesan yang dikirim bersama file (boleh kosong).
+        status_callback:   Callable async untuk update progres.
+
+    Returns:
+        AgentTask dengan task.result berisi laporan teks.
+    """
+    from src.memory.state import AgentTask
+
+    history, agents, _, _, tools = _get_pipeline()
+
+    user_input = user_caption.strip() or f"[DOCX: {original_filename}]"
+    task = AgentTask(session_id=session_id, user_input=user_input)
+    task.metadata["docx_path"]        = docx_path
+    task.metadata["original_filename"] = original_filename
+    task.metadata["status_callback"]  = status_callback
+
+    # Catat turn user ke histori
+    history.add(
+        session_id, "user",
+        user_caption.strip() or f"[Dokumen dikirim: {original_filename}]",
+    )
+
+    # ── Langkah 1: Parse DOCX ─────────────────────────────────────────────
+    await _notify(
+        status_callback,
+        f"⏳ *Membaca dokumen...*\n📄 _{original_filename}_\n\n🔄 Memindai struktur dokumen...",
+    )
+
+    docx_tool = tools.get("docx_parser")
+    if docx_tool is None:
+        task.mark_failed("docx_parser tool tidak terdaftar.")
+        task.result = "❌ Sistem tidak dapat memproses file DOCX saat ini."
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    parse_result = await docx_tool.run(task)
+    if "error" in parse_result:
+        task.mark_failed(parse_result["error"])
+        task.result = f"❌ Gagal membaca file .docx: {parse_result['error']}"
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    sections: list[dict] = parse_result.get("sections", [])
+    doc_title: str       = parse_result.get("doc_title", original_filename)
+    total_words: int     = parse_result.get("total_words", 0)
+    total_sections: int  = parse_result.get("total_sections", len(sections))
+
+    logger.info(
+        "process_docx: parsed session=%s file=%r sections=%d words=%d",
+        session_id, original_filename, total_sections, total_words,
+    )
+
+    # Masukkan hasil parse ke metadata task untuk DocAuditorAgent
+    task.metadata["docx_sections"]   = sections
+    task.metadata["doc_title"]        = doc_title
+    task.metadata["docx_file_id"]     = original_filename
+    task.metadata["total_words"]      = total_words
+    task.mark_routed("doc_audit")
+
+    # ── Langkah 2: DocAuditorAgent (step-planned) ─────────────────────────
+    doc_auditor = agents.get("doc_auditor")
+    if doc_auditor is None:
+        task.mark_failed("doc_auditor agent tidak terdaftar.")
+        task.result = "❌ Doc Auditor agent tidak tersedia."
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    task.mark_processing("doc_auditor")
+    task = await doc_auditor.run(task)
+
+    # Bersihkan seksi dari metadata setelah diproses (hemat RAM)
+    task.metadata.pop("docx_sections", None)
+
+    if not task.result:
+        task.result = "✅ Analisis dokumen selesai."
+
+    history.add(session_id, "assistant", task.result)
+    logger.info(
+        "process_docx done | session=%s status=%s",
+        session_id, task.status,
+    )
+    return task
 
