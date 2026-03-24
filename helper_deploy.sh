@@ -73,10 +73,37 @@ info "Commit sebelum  : $COMMIT_BEFORE"
 if $DRY_RUN; then
     warning "[DRY-RUN] git pull dilewati."
 else
-    PULL_OUTPUT=$(git pull 2>&1) || {
-        error "git pull gagal:"
-        echo "$PULL_OUTPUT" | tee -a "$DEPLOY_LOG"
-        exit 1
+    PULL_OUTPUT=$(LC_ALL=C git pull 2>&1) || {
+        # Tangani kasus: file lokal yang tidak terlacak akan ditimpa oleh merge
+        if echo "$PULL_OUTPUT" | grep -q "would be overwritten by merge"; then
+            warning "File lokal tidak terlacak terdeteksi yang akan ditimpa. Menghapus dan mencoba lagi ..."
+            while IFS= read -r conflict_file; do
+                # Hapus leading whitespace (tab/spasi)
+                conflict_file="${conflict_file#$'\t'}"
+                conflict_file="${conflict_file## }"
+                # Validasi: pastikan path tidak mengandung traversal dan tidak kosong
+                if [[ -n "$conflict_file" ]] && [[ "$conflict_file" != *".."* ]] && [[ "$conflict_file" != /* ]]; then
+                    warning "  Menghapus file konflik: $conflict_file"
+                    rm -f "$SCRIPT_DIR/$conflict_file"
+                    log "[WARN]  Menghapus file konflik: $conflict_file"
+                fi
+            done < <(echo "$PULL_OUTPUT" \
+                | sed -n '/The following untracked working tree files would be overwritten/,/Please move or remove/p' \
+                | grep -v "^error:" \
+                | grep -v "The following untracked" \
+                | grep -v "Please move or remove")
+
+            # Coba git pull lagi setelah pembersihan
+            PULL_OUTPUT=$(LC_ALL=C git pull 2>&1) || {
+                error "git pull gagal setelah pembersihan file konflik:"
+                echo "$PULL_OUTPUT" | tee -a "$DEPLOY_LOG"
+                exit 1
+            }
+        else
+            error "git pull gagal:"
+            echo "$PULL_OUTPUT" | tee -a "$DEPLOY_LOG"
+            exit 1
+        fi
     }
     echo "$PULL_OUTPUT" | tee -a "$DEPLOY_LOG"
 
