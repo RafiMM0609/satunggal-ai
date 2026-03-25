@@ -103,7 +103,8 @@ class BrowserNavigatorTool(BaseTool):
         task.metadata["browser_action"]  = "navigate" | "click" | "type" |
                                            "scroll" | "screenshot" |
                                            "get_content" | "get_links" |
-                                           "extract_data" | "save_session"
+                                           "extract_data" | "save_session" |
+                                           "select_option"
         task.metadata["target_url"]      = "https://..."          # for navigate
         task.metadata["click_text"]      = "Login"                # for click
         task.metadata["type_selector"]   = "#email"               # for type (CSS selector)
@@ -114,6 +115,8 @@ class BrowserNavigatorTool(BaseTool):
         task.metadata["extract_selector"]= "article h2 a"        # for extract_data (optional)
         task.metadata["extract_attribute"]= "text" | "href"       # for extract_data (optional)
         task.metadata["extract_limit"]   = 50                     # for extract_data (optional)
+        task.metadata["option_text"]     = "Kopi & Teh"          # for select_option
+        task.metadata["option_selector"] = "input[name='cat']"   # for select_option (optional CSS selector)
 
     Result keys
     -----------
@@ -167,6 +170,8 @@ class BrowserNavigatorTool(BaseTool):
                 return await self._action_extract_data(task)
             elif action == "save_session":
                 return await self._action_save_session(task)
+            elif action == "select_option":
+                return await self._action_select_option(task)
             else:
                 return {
                     "error": f"Unknown browser_action: '{action}'",
@@ -349,6 +354,10 @@ class BrowserNavigatorTool(BaseTool):
             lambda: self._page.get_by_role("option",   name=click_text, exact=False),
             lambda: self._page.get_by_role("tab",      name=click_text, exact=False),
             lambda: self._page.get_by_role("treeitem", name=click_text, exact=False),
+            lambda: self._page.get_by_role("listitem", name=click_text, exact=False),
+            lambda: self._page.get_by_role("radio",    name=click_text, exact=False),
+            lambda: self._page.get_by_role("checkbox", name=click_text, exact=False),
+            lambda: self._page.get_by_label(click_text, exact=False),
             lambda: self._page.get_by_text(click_text, exact=False),
         ]
 
@@ -370,6 +379,15 @@ class BrowserNavigatorTool(BaseTool):
             located = await self._click_by_js_text(click_text)
             if located:
                 logger.debug("click: located '%s' via JS text walk", click_text)
+
+        # ── Force-click fallback: use Playwright force option on first text match ──
+        # Handles elements obscured by an overlay (e.g. a modal backdrop) or
+        # elements that are in a scrollable container and didn't pass visibility
+        # checks in previous strategies.
+        if not located:
+            located = await self._click_by_force(click_text)
+            if located:
+                logger.debug("click: located '%s' via force click", click_text)
 
         if not located:
             # Take a screenshot to aid debugging before returning failure
@@ -864,6 +882,11 @@ class BrowserNavigatorTool(BaseTool):
         specific (deepest) matching element to avoid accidentally clicking a
         container that holds multiple items.
 
+        Elements inside scrollable modal containers may be below the visible
+        fold but still present in the DOM; this method scrolls them into view
+        before dispatching the click so that partially-clipped elements are
+        handled correctly.
+
         Returns ``True`` if an element was found and clicked, ``False`` otherwise.
         """
         if self._page is None:
@@ -883,8 +906,12 @@ class BrowserNavigatorTool(BaseTool):
                         const style = window.getComputedStyle(el);
                         if (style.display === 'none' || style.visibility === 'hidden') return false;
                         if (parseFloat(style.opacity) <= 0) return false;
+                        // Allow elements clipped by a scrollable modal container:
+                        // only exclude elements that have truly zero layout dimensions
+                        // (e.g. aria-hidden or CSS-collapsed elements), not those that
+                        // are merely scrolled out of the visible viewport area.
                         const rect = el.getBoundingClientRect();
-                        if (rect.width === 0 || rect.height === 0) return false;
+                        if (rect.width === 0 && rect.height === 0) return false;
                         const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
                         // Skip container elements whose combined text is much longer than
                         // the search term (they hold many children, not just the target item).
@@ -897,6 +924,9 @@ class BrowserNavigatorTool(BaseTool):
                     // matching element – prefer it to avoid clicking a parent container
                     // that merely contains the target text among other children.
                     const target = candidates[candidates.length - 1];
+                    // Scroll the element into view within any parent scroll containers
+                    // (handles elements below the fold inside modals/drawers).
+                    target.scrollIntoView({block: 'nearest', inline: 'nearest'});
                     target.click();
                     return true;
                 }""",
@@ -906,6 +936,150 @@ class BrowserNavigatorTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             logger.debug("_click_by_js_text: failed for '%s': %s", text, exc)
             return False
+
+    async def _click_by_force(self, text: str) -> bool:
+        """Force-click the first Playwright locator matching *text* regardless of
+        overlay or out-of-viewport state.
+
+        This is a last-resort fallback for elements that are present and visible
+        in the DOM (e.g. a category button inside a scrollable modal) but fail
+        Playwright's normal interactability checks due to being partially clipped
+        or overlapped by a semi-transparent backdrop.
+
+        Uses Playwright's ``force=True`` option which bypasses actionability
+        checks and dispatches the pointer event directly to the element.
+
+        Returns ``True`` if the locator was found and clicked, ``False`` otherwise.
+        """
+        if self._page is None:
+            return False
+        try:
+            loc = self._page.get_by_text(text, exact=False)
+            count = await loc.count()
+            if count == 0:
+                return False
+            await loc.first.scroll_into_view_if_needed(timeout=_CLICK_LOCATE_TIMEOUT_MS)
+            await loc.first.click(force=True, timeout=_CLICK_LOCATE_TIMEOUT_MS)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("_click_by_force: failed for '%s': %s", text, exc)
+            return False
+
+    async def _action_select_option(self, task: "AgentTask") -> dict[str, Any]:
+        """Select a custom UI option (category button, radio-group item, etc.).
+
+        Unlike the standard ``click`` action, this action is specialised for
+        custom form widgets where the option is rendered as a clickable ``<div>``,
+        ``<button>``, or ``<label>`` element rather than a native ``<select>``
+        option.  It employs a tiered strategy that handles:
+
+        1. Native ``<select>`` dropdowns – sets the value directly via JS and
+           fires the ``change`` event so React/Vue controlled components update.
+        2. Playwright ARIA locators – tries ``option``, ``radio``, ``checkbox``,
+           ``button``, and ``listitem`` roles for accessible custom widgets.
+        3. Text-based label lookup – clicks a ``<label>`` element whose text
+           matches the option, which triggers the associated ``<input>``.
+        4. JS DOM walk – scrolls the matching element into view inside any parent
+           scrollable container (modal/drawer) and dispatches a native click.
+        5. Force click – bypasses overlay/interactability checks as a last resort.
+
+        Metadata keys:
+            ``option_text``     – visible label text to select (required).
+            ``option_selector`` – optional CSS selector for the ``<select>``
+                                  element when a native dropdown is known.
+        """
+        option_text: str = task.metadata.get("option_text", "").strip()
+        selector:    str = task.metadata.get("option_selector", "").strip()
+
+        if not option_text:
+            return {
+                "error":   "option_text not provided",
+                "success": False,
+                "action":  "select_option",
+            }
+
+        await self._ensure_browser()
+        assert self._page is not None  # noqa: S101
+
+        await self._wait_for_spa_stable()
+
+        selected = False
+
+        # ── 1. Native <select> via CSS selector ──────────────────────────────
+        if selector and not selected:
+            try:
+                await self._page.select_option(selector, label=option_text, timeout=_TIMEOUT_MS)
+                selected = True
+                logger.debug("select_option: selected %r via native select %r", option_text, selector)
+            except Exception:  # noqa: BLE001
+                # Try setting by value as a fallback
+                try:
+                    await self._page.select_option(selector, value=option_text, timeout=_TIMEOUT_MS)
+                    selected = True
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # ── 2. ARIA roles for custom option widgets ───────────────────────────
+        if not selected:
+            for role in ("option", "radio", "checkbox", "button", "listitem", "menuitem"):
+                try:
+                    loc = self._page.get_by_role(role, name=option_text, exact=False)  # type: ignore[arg-type]
+                    await loc.first.wait_for(state="visible", timeout=_CLICK_LOCATE_TIMEOUT_MS)
+                    await loc.first.click(timeout=_CLICK_LOCATE_TIMEOUT_MS)
+                    selected = True
+                    logger.debug("select_option: selected %r via role=%r", option_text, role)
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+
+        # ── 3. Label-based lookup (label → associated input) ─────────────────
+        if not selected:
+            try:
+                loc = self._page.get_by_label(option_text, exact=False)
+                await loc.first.wait_for(state="visible", timeout=_CLICK_LOCATE_TIMEOUT_MS)
+                await loc.first.click(timeout=_CLICK_LOCATE_TIMEOUT_MS)
+                selected = True
+                logger.debug("select_option: selected %r via label", option_text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ── 4. JS DOM walk with scroll-into-view ─────────────────────────────
+        if not selected:
+            selected = await self._click_by_js_text(option_text)
+            if selected:
+                logger.debug("select_option: selected %r via JS text walk", option_text)
+
+        # ── 5. Force click as last resort ────────────────────────────────────
+        if not selected:
+            selected = await self._click_by_force(option_text)
+            if selected:
+                logger.debug("select_option: selected %r via force click", option_text)
+
+        if not selected:
+            try:
+                png_bytes = await self._page.screenshot(type="png", full_page=False)
+                debug_b64 = base64.b64encode(png_bytes).decode()
+            except Exception:  # noqa: BLE001
+                debug_b64 = ""
+            result: dict[str, Any] = {
+                "error":   f"Option '{option_text}' not found in the page",
+                "success": False,
+                "action":  "select_option",
+            }
+            if debug_b64:
+                result["screenshot_b64"] = debug_b64
+            return result
+
+        # Wait for React/SPA to process the selection before the next step
+        await self._wait_for_spa_stable()
+        await _random_delay(min_ms=200, max_ms=700)
+
+        return {
+            "action":      "select_option",
+            "success":     True,
+            "option_text": option_text,
+            "message":     f"Selected option: \"{option_text}\"",
+        }
 
     async def _detect_error_page(self) -> str:
         """Check whether the current page is displaying an error state.
