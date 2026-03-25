@@ -890,6 +890,195 @@ async def extract_main_flow(repo_path: Path) -> str:
     return "\n\n".join(sections)
 
 
+# ── Filename-target helpers ────────────────────────────────────────────────────
+
+# Source-code and config extensions that can appear as filename targets
+# (e.g. "main.py", "config.go", "api/routes.ts").
+_FILENAME_EXTS = {
+    ".py", ".go", ".js", ".ts", ".jsx", ".tsx", ".java", ".php", ".rb",
+    ".rs", ".kt", ".cs", ".c", ".cpp", ".h", ".hpp",
+    ".yaml", ".yml", ".json", ".toml", ".env", ".sh", ".md",
+    ".txt", ".cfg", ".ini", ".sql", ".html", ".css", ".scss",
+    ".proto", ".vue", ".svelte", ".mjs", ".cjs",
+}
+
+# Indonesian/English stopwords to skip when building keyword lists
+_STOPWORDS = {
+    # Indonesian
+    "cari", "implementasi", "pada", "file", "di", "dalam", "dan", "yang",
+    "ada", "apa", "berikan", "tampilkan", "tunjukkan", "list", "daftar",
+    "bagaimana", "cara", "kerja", "fungsi", "class", "modul", "module",
+    "repo", "repositori", "kode", "semua", "setiap", "untuk", "dari",
+    "ini", "itu", "bisa", "boleh", "tolong", "jelaskan", "lihat",
+    # English
+    "find", "search", "show", "list", "give", "get", "look", "check",
+    "implementation", "of", "in", "at", "the", "a", "an", "is", "are",
+    "on", "for", "from", "with", "how", "what", "where", "all",
+}
+
+
+def _is_filename_target(target: str) -> bool:
+    """Return True if *target* looks like a file path (has a recognised extension)."""
+    ext = Path(target).suffix.lower()
+    return ext in _FILENAME_EXTS
+
+
+def _extract_search_keywords(user_input: str, exclude_token: str = "") -> list[str]:
+    """
+    Extract meaningful search keywords from *user_input*, excluding the
+    filename token and common stopwords.
+
+    Returns a list of lowercase keyword strings ordered by length (longest
+    first so more specific multi-word patterns are tried first).
+
+    Examples:
+      "cari implementasi elastic apm pada file main.py"
+        → ["elastic apm", "elastic", "apm"]
+      "bagaimana konfigurasi jwt di middleware.py"
+        → ["jwt", "konfigurasi"]
+    """
+    # Remove URLs
+    text = re.sub(r"https?://\S+", "", user_input)
+    # Remove the filename token itself (e.g. "main.py")
+    if exclude_token:
+        text = re.sub(re.escape(exclude_token), " ", text, flags=re.IGNORECASE)
+    # Remove non-alphanumeric (keep spaces)
+    text = re.sub(r"[^\w\s]", " ", text)
+
+    words = [lw for w in text.split() if len(w) >= 2 and (lw := w.lower()) not in _STOPWORDS]
+
+    # Build candidates: individual words + consecutive bigrams
+    candidates: list[str] = []
+    for i, w in enumerate(words):
+        candidates.append(w)
+        if i + 1 < len(words):
+            candidates.append(f"{w} {words[i + 1]}")
+
+    # Deduplicate, sort longest first (prefer multi-word patterns)
+    seen: set[str] = set()
+    result: list[str] = []
+    for c in sorted(candidates, key=len, reverse=True):
+        if c not in seen:
+            seen.add(c)
+            result.append(c)
+
+    return result
+
+
+async def _search_keyword_in_file(
+    repo_path: Path,
+    filename_target: str,
+    user_input: str = "",
+) -> str:
+    """
+    Locate *filename_target* in *repo_path* and grep for keywords extracted
+    from *user_input* within that file, returning matching line ranges.
+
+    If no keywords are found in the query (or no matches in the file), fall
+    back to returning the full file content (truncated to MAX_BYTES_PER_FILE).
+
+    Supports partial path matching: "main.py" matches "api/main.py".
+    """
+    # ── 1. Locate the file ──────────────────────────────────────────────────
+    target_norm = filename_target.replace("\\", "/").lstrip("./")
+    target_name = Path(target_norm).name  # e.g. "main.py"
+
+    matches: list[Path] = []
+    for fpath in sorted(repo_path.rglob("*")):
+        if fpath.is_dir():
+            continue
+        if _should_skip(fpath.relative_to(repo_path).parts):
+            continue
+        rel = fpath.relative_to(repo_path).as_posix()
+        # Prefer exact suffix match (handles "api/main.py" vs just "main.py")
+        if rel.endswith(target_norm) or fpath.name == target_name:
+            matches.append(fpath)
+
+    if not matches:
+        return f"(file `{filename_target}` tidak ditemukan di repositori)"
+
+    # Sort: prefer path that ends with the full target (most specific first)
+    matches.sort(key=lambda p: (0 if p.relative_to(repo_path).as_posix().endswith(target_norm) else 1, str(p)))
+    fpath = matches[0]
+    rel_path = fpath.relative_to(repo_path).as_posix()
+
+    try:
+        file_text = fpath.read_text(errors="replace")
+        file_lines = file_text.splitlines()
+    except OSError as exc:
+        return f"(gagal membaca `{rel_path}`: {exc})"
+
+    # ── 2. Extract keywords from the user query ─────────────────────────────
+    keywords = _extract_search_keywords(user_input, exclude_token=filename_target)
+    logger.info(
+        "_search_keyword_in_file: file=%r keywords=%r", rel_path, keywords[:5]
+    )
+
+    # ── 3. Grep for each keyword, collect matching line ranges ─────────────
+    _CONTEXT_LINES = 5  # lines of context around each match
+    hit_line_indices: set[int] = set()
+
+    for kw in keywords:
+        kw_lower = kw.lower()
+        # Also try compact form: "elastic apm" → "elasticapm"
+        kw_compact = kw_lower.replace(" ", "")
+        for i, line in enumerate(file_lines):
+            line_lower = line.lower()
+            if kw_lower in line_lower or (kw_compact and kw_compact != kw_lower and kw_compact in line_lower):
+                hit_line_indices.add(i)
+
+        if hit_line_indices:
+            # Found matches for this keyword – stop searching less-specific ones
+            break
+
+    if hit_line_indices:
+        # Expand each hit with context and merge overlapping ranges
+        ranges: list[tuple[int, int]] = []
+        for idx in sorted(hit_line_indices):
+            start = max(0, idx - _CONTEXT_LINES)
+            end   = min(len(file_lines), idx + _CONTEXT_LINES + 1)
+            ranges.append((start, end))
+
+        # Merge overlapping/adjacent ranges
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(ranges):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+
+        snippet_parts: list[str] = []
+        for start, end in merged:
+            block = []
+            for j in range(start, end):
+                marker = "→" if j in hit_line_indices else " "
+                block.append(f"  {marker} L{j + 1}: {file_lines[j]}")
+            snippet_parts.append("\n".join(block))
+
+        kw_used = keywords[0] if keywords else ""
+        total_lines = len(file_lines)
+        header = (
+            f"### 🔍 `{rel_path}` — keyword: `{kw_used}` "
+            f"({len(hit_line_indices)} hit dari {total_lines} baris)\n"
+        )
+        ext = fpath.suffix.lstrip(".")
+        body = f"\n\n---\n\n".join(
+            f"```{ext}\n{part}\n```" for part in snippet_parts
+        )
+        return header + body
+
+    # ── 4. No keyword hits – fall back to full file content ─────────────────
+    logger.info(
+        "_search_keyword_in_file: no keyword hits in %r, returning full content", rel_path
+    )
+    content = file_text[:MAX_BYTES_PER_FILE]
+    ext = fpath.suffix.lstrip(".")
+    return (
+        f"### 📄 `{rel_path}` (full content — keyword tidak ditemukan)\n"
+        f"```{ext}\n{content}\n```"
+    )
+
+
 # ── Extractor: Specific Symbol ────────────────────────────────────────────────
 
 async def extract_specific_symbol(
@@ -912,12 +1101,23 @@ async def extract_specific_symbol(
     mengandung API path eksplisit (misal "GET /appuuid/:uuid → controllers.DownloadFile"),
     trace KEDUANYA secara paralel sehingga LLM menerima: registrasi route +
     full handler body + definisi fungsi yang dirujuk.
+
+    Untuk filename target (e.g. "main.py"): cari file di repo, lalu grep untuk
+    keyword yang disebutkan dalam user_input (e.g. "elastic apm") di dalam file
+    tersebut, mengembalikan baris-baris yang relevan dengan konteks.
     """
     if not target:
         return "(target tidak ditentukan)"
 
     if target.startswith("/"):
         return await _trace_api_route(repo_path, target)
+
+    # Filename target: e.g. "main.py", "api/config.py", "worker.go"
+    # Must be checked BEFORE the qualified-name splitter so that "main.py" is
+    # NOT misinterpreted as package "main" + symbol "py".
+    if _is_filename_target(target):
+        logger.info("extract_specific_symbol: file target detected → %r", target)
+        return await _search_keyword_in_file(repo_path, target, user_input)
 
     # Qualified name: controllers.DownloadFile → search in controllers/ first
     if "." in target and not target.startswith("."):
