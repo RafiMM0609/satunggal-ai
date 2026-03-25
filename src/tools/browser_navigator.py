@@ -527,10 +527,14 @@ class BrowserNavigatorTool(BaseTool):
                         const el = inputs.find(i => !i.value) || inputs[0];
                         if (!el) return;
                         el.focus();
-                        // Use the native setter so React/Vue synthetic events fire properly
-                        const nativeSetter = Object.getOwnPropertyDescriptor(
-                            window.HTMLInputElement.prototype, 'value'
-                        ).set;
+                        // Use the native setter so React/Vue synthetic events fire properly.
+                        // textarea elements require HTMLTextAreaElement.prototype.value setter;
+                        // using HTMLInputElement.prototype.value on a textarea causes
+                        // "TypeError: Illegal invocation".
+                        const proto = el.tagName === 'TEXTAREA'
+                            ? window.HTMLTextAreaElement.prototype
+                            : window.HTMLInputElement.prototype;
+                        const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
                         nativeSetter.call(el, text);
                         el.dispatchEvent(new Event('input',  {bubbles: true, cancelable: true}));
                         el.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
