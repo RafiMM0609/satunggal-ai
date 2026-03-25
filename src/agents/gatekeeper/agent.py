@@ -11,7 +11,7 @@ import logging
 from typing import Optional
 
 from config.settings import Settings, get_settings
-from src.agents.gatekeeper.openrouter import OpenRouterClient
+from src.agents.gatekeeper.openrouter import GatekeeperLLMClient
 from src.agents.gatekeeper.schemas import IntentCategory, IntentResult
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ class GatekeeperAgent:
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._settings   = settings or get_settings()
-        self._llm_client = OpenRouterClient(self._settings)
+        self._llm_client = GatekeeperLLMClient(self._settings)
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
