@@ -15,15 +15,24 @@ Supported high-level tasks (intent: web_automation)
   • Log in to a website and save the session for future reuse.
   • Read the current page content after navigation or clicks (get_content).
   • Extract structured list data from a page using CSS selectors (extract_data).
+  • Explore a page autonomously to find content related to a specific topic
+    (e.g. "explore https://docs.example.com, find content about full text search").
 
-Workflow (Orchestrator-driven)
-──────────────────────────────
-  1. LLM decomposes the user's request into an ordered action plan.
-  2. For each step the agent sets ``task.metadata["browser_action"]`` and
-     calls the appropriate tool (web_reader or browser_navigator).
-  3. Tool results are collected and fed back to the LLM to decide the next
-     step (ReAct-style loop, max 10 iterations to prevent runaway loops).
-  4. The LLM produces a final natural-language summary for the user.
+Workflow (true ReAct loop)
+──────────────────────────
+  1. The LLM decides the SINGLE NEXT action based on the user's request and all
+     previous steps + their results (full ReAct: Reason → Act → Observe → repeat).
+  2. The chosen action is executed (web_reader or browser_navigator).
+  3. The result is appended to the accumulated context in compact form.
+  4. Steps 1–3 repeat until the LLM outputs ``done`` or max steps is reached.
+  5. The LLM produces a final natural-language summary for the user.
+
+  Key exploration actions
+  -----------------------
+  • ``get_links``   – extracts all navigable links from the current page so the
+                      LLM can pick the most relevant one and follow it.
+  • ``navigate``    – opens a URL (reuses the existing browser context).
+  • ``get_content`` – reads the full text of the current page.
 
 VPS constraints honoured
 ─────────────────────────
@@ -98,7 +107,7 @@ pengguna menjadi serangkaian langkah browsing yang terurut dan dapat dieksekusi.
 
 Setiap langkah HARUS berupa JSON object dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll", \
-"screenshot", "get_content", "extract_data", "save_session", "done"]
+"screenshot", "get_content", "get_links", "extract_data", "save_session", "done"]
   "params": object parameter yang sesuai dengan action:
     - read_url:     {"url": "..."}
     - navigate:     {"url": "..."}
@@ -111,6 +120,7 @@ Setiap langkah HARUS berupa JSON object dengan field berikut:
     - scroll:       {"direction": "down"|"up"}
     - screenshot:   {}
     - get_content:  {}
+    - get_links:    {}
     - extract_data: {"selector": "...", "attribute": "text"|"href", "limit": 50}
     - save_session: {"url": "..."}
     - done:         {"summary": "ringkasan hasil untuk pengguna"}
@@ -120,6 +130,8 @@ Panduan penggunaan action:
     kemudian "get_content" untuk membaca konten halaman terkini.
   • Gunakan "get_content" setelah "navigate" atau "click" agar konten halaman
     yang sudah diperbarui dapat dibaca (bukan "read_url" yang membuka tab baru).
+  • Gunakan "get_links" untuk mengekstrak semua link navigasi dari halaman saat ini;
+    sangat berguna saat mengeksplor halaman dokumentasi untuk menemukan topik yang relevan.
   • Gunakan "extract_data" dengan selector CSS untuk mengambil daftar item
     terstruktur (misalnya: daftar repositori, berita, produk, baris tabel).
     Jika selector tidak diketahui, kosongkan dan biarkan auto-detect bekerja.
@@ -184,6 +196,9 @@ Berdasarkan log aksi dan konten halaman yang diberikan, buat ringkasan yang:
   - Menjelaskan elemen-elemen penting yang ditemukan (menu, tombol, form, dll.).
   - Jika ada daftar item yang diekstrak (repositori, berita, produk, dll.),
     tampilkan dalam format daftar yang terstruktur dan mudah dibaca.
+  - Jika task melibatkan eksplorasi dokumen/halaman untuk mencari topik tertentu,
+    rangkumkan ISI KONTEN yang ditemukan secara lengkap dan informatif, bukan
+    hanya mencantumkan link atau nama halaman saja.
   - Melaporkan status setiap aksi (berhasil / gagal).
   - Jika terjadi navigasi/redirect setelah login (ditandai dengan "navigated: true"
     dalam log), tampilkan informasi halaman tujuan redirect (URL, judul, konten).
@@ -193,12 +208,91 @@ Berdasarkan log aksi dan konten halaman yang diberikan, buat ringkasan yang:
   - Menggunakan bahasa yang sama dengan permintaan pengguna (Indonesia atau Inggris).
 """
 
-_MAX_STEPS             = 8     # hard cap excluding the final "done" step
+_REACT_SYSTEM = """\
+Kamu adalah Web Automation Decision Maker. Berdasarkan permintaan pengguna dan \
+riwayat langkah yang sudah dilakukan, tentukan SATU langkah berikutnya yang perlu diambil.
+
+Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
+  "action": satu dari ["read_url", "navigate", "click", "type", "scroll",
+            "screenshot", "get_content", "get_links", "extract_data",
+            "save_session", "done"]
+  "params": parameter yang sesuai dengan action:
+    - read_url:     {"url": "..."}
+    - navigate:     {"url": "..."}
+    - click:        {"text": "..."}
+    - type:         {"selector": "...", "label": "...", "text": "..."}
+    - scroll:       {"direction": "down"|"up"}
+    - screenshot:   {}
+    - get_content:  {}
+    - get_links:    {}
+    - extract_data: {"selector": "...", "attribute": "text"|"href", "limit": 50}
+    - save_session: {"url": "..."}
+    - done:         {"summary": "ringkasan lengkap hasil untuk pengguna"}
+  "reasoning": penjelasan singkat mengapa langkah ini dipilih (1-2 kalimat)
+
+Panduan eksplorasi halaman dokumentasi / pencarian konten:
+  • Saat diminta mengeksplor, mencari, atau menemukan konten tertentu dalam sebuah halaman:
+    1. Mulai dengan "navigate" atau "read_url" ke URL yang diberikan
+    2. Gunakan "get_links" untuk melihat semua link navigasi yang tersedia
+    3. Analisis teks link dan pilih yang paling relevan dengan query pengguna
+    4. Gunakan "navigate" ke URL link tersebut
+    5. Gunakan "get_content" untuk membaca konten halaman yang baru dibuka
+    6. Jika konten relevan ditemukan, output "done" dengan ringkasan lengkap isi konten
+    7. Jika belum cukup, gunakan "get_links" lagi untuk menelusuri sub-navigasi lebih dalam
+  • Jangan berulang kali mengunjungi URL yang sama jika tidak ada perubahan.
+  • Prioritaskan link yang teks-nya paling relevan dengan topik yang dicari.
+  • Setelah menemukan halaman konten yang relevan, baca penuh dengan "get_content" sebelum "done".
+
+Panduan umum:
+  • Gunakan "navigate" lalu "get_content" (bukan "read_url") saat sudah ada browser terbuka.
+  • Gunakan "read_url" hanya jika ini adalah langkah pertama dan belum ada browser.
+  • Setelah "click" yang menyebabkan navigasi, gunakan "get_content" untuk membaca halaman baru.
+  • Untuk form: gunakan "type" dengan "label" yang sesuai placeholder/label field.
+
+Gunakan action "done" dengan ringkasan komprehensif ketika:
+  - Konten yang relevan sudah ditemukan dan kamu memiliki cukup informasi untuk menjawab query
+  - Tidak ada lagi link relevan untuk diikuti
+  - Langkah-langkah sebelumnya gagal dan sudah ada informasi yang cukup untuk dilaporkan
+  - Mendekati batas langkah maksimum
+
+Aturan:
+  1. Balas HANYA dengan SATU JSON object – tidak ada teks lain di luar JSON.
+  2. Jangan mengulangi langkah yang persis sama jika sudah dilakukan dan gagal.
+  3. Selalu akhiri dengan "done" yang berisi ringkasan lengkap.
+"""
+
+_MAX_REACT_STEPS       = 12    # max number of tool-execution steps in the ReAct loop
 _MAX_TOKENS            = 2048
 _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
 _SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser
 _HISTORY_MSG_CHARS     = 500   # max characters per message included in planner context
 _MAX_ERROR_MSG_CHARS   = 200   # max error message characters included in action log entries
+_REACT_RESULT_TEXT_CHARS = 800  # max page_text chars kept in each compact ReAct step result
+_REACT_LINKS_LIMIT     = 60    # max links kept per step in compact ReAct context
+
+_SKIP_KEYS = frozenset({"screenshot_b64", "a11y_tree"})
+
+
+def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Build a compact version of a tool result for the ReAct context.
+
+    Strips bulky fields (base64 screenshots, full accessibility trees) and
+    truncates large text to keep per-step token usage within a safe budget.
+    The resulting dict is serialised as JSON and appended to the accumulated
+    steps context that the LLM reads on every planning call.
+    """
+    compact = {k: v for k, v in result.items() if k not in _SKIP_KEYS}
+    # Truncate long page text so it doesn't dominate the context
+    if "page_text" in compact and isinstance(compact["page_text"], str):
+        if len(compact["page_text"]) > _REACT_RESULT_TEXT_CHARS:
+            compact["page_text"] = compact["page_text"][:_REACT_RESULT_TEXT_CHARS] + "…"
+    # Limit the number of links to keep the context manageable
+    if "links" in compact and isinstance(compact["links"], list):
+        compact["links"] = compact["links"][:_REACT_LINKS_LIMIT]
+    # Limit extracted items list
+    if "items" in compact and isinstance(compact["items"], list):
+        compact["items"] = compact["items"][:30]
+    return compact
 
 
 class WebAutomationAgent(BaseAgent):
@@ -225,17 +319,24 @@ class WebAutomationAgent(BaseAgent):
         reader    = WebReaderTool()
 
         try:
-            steps = await self._plan_steps(task.user_input, task.session_id)
-            logger.info(
-                "WebAutomationAgent: %d steps planned for session=%s",
-                len(steps), task.session_id,
-            )
-
             action_log: list[str] = []
+            # Accumulated context for the ReAct loop: each entry holds the
+            # action name, its params, and a compact version of the result
+            # so the LLM can decide the next step with full history.
+            steps_done: list[dict[str, Any]] = []
 
-            for i, step in enumerate(steps[:_MAX_STEPS], start=1):
-                action = step.get("action", "done")
-                params = step.get("params", {})
+            for i in range(1, _MAX_REACT_STEPS + 1):
+                # Plan the single next step given everything done so far
+                next_step = await self._plan_next_step(
+                    task.user_input, task.session_id, steps_done
+                )
+                action = next_step.get("action", "done")
+                params = next_step.get("params", {})
+
+                logger.info(
+                    "WebAutomationAgent: step %d action=%r session=%s",
+                    i, action, task.session_id,
+                )
 
                 if action == "done":
                     summary = params.get("summary", "Selesai.")
@@ -253,19 +354,36 @@ class WebAutomationAgent(BaseAgent):
                 action_log.append(log_entry)
                 task.tool_results[f"step_{i}_{action}"] = tool_result
 
-                # Track last visited URL per session for follow-up commands
-                if action in ("navigate", "read_url"):
+                # Track the last navigated URL per session for follow-up commands.
+                # get_content and get_links also return the current page URL, which
+                # keeps the session URL accurate even when no navigation occurred.
+                if action in ("navigate", "read_url", "get_content", "get_links"):
                     visited_url = tool_result.get("url") or params.get("url", "")
                     if visited_url and not tool_result.get("error"):
                         _session_last_url[task.session_id] = visited_url
 
                 if tool_result.get("error"):
                     logger.warning(
-                        "WebAutomationAgent: step %d/%d failed: %s",
-                        i, len(steps), tool_result["error"],
+                        "WebAutomationAgent: step %d failed: %s",
+                        i, tool_result["error"],
                     )
                     action_log.append(f"  ⚠ Gagal: {tool_result['error']}")
                     # Continue to next step instead of aborting (best-effort)
+
+                # Build a compact result for the ReAct context (strips screenshots
+                # and large a11y trees to keep token usage manageable)
+                steps_done.append({
+                    "step":   action,
+                    "params": params,
+                    "result": _compact_result(tool_result),
+                })
+            else:
+                # Loop exhausted without a "done" action – log that max steps was reached
+                action_log.append(f"[{_MAX_REACT_STEPS + 1}] done (batas langkah maksimum tercapai)")
+                logger.warning(
+                    "WebAutomationAgent: max ReAct steps (%d) reached for session=%s",
+                    _MAX_REACT_STEPS, task.session_id,
+                )
 
             # Collect screenshots captured during the session so the interface
             # layer (e.g. Telegram handler) can forward them to the user.
@@ -312,39 +430,49 @@ class WebAutomationAgent(BaseAgent):
 
         return task
 
-    # ── Step planner ─────────────────────────────────────────────────────────
+    # ── ReAct step planner ────────────────────────────────────────────────────
 
-    async def _plan_steps(self, user_input: str, session_id: str = "") -> list[dict[str, Any]]:
-        """Ask the LLM to produce a structured action plan.
+    async def _plan_next_step(
+        self,
+        user_input: str,
+        session_id: str,
+        steps_done: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Ask the LLM to decide the SINGLE NEXT action to take.
 
-        Includes conversation history and the last visited URL as context so
-        the LLM can correctly plan follow-up commands (e.g. "Klik tombol Sign in"
-        after previously navigating to a page).
+        Includes the full accumulated browsing history (actions + compact
+        results) so the LLM can make an informed, adaptive decision rather
+        than committing to a fixed plan created before any page was seen.
         """
-        # ── Build context for follow-up command detection ──────────────────
         context_parts: list[str] = []
 
+        # Include the last visited URL for follow-up command context
         last_url = _session_last_url.get(session_id, "")
         if last_url:
-            context_parts.append(f"URL terakhir yang dikunjungi dalam sesi ini: {last_url}")
+            context_parts.append(f"URL terakhir yang dikunjungi: {last_url}")
 
+        # Include recent conversation history for multi-turn awareness
         if self._history and session_id:
             recent = self._history.get(session_id)
-            # Include up to 4 messages (2 user–assistant turns) before the current one
             prev_messages = recent[:-1][-4:] if len(recent) > 1 else []
             if prev_messages:
                 lines = "\n".join(
                     f"[{m.role.upper()}]: {m.content[:_HISTORY_MSG_CHARS]}"
                     for m in prev_messages
                 )
-                context_parts.append(f"Riwayat percakapan sebelumnya:\n{lines}")
+                context_parts.append(f"Riwayat percakapan:\n{lines}")
+
+        # Include all steps done so far with their compact results
+        if steps_done:
+            steps_text = json.dumps(steps_done, ensure_ascii=False, indent=2)
+            context_parts.append(f"Langkah yang sudah dilakukan:\n{steps_text}")
 
         system_content = (
-            _PLANNER_SYSTEM
-            + "\nKonteks tambahan untuk perintah ini:\n"
+            _REACT_SYSTEM
+            + "\n\nKonteks tambahan:\n"
             + "\n\n".join(context_parts)
             if context_parts
-            else _PLANNER_SYSTEM
+            else _REACT_SYSTEM
         )
 
         messages = [
@@ -353,30 +481,23 @@ class WebAutomationAgent(BaseAgent):
         ]
         try:
             raw = await self._llm.chat(messages, max_tokens=512)
-            # Strip markdown fences if present
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            steps = json.loads(raw)
-            if not isinstance(steps, list):
-                raise ValueError("Expected a JSON array")
-            return steps
+            step = json.loads(raw)
+            if not isinstance(step, dict):
+                raise ValueError("Expected a JSON object")
+            return step
         except Exception as exc:
-            logger.warning("WebAutomationAgent: plan parsing failed (%s), using fallback", exc)
-            # Fallback: treat the whole input as a read_url request if it looks like a URL
-            url = self._extract_url(user_input)
-            if url:
-                return [
-                    {"action": "read_url", "params": {"url": url}},
-                    {"action": "done",     "params": {"summary": "Konten URL telah dibaca."}},
-                ]
-            # Fallback for follow-up commands: navigate to last URL then click
-            if last_url and not self._extract_url(user_input):
-                return [
-                    {"action": "navigate", "params": {"url": last_url}},
-                    {"action": "done",     "params": {"summary": "Navigasi ke halaman sebelumnya."}},
-                ]
-            return [{"action": "done", "params": {"summary": "Tidak dapat membuat rencana aksi."}}]
+            logger.warning("WebAutomationAgent: next-step planning failed (%s), using fallback", exc)
+            # Fallback: if this is the first step and the input contains a URL, read it
+            if not steps_done:
+                url = self._extract_url(user_input)
+                if url:
+                    return {"action": "read_url", "params": {"url": url}}
+                if last_url:
+                    return {"action": "navigate", "params": {"url": last_url}}
+            return {"action": "done", "params": {"summary": "Tidak dapat merencanakan langkah selanjutnya."}}
 
     # ── Step executor ────────────────────────────────────────────────────────
 
@@ -475,6 +596,16 @@ class WebAutomationAgent(BaseAgent):
                 f"nodes={len(result.get('a11y_tree', []))}"
             )
 
+        elif action == "get_links":
+            task.metadata["browser_action"] = "get_links"
+            result = await navigator.run(task)
+            if result.get("url") and not result.get("error"):
+                _session_last_url[task.session_id] = result["url"]
+            log = (
+                f"[{step_num}] get_links → "
+                f"{result.get('count', 0)} links from {result.get('url', '?')}"
+            )
+
         elif action == "extract_data":
             task.metadata.update({
                 "browser_action":    "extract_data",
@@ -509,6 +640,7 @@ class WebAutomationAgent(BaseAgent):
         # Collect page content from read_url and get_content results
         page_snippets: list[str] = []
         extracted_data: list[str] = []
+        link_sections: list[str] = []
 
         for key, val in tool_results.items():
             if not isinstance(val, dict):
@@ -529,6 +661,17 @@ class WebAutomationAgent(BaseAgent):
                     f"[{key}] {val.get('count', len(val['items']))} items "
                     f"dari {val.get('url', '')}:\n{items_text}"
                 )
+            # Links extracted from get_links (show a representative sample)
+            if val.get("action") == "get_links" and val.get("links"):
+                links_sample = val["links"][:20]
+                links_text = "\n".join(
+                    f"  - {lnk.get('text', '')}: {lnk.get('href', '')}"
+                    for lnk in links_sample
+                )
+                link_sections.append(
+                    f"[{key}] {val.get('count', len(val['links']))} links "
+                    f"dari {val.get('url', '')}:\n{links_text}"
+                )
 
         context = f"Log aksi:\n{log_text}"
         if current_url:
@@ -537,6 +680,8 @@ class WebAutomationAgent(BaseAgent):
             context += "\n\nKonten halaman:\n" + "\n\n".join(page_snippets)
         if extracted_data:
             context += "\n\nData yang diekstrak:\n" + "\n\n".join(extracted_data)
+        if link_sections:
+            context += "\n\nLink navigasi yang ditemukan:\n" + "\n\n".join(link_sections)
 
         messages = [
             {"role": "system", "content": _SUMMARISER_SYSTEM},
