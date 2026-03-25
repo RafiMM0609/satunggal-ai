@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     openrouter_timeout:   int = Field(30,                             alias="OPENROUTER_TIMEOUT")
     openrouter_max_tokens: int = Field(8192,                          alias="OPENROUTER_MAX_TOKENS")
 
+    # ── Ollama LLM ────────────────────────────────────────────────────────────
+    ollama_host:    str = Field("http://localhost:11434", alias="OLLAMA_HOST")
+    ollama_api_key: str = Field("",                      alias="OLLAMA_API_KEY")
+    ollama_model:   str = Field("llama3.2",              alias="OLLAMA_MODEL")
+    ollama_timeout: int = Field(120,                     alias="OLLAMA_TIMEOUT")
+
     # ── Tavily Search ─────────────────────────────────────────────────────────
     tavily_api_key:      str  = Field("",       alias="TAVILY_API_KEY")
     tavily_search_depth: str  = Field("advanced", alias="TAVILY_SEARCH_DEPTH")

@@ -2,6 +2,7 @@
 Shared async LLM client for all non-gatekeeper agents.
 
 Supports multi-turn conversation via a messages list.
+Supports two LLM providers: OpenRouter (default) and Ollama.
 """
 
 from __future__ import annotations
@@ -9,15 +10,26 @@ from __future__ import annotations
 import logging
 
 import httpx
+from ollama import AsyncClient as OllamaAsyncClient
 
 from config.settings import Settings, get_settings
-from src.memory.key_store import effective_openrouter_auth_header, effective_openrouter_max_tokens, effective_openrouter_model
+from src.memory.key_store import (
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENROUTER,
+    effective_ollama_auth_header,
+    effective_ollama_host,
+    effective_ollama_model,
+    effective_openrouter_auth_header,
+    effective_openrouter_max_tokens,
+    effective_openrouter_model,
+    get_active_provider,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    """Generic async wrapper around OpenRouter chat-completions."""
+    """Async LLM client that supports OpenRouter and Ollama providers."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
@@ -27,9 +39,135 @@ class LLMClient:
             headers=self._settings.openrouter_headers,
         )
 
+    # ── Provider helpers ──────────────────────────────────────────────────────
+
+    def _active_provider(self) -> str:
+        return get_active_provider()
+
     def _auth_headers(self) -> dict[str, str]:
-        """Return Authorization header, preferring key_store override over .env."""
+        """Return Authorization header for OpenRouter, preferring key_store override over .env."""
         return {"Authorization": effective_openrouter_auth_header(self._settings.openrouter_api_key)}
+
+    # ── OpenRouter backend ────────────────────────────────────────────────────
+
+    async def _chat_openrouter(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+    ) -> str:
+        payload: dict = {
+            "model":      model      or effective_openrouter_model(self._settings.openrouter_model),
+            "max_tokens": max_tokens or effective_openrouter_max_tokens(self._settings.openrouter_max_tokens),
+            "messages":   messages,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
+        logger.debug("LLMClient[openrouter].chat → model=%s, messages_count=%d", payload["model"], len(messages))
+        try:
+            response = await self._http.post(
+                "/chat/completions", json=payload, headers=self._auth_headers()
+            )
+            logger.debug("LLMClient[openrouter] HTTP status=%s", response.status_code)
+            try:
+                logger.debug("LLMClient[openrouter].raw_response_text=%s", response.text)
+            except Exception:
+                logger.debug("LLMClient[openrouter].raw_response_text unavailable")
+
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError as exc:
+            logger.exception("LLM[openrouter] HTTP request failed: %s", exc)
+            raise
+
+        logger.debug("LLMClient[openrouter].raw_response_json=%r", data)
+
+        try:
+            message = data["choices"][0]["message"]
+            content = message.get("content")
+        except Exception as exc:
+            logger.exception("Failed to extract content from LLM[openrouter] response: %s", exc)
+            content = None
+            message = {}
+
+        if content is None:
+            finish_reason = None
+            try:
+                finish_reason = data["choices"][0].get("finish_reason")
+            except Exception:
+                pass
+
+            if finish_reason == "length":
+                logger.warning(
+                    "LLM[openrouter] hit max_tokens limit (finish_reason=length) before producing content. "
+                    "Consider increasing OPENROUTER_MAX_TOKENS for reasoning models. "
+                    "Attempting fallback to reasoning field."
+                )
+            else:
+                logger.warning("LLM[openrouter] returned null content: %r", data)
+
+            reasoning = message.get("reasoning") or message.get("reasoning_content")
+            if reasoning and isinstance(reasoning, str) and reasoning.strip():
+                logger.info("Falling back to reasoning field as response content.")
+                return reasoning.strip()
+
+            return ""
+
+        return content.strip()
+
+    # ── Ollama backend ────────────────────────────────────────────────────────
+
+    async def _chat_ollama(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        **_: object,
+    ) -> str:
+        host = effective_ollama_host(self._settings.ollama_host)
+        auth_header = effective_ollama_auth_header(self._settings.ollama_api_key)
+        headers: dict[str, str] = {}
+        if auth_header:
+            headers["Authorization"] = auth_header
+
+        resolved_model = model or effective_ollama_model(self._settings.ollama_model)
+        logger.debug("LLMClient[ollama].chat → model=%s, messages_count=%d", resolved_model, len(messages))
+
+        client = OllamaAsyncClient(host=host, headers=headers)
+        options: dict = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if top_p is not None:
+            options["top_p"] = top_p
+
+        try:
+            response = await client.chat(
+                model=resolved_model,
+                messages=messages,
+                stream=False,
+                options=options or None,
+            )
+        except Exception as exc:
+            logger.exception("LLM[ollama] request failed: %s", exc)
+            raise
+
+        try:
+            content = response.message.content
+        except Exception as exc:
+            logger.exception("Failed to extract content from LLM[ollama] response: %s", exc)
+            return ""
+
+        logger.debug("LLMClient[ollama].raw_response=%r", response)
+        return (content or "").strip()
+
+    # ── Public API ────────────────────────────────────────────────────────────
 
     async def chat(
         self,
@@ -43,79 +181,31 @@ class LLMClient:
         """
         Send a messages list and return the assistant's text reply.
 
+        Routes to the active LLM provider (openrouter or ollama).
+
         Args:
             messages:    List of {"role": ..., "content": ...} dicts.
             model:       Override the default model.
-            max_tokens:  Override the default max_tokens.
+            max_tokens:  Override the default max_tokens (OpenRouter only).
             temperature: Sampling temperature (lower = more deterministic).
             top_p:       Nucleus sampling threshold.
         """
-        payload: dict = {
-            "model":      model      or effective_openrouter_model(self._settings.openrouter_model),
-            "max_tokens": max_tokens or effective_openrouter_max_tokens(self._settings.openrouter_max_tokens),
-            "messages":   messages,
-        }
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if top_p is not None:
-            payload["top_p"] = top_p
-        logger.debug("LLMClient.chat → model=%s, messages_count=%d", payload["model"], len(messages))
-        try:
-            response = await self._http.post(
-                "/chat/completions", json=payload, headers=self._auth_headers()
+        provider = self._active_provider()
+        if provider == PROVIDER_OLLAMA:
+            return await self._chat_ollama(
+                messages,
+                model=model,
+                temperature=temperature,
+                top_p=top_p,
             )
-            logger.debug("LLMClient HTTP status=%s", response.status_code)
-            # Prefer to log the response text at DEBUG level for diagnosis
-            try:
-                logger.debug("LLMClient.raw_response_text=%s", response.text)
-            except Exception:
-                logger.debug("LLMClient.raw_response_text unavailable")
-
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPError as exc:
-            # Log response text if available for debugging
-            logger.exception("LLM HTTP request failed: %s", exc)
-            raise
-
-        # Log the parsed JSON at debug level to help diagnose malformed outputs
-        logger.debug("LLMClient.raw_response_json=%r", data)
-
-        try:
-            message = data["choices"][0]["message"]
-            content = message.get("content")
-        except Exception as exc:
-            logger.exception("Failed to extract content from LLM response: %s", exc)
-            content = None
-            message = {}
-
-        if content is None:
-            finish_reason = None
-            try:
-                finish_reason = data["choices"][0].get("finish_reason")
-            except Exception:
-                pass
-
-            if finish_reason == "length":
-                logger.warning(
-                    "LLM hit max_tokens limit (finish_reason=length) before producing content. "
-                    "Consider increasing OPENROUTER_MAX_TOKENS for reasoning models. "
-                    "Attempting fallback to reasoning field."
-                )
-            else:
-                logger.warning("LLM returned null content: %r", data)
-
-            # Reasoning models (e.g. Qwen-thinking, DeepSeek-R1) put chain-of-thought
-            # in the 'reasoning' field. If content is missing, try to surface the
-            # reasoning text as a best-effort response.
-            reasoning = message.get("reasoning") or message.get("reasoning_content")
-            if reasoning and isinstance(reasoning, str) and reasoning.strip():
-                logger.info("Falling back to reasoning field as response content.")
-                return reasoning.strip()
-
-            return ""
-
-        return content.strip()
+        # Default: openrouter
+        return await self._chat_openrouter(
+            messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
 
     async def complete(
         self,
@@ -137,7 +227,7 @@ class LLMClient:
             system_prompt: Instruction context for the LLM.
             messages:      List of {"role": ..., "content": ...} dicts (history + user).
             model:         Override the default model.
-            max_tokens:    Override the default max_tokens.
+            max_tokens:    Override the default max_tokens (OpenRouter only).
             temperature:   Sampling temperature (lower = more deterministic).
             top_p:         Nucleus sampling threshold.
         """
