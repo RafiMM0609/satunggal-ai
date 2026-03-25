@@ -9,6 +9,8 @@ Implements the "Interaction" phase of the Autonomous Browsing brief:
   - scroll(direction)     : scroll up/down the page
   - screenshot()          : capture the current viewport as PNG bytes
   - get_content()         : read text + accessibility tree from the current page
+  - get_links()           : extract all navigable links (text + href) from the
+                            current page for exploration / topic discovery
   - extract_data(selector): extract structured list data via CSS selector
   - save_session(url)     : persist Playwright storage-state for future logins
 
@@ -100,8 +102,8 @@ class BrowserNavigatorTool(BaseTool):
 
         task.metadata["browser_action"]  = "navigate" | "click" | "type" |
                                            "scroll" | "screenshot" |
-                                           "get_content" | "extract_data" |
-                                           "save_session"
+                                           "get_content" | "get_links" |
+                                           "extract_data" | "save_session"
         task.metadata["target_url"]      = "https://..."          # for navigate
         task.metadata["click_text"]      = "Login"                # for click
         task.metadata["type_selector"]   = "#email"               # for type (CSS selector)
@@ -159,6 +161,8 @@ class BrowserNavigatorTool(BaseTool):
                 return await self._action_screenshot(task)
             elif action == "get_content":
                 return await self._action_get_content(task)
+            elif action == "get_links":
+                return await self._action_get_links(task)
             elif action == "extract_data":
                 return await self._action_extract_data(task)
             elif action == "save_session":
@@ -676,6 +680,62 @@ class BrowserNavigatorTool(BaseTool):
                 "success": False,
                 "error":   str(exc),
                 "items":   [],
+            }
+
+    async def _action_get_links(self, task: "AgentTask") -> dict[str, Any]:
+        """Extract all navigable links from the current page.
+
+        Returns a structured list of links with their display text and target
+        URL, intended for the LLM to analyse and select the most relevant one
+        during exploration tasks (e.g. browsing documentation sites to find a
+        specific topic).
+
+        Up to 200 unique links are returned (de-duplicated by href).
+        ``javascript:``, ``mailto:``, and ``tel:`` hrefs are excluded.
+        """
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "get_links",
+            }
+
+        try:
+            links: list[dict[str, str]] = await self._page.evaluate(
+                """() => {
+                    const seen = new Set();
+                    return Array.from(document.querySelectorAll('a[href]'))
+                        .map(a => ({
+                            text: (a.innerText || a.textContent || a.title || '')
+                                      .replace(/\\s+/g, ' ').trim().substring(0, 120),
+                            href: a.href,
+                        }))
+                        .filter(l =>
+                            l.text &&
+                            l.href &&
+                            !l.href.startsWith('javascript:') &&
+                            !l.href.startsWith('mailto:') &&
+                            !l.href.startsWith('tel:') &&
+                            !seen.has(l.href) &&
+                            seen.add(l.href)
+                        )
+                        .slice(0, 200);
+                }"""
+            )
+            return {
+                "action":  "get_links",
+                "success": True,
+                "url":     self._page.url,
+                "links":   links,
+                "count":   len(links),
+                "message": f"Extracted {len(links)} links from {self._page.url}",
+            }
+        except Exception as exc:
+            return {
+                "action":  "get_links",
+                "success": False,
+                "error":   str(exc),
+                "links":   [],
             }
 
     # ── Page content helpers ──────────────────────────────────────────────────
