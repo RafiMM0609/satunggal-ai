@@ -468,13 +468,76 @@ class BrowserNavigatorTool(BaseTool):
         filled = False
         used_target = selector or label or "(auto-detected)"
 
+        # Shared JS helper: set a value on any form element using the correct
+        # native prototype setter to avoid "TypeError: Illegal invocation".
+        # Each element type has its own prototype chain:
+        #   <input>    → HTMLInputElement.prototype.value  (or .checked for checkbox/radio)
+        #   <textarea> → HTMLTextAreaElement.prototype.value
+        #   <select>   → HTMLSelectElement.prototype.value
+        _JS_SET_VALUE = """
+            function setNativeValue(el, value) {
+                const tag  = el.tagName;
+                const type = (el.type || '').toLowerCase();
+                if (tag === 'TEXTAREA') {
+                    // Must use HTMLTextAreaElement setter — HTMLInputElement setter
+                    // on a textarea throws "TypeError: Illegal invocation".
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    ).set;
+                    setter.call(el, value);
+                    el.dispatchEvent(new Event('input',  {bubbles: true, cancelable: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+                } else if (tag === 'SELECT') {
+                    // HTMLSelectElement.prototype.value setter for <select> dropdowns.
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLSelectElement.prototype, 'value'
+                    ).set;
+                    setter.call(el, value);
+                    el.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+                } else if (type === 'checkbox' || type === 'radio') {
+                    // Checkbox / radio: set .checked, not .value.
+                    const truthful = /^(true|1|yes|on)$/i.test(value);
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'checked'
+                    ).set;
+                    setter.call(el, truthful);
+                    el.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+                } else {
+                    // All other <input> types (text, email, number, password, …)
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value'
+                    ).set;
+                    setter.call(el, value);
+                    el.dispatchEvent(new Event('input',  {bubbles: true, cancelable: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+                }
+                el.blur();
+            }
+        """
+
         # ── 1. CSS selector ───────────────────────────────────────────────────
         if selector and not filled:
             try:
                 await self._page.fill(selector, text, timeout=_TIMEOUT_MS)
                 filled = True
             except Exception as exc:  # noqa: BLE001
-                logger.debug("type via selector %r failed: %s", selector, exc)
+                logger.debug("type via selector %r failed (will try JS setter): %s", selector, exc)
+                # Playwright fill() doesn't support select/checkbox/radio; fall
+                # back to the native setter which handles all element types.
+                try:
+                    await self._page.evaluate(
+                        f"""(args) => {{
+                            {_JS_SET_VALUE}
+                            const el = document.querySelector(args.selector);
+                            if (!el) throw new Error('Element not found: ' + args.selector);
+                            el.focus();
+                            setNativeValue(el, args.value);
+                        }}""",
+                        {"selector": selector, "value": text},
+                    )
+                    filled = True
+                except Exception as exc2:  # noqa: BLE001
+                    logger.debug("type via selector JS fallback %r failed: %s", selector, exc2)
 
         # ── 2. Label / placeholder / accessible name ──────────────────────────
         if label and not filled:
@@ -492,27 +555,59 @@ class BrowserNavigatorTool(BaseTool):
                 except Exception:  # noqa: BLE001
                     continue
 
-        # ── 3. Auto-detect: next unfilled visible text input ──────────────────
+            # If Playwright fill() failed for all locators, attempt JS-based
+            # native setter via aria-label / placeholder matching.
+            if not filled:
+                try:
+                    await self._page.evaluate(
+                        f"""(args) => {{
+                            {_JS_SET_VALUE}
+                            const needle = args.label.toLowerCase();
+                            const candidates = [
+                                ...document.querySelectorAll(
+                                    'input, textarea, select'
+                                )
+                            ].filter(el => {{
+                                const style = window.getComputedStyle(el);
+                                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                                if (el.disabled) return false;
+                                // Match against placeholder, aria-label, name, id
+                                const attrs = [
+                                    el.placeholder, el.getAttribute('aria-label'),
+                                    el.name, el.id
+                                ];
+                                return attrs.some(a => a && a.toLowerCase().includes(needle));
+                            }});
+                            const el = candidates[0];
+                            if (!el) throw new Error('No element matched label: ' + args.label);
+                            el.focus();
+                            setNativeValue(el, args.value);
+                        }}""",
+                        {"label": label, "value": text},
+                    )
+                    filled = True
+                    used_target = f"label: {label}"
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("type via label JS fallback %r failed: %s", label, exc)
+
+        # ── 3. Auto-detect: next unfilled visible form field ──────────────────
         if not filled:
             try:
-                # Use Playwright's fill() via JS evaluation to find the first
-                # visible, non-disabled input that is currently empty (or has
-                # a value shorter than the text we want to type) so that when
-                # the agent sends two sequential type actions (e.g. email then
-                # PIN) each action targets a different field rather than always
-                # overwriting the same first input.
-                # We use the native HTMLInputElement value setter so that
-                # React / Vue controlled-component listeners fire correctly.
+                # Find the first visible, non-disabled, unfilled form field
+                # (input, textarea, or select) and set its value using the
+                # correct native prototype setter for each element type so that
+                # React / Vue controlled-component listeners fire correctly
+                # without "TypeError: Illegal invocation".
                 await self._page.evaluate(
-                    """(text) => {
+                    f"""(text) => {{
+                        {_JS_SET_VALUE}
                         const SKIP_TYPES = new Set([
-                            'hidden', 'submit', 'button', 'checkbox', 'radio',
+                            'hidden', 'submit', 'button',
                             'file', 'image', 'reset', 'range', 'color'
                         ]);
-                        const inputs = [...document.querySelectorAll(
-                            'input:not([type=hidden]):not([type=submit]):not([type=button]),' +
-                            'input:not([type=checkbox]):not([type=radio]), textarea'
-                        )].filter(el => {
+                        const fields = [...document.querySelectorAll(
+                            'input, textarea, select'
+                        )].filter(el => {{
                             if (SKIP_TYPES.has((el.type || '').toLowerCase())) return false;
                             const style = window.getComputedStyle(el);
                             return (
@@ -522,20 +617,13 @@ class BrowserNavigatorTool(BaseTool):
                                 !el.disabled &&
                                 !el.readOnly
                             );
-                        });
-                        // Prefer the first empty input; if all are filled pick the first one
-                        const el = inputs.find(i => !i.value) || inputs[0];
+                        }});
+                        // Prefer the first unfilled field; fall back to the first one
+                        const el = fields.find(f => !f.value) || fields[0];
                         if (!el) return;
                         el.focus();
-                        // Use the native setter so React/Vue synthetic events fire properly
-                        const nativeSetter = Object.getOwnPropertyDescriptor(
-                            window.HTMLInputElement.prototype, 'value'
-                        ).set;
-                        nativeSetter.call(el, text);
-                        el.dispatchEvent(new Event('input',  {bubbles: true, cancelable: true}));
-                        el.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
-                        el.blur();
-                    }""",
+                        setNativeValue(el, text);
+                    }}""",
                     text,
                 )
                 filled = True
