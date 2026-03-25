@@ -32,6 +32,7 @@ import logging
 import random
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
+from urllib.parse import urlparse
 
 from src.tools.base_tool import BaseTool
 
@@ -223,6 +224,37 @@ class BrowserNavigatorTool(BaseTool):
             self._context    = None
             self._page       = None
 
+    async def save_current_session(self, base_url: str) -> Optional[str]:
+        """Persist the current browser context's cookies & storage keyed by *base_url*.
+
+        This is called automatically at the end of every web automation task so
+        that login state is preserved across ``/reset`` commands and future tasks.
+
+        Args:
+            base_url: The scheme+host URL to key the session under
+                      (e.g. ``"https://example.com"``).
+
+        Returns:
+            The path where the session file was written, or ``None`` if the
+            browser context is not open.
+        """
+        if self._context is None:
+            return None
+        from src.memory.state import BrowserSessionStore
+        store = BrowserSessionStore()
+        try:
+            state: dict = await self._context.storage_state()
+            path = store.save_session(base_url, state)
+            logger.info(
+                "BrowserNavigatorTool: auto-saved session for %s → %s", base_url, path
+            )
+            return str(path)
+        except Exception as exc:
+            logger.warning(
+                "BrowserNavigatorTool: failed to auto-save session for %s: %s", base_url, exc
+            )
+            return None
+
     # ── Action implementations ────────────────────────────────────────────────
 
     async def _action_navigate(self, task: "AgentTask") -> dict[str, Any]:
@@ -231,6 +263,22 @@ class BrowserNavigatorTool(BaseTool):
             return {"error": "target_url not provided", "success": False, "action": "navigate"}
 
         session_path = task.metadata.get("session_path")
+        # Auto-load a previously saved login session for this domain so that
+        # the agent resumes as a logged-in user after /reset or across tasks.
+        if not session_path and self._page is None:
+            # Only auto-load when starting a fresh browser context (self._page is None).
+            # Mid-task navigations reuse the already-open context, so we skip the lookup.
+            from src.memory.state import BrowserSessionStore
+            parsed = urlparse(url)
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            store = BrowserSessionStore()
+            candidate = store.get_session_path(base_url)
+            if candidate.exists():
+                session_path = str(candidate)
+                logger.debug(
+                    "BrowserNavigatorTool: auto-loading session for %s from %s",
+                    base_url, session_path,
+                )
         await self._ensure_browser(session_path=session_path)
         assert self._page is not None  # noqa: S101
 

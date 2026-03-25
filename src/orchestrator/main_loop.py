@@ -327,6 +327,12 @@ async def clear_session(session_id: str) -> None:
         get_doc_index().clear_session(session_id)
     except (ImportError, AttributeError, Exception) as exc:
         logger.warning("Failed to clear doc index for session=%s: %s", session_id, exc)
+    # Clear web-automation state: last-visited URL + saved browser sessions
+    try:
+        from src.agents.web_automation.agent import clear_web_automation_session
+        clear_web_automation_session(session_id)
+    except (ImportError, AttributeError, Exception) as exc:
+        logger.warning("Failed to clear web automation session for session=%s: %s", session_id, exc)
     logger.info("Session cleared: %s", session_id)
 
 

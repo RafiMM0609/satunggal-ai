@@ -56,6 +56,40 @@ logger = logging.getLogger(__name__)
 # on the correct page without the user having to repeat the URL.
 _session_last_url: dict[str, str] = {}
 
+# ── Per-session visited-domain store ─────────────────────────────────────────
+# Tracks which base URLs (scheme+host) were visited per session so that
+# clear_web_automation_session() can delete the right browser session files.
+_session_domains: dict[str, set[str]] = {}
+
+
+def clear_web_automation_session(session_id: str) -> None:
+    """Remove all web-automation state for *session_id*.
+
+    Clears:
+    * The last-visited URL entry for this session.
+    * All saved Playwright browser session files (cookies/localStorage) for
+      every domain visited during this session.
+
+    Called by the orchestrator's ``clear_session()`` when the user runs /reset.
+    """
+    from src.memory.state import BrowserSessionStore
+
+    # Remove the last-visited URL for this session
+    _session_last_url.pop(session_id, None)
+
+    # Delete browser session files for all domains visited in this session
+    domains = _session_domains.pop(session_id, set())
+    if domains:
+        store = BrowserSessionStore()
+        for base_url in domains:
+            store.delete_session(base_url)
+        logger.info(
+            "clear_web_automation_session: deleted %d browser session(s) for session=%s",
+            len(domains), session_id,
+        )
+    else:
+        logger.info("clear_web_automation_session: no browser sessions to delete for session=%s", session_id)
+
 # ── System prompts ─────────────────────────────────────────────────────────────
 
 _PLANNER_SYSTEM = """\
@@ -258,6 +292,22 @@ class WebAutomationAgent(BaseAgent):
                 f"Detail: {exc}"
             )
         finally:
+            # Auto-save the browser session (cookies & storage) before closing so
+            # that login state is preserved across /reset commands and future tasks.
+            final_url = _session_last_url.get(task.session_id, "")
+            if final_url:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(final_url)
+                    base_url = f"{parsed.scheme}://{parsed.netloc}"
+                    await navigator.save_current_session(base_url)
+                    # Register the domain so /reset can clean up its session file
+                    _session_domains.setdefault(task.session_id, set()).add(base_url)
+                except Exception as exc:
+                    logger.warning(
+                        "WebAutomationAgent: failed to auto-save session for %s: %s",
+                        final_url, exc,
+                    )
             await navigator.close()
 
         return task
