@@ -28,6 +28,10 @@ from src.handlers import (
     setapikey,
     setllmmodel,
     setmaxtokens,
+    setollamamodel,
+    setollamahost,
+    setollamakey,
+    setprovider,
     start,
     unknown_message,
 )
@@ -130,9 +134,13 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("ping",      ping))
     app.add_handler(CommandHandler("reset",     reset))
     app.add_handler(CommandHandler("deploy",    deploy))
-    app.add_handler(CommandHandler("setapikey",   setapikey))
+    app.add_handler(CommandHandler("setapikey",    setapikey))
     app.add_handler(CommandHandler("setmaxtokens", setmaxtokens))
     app.add_handler(CommandHandler("setllmmodel",  setllmmodel))
+    app.add_handler(CommandHandler("setprovider",  setprovider))
+    app.add_handler(CommandHandler("setollamakey",   setollamakey))
+    app.add_handler(CommandHandler("setollamahost",  setollamahost))
+    app.add_handler(CommandHandler("setollamamodel", setollamamodel))
 
     # ── Message handlers ───────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))

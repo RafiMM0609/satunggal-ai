@@ -11,12 +11,26 @@ from telegram.ext import ContextTypes
 
 from config.settings import get_settings
 from src.memory.key_store import (
+    clear_active_provider,
+    clear_ollama_key,
+    clear_ollama_host,
+    clear_ollama_model,
     clear_openrouter_key,
     clear_openrouter_max_tokens,
     clear_openrouter_model,
+    get_active_provider,
+    get_ollama_key,
+    get_ollama_host,
+    get_ollama_model,
     get_openrouter_key,
     get_openrouter_max_tokens,
     get_openrouter_model,
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENROUTER,
+    set_active_provider,
+    set_ollama_key,
+    set_ollama_host,
+    set_ollama_model,
     set_openrouter_key,
     set_openrouter_max_tokens,
     set_openrouter_model,
@@ -55,9 +69,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Dukungan teknis & riset\n"
         "• Buat WBS & estimasi man-days proyek\n"
         "/deploy        — Pull kode & restart service (admin)\n"
+        "/setprovider   — Pilih provider LLM: openrouter atau ollama (admin)\n"
         "/setapikey     — Atur API key OpenRouter (admin)\n"
         "/setmaxtokens  — Atur max tokens OpenRouter (admin)\n"
-        "/setllmmodel   — Atur nama model LLM OpenRouter (admin)"
+        "/setllmmodel   — Atur nama model LLM OpenRouter (admin)\n"
+        "/setollamakey  — Atur API key Ollama (admin)\n"
+        "/setollamahost — Atur host Ollama (admin)\n"
+        "/setollamamodel — Atur nama model Ollama (admin)"
     )
     await update.message.reply_html(help_text)
 
@@ -353,3 +371,258 @@ async def setllmmodel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode="HTML",
     )
 
+
+async def setprovider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setprovider — pilih provider LLM yang aktif (admin only).
+
+    Usage:
+        /setprovider openrouter  — gunakan OpenRouter sebagai provider aktif
+        /setprovider ollama      — gunakan Ollama sebagai provider aktif
+        /setprovider status      — lihat provider yang sedang aktif
+        /setprovider clear       — hapus override, kembali ke default (openrouter)
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    # ── Cek izin admin ────────────────────────────────────────────────────────
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setprovider tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur provider LLM.")
+        return
+
+    args = context.args
+
+    # ── Tidak ada argumen → tampilkan panduan ─────────────────────────────────
+    if not args:
+        current = get_active_provider()
+        await update.message.reply_html(
+            f"✅ Provider aktif: <b>{current}</b>\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setprovider openrouter</code> — gunakan OpenRouter\n"
+            "<code>/setprovider ollama</code>      — gunakan Ollama\n"
+            "<code>/setprovider status</code>      — cek provider aktif\n"
+            "<code>/setprovider clear</code>       — kembali ke default (openrouter)",
+        )
+        return
+
+    sub = args[0].strip().lower()
+
+    # ── status ─────────────────────────────────────────────────────────────────
+    if sub == "status":
+        current = get_active_provider()
+        await update.message.reply_text(f"✅ Provider LLM aktif: {current}")
+        return
+
+    # ── clear ──────────────────────────────────────────────────────────────────
+    if sub == "clear":
+        clear_active_provider()
+        logger.info("User %s menghapus LLM provider override.", user.id)
+        await update.message.reply_text(
+            f"🗑️ Override provider dihapus. Kembali ke default ({PROVIDER_OPENROUTER})."
+        )
+        return
+
+    # ── set provider ───────────────────────────────────────────────────────────
+    if sub not in {PROVIDER_OPENROUTER, PROVIDER_OLLAMA}:
+        await update.message.reply_html(
+            f"⚠️ Provider tidak valid: <b>{sub}</b>\n"
+            f"Pilihan yang tersedia: <code>{PROVIDER_OPENROUTER}</code>, <code>{PROVIDER_OLLAMA}</code>"
+        )
+        return
+
+    set_active_provider(sub)
+    logger.info("User %s mengubah LLM provider ke %s.", user.id, sub)
+    await update.message.reply_text(
+        f"✅ Provider LLM berhasil diubah ke <b>{sub}</b>.\n"
+        "Berlaku untuk semua permintaan berikutnya tanpa perlu restart bot.",
+        parse_mode="HTML",
+    )
+
+
+async def setollamakey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setollamakey — simpan atau hapus override API key Ollama (admin only).
+
+    Usage:
+        /setollamakey <API_KEY>  — simpan key baru
+        /setollamakey clear      — hapus override, kembali ke key di .env
+        /setollamakey status     — lihat apakah override aktif
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setollamakey tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur Ollama API key.")
+        return
+
+    args = context.args
+
+    if not args:
+        current = get_ollama_key()
+        status = "✅ Override aktif" if current else "ℹ️ Tidak ada override (menggunakan .env)"
+        await update.message.reply_html(
+            f"{status}\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setollamakey &lt;API_KEY&gt;</code>  — simpan key baru\n"
+            "<code>/setollamakey clear</code>        — hapus override\n"
+            "<code>/setollamakey status</code>       — cek status override",
+        )
+        return
+
+    sub = args[0].strip()
+
+    if sub.lower() == "status":
+        current = get_ollama_key()
+        if current:
+            masked = current[:8] + "..." + current[-4:] if len(current) > 12 else "***"
+            await update.message.reply_text(f"✅ Override aktif: {masked}")
+        else:
+            await update.message.reply_text("ℹ️ Tidak ada override — menggunakan key dari .env")
+        return
+
+    if sub.lower() == "clear":
+        clear_ollama_key()
+        logger.info("User %s menghapus Ollama API key override.", user.id)
+        await update.message.reply_text("🗑️ Override Ollama API key dihapus. Kembali menggunakan key dari .env.")
+        return
+
+    new_key = sub
+    set_ollama_key(new_key)
+    logger.info("User %s memperbarui Ollama API key override.", user.id)
+
+    masked = new_key[:8] + "..." + new_key[-4:] if len(new_key) > 12 else "***"
+    try:
+        await update.message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+    await update.effective_chat.send_message(
+        f"✅ API key Ollama berhasil disimpan ({masked}).\n"
+        "Override akan digunakan untuk semua permintaan berikutnya tanpa perlu restart bot."
+    )
+
+
+async def setollamahost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setollamahost — simpan atau hapus override host Ollama (admin only).
+
+    Usage:
+        /setollamahost <URL>     — simpan host baru (misal: http://localhost:11434)
+        /setollamahost clear     — hapus override, kembali ke host di .env
+        /setollamahost status    — lihat host yang sedang aktif
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setollamahost tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur Ollama host.")
+        return
+
+    args = context.args
+
+    if not args:
+        stored = get_ollama_host()
+        if stored:
+            status_line = f"✅ Override aktif: <b>{stored}</b>"
+        else:
+            status_line = f"ℹ️ Tidak ada override (menggunakan .env: <b>{settings.ollama_host}</b>)"
+        await update.message.reply_html(
+            f"{status_line}\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setollamahost &lt;URL&gt;</code>   — simpan host baru\n"
+            "<code>/setollamahost clear</code>      — hapus override\n"
+            "<code>/setollamahost status</code>     — cek status override",
+        )
+        return
+
+    sub = args[0].strip()
+
+    if sub.lower() == "status":
+        stored = get_ollama_host()
+        if stored:
+            await update.message.reply_text(f"✅ Override aktif: {stored}")
+        else:
+            await update.message.reply_text(
+                f"ℹ️ Tidak ada override — menggunakan host dari .env: {settings.ollama_host}"
+            )
+        return
+
+    if sub.lower() == "clear":
+        clear_ollama_host()
+        logger.info("User %s menghapus Ollama host override.", user.id)
+        await update.message.reply_text(
+            f"🗑️ Override Ollama host dihapus. Kembali menggunakan host dari .env ({settings.ollama_host})."
+        )
+        return
+
+    new_host = sub
+    set_ollama_host(new_host)
+    logger.info("User %s memperbarui Ollama host ke %s.", user.id, new_host)
+    await update.message.reply_text(
+        f"✅ Host Ollama berhasil disimpan: <b>{new_host}</b>.\n"
+        "Override berlaku untuk semua permintaan berikutnya tanpa perlu restart bot.",
+        parse_mode="HTML",
+    )
+
+
+async def setollamamodel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setollamamodel — simpan atau hapus override nama model Ollama (admin only).
+
+    Usage:
+        /setollamamodel <MODEL_NAME>  — simpan nama model baru (misal: /setollamamodel llama3.2)
+        /setollamamodel clear         — hapus override, kembali ke model di .env
+        /setollamamodel status        — lihat nama model yang sedang aktif
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setollamamodel tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur model Ollama.")
+        return
+
+    args = context.args
+
+    if not args:
+        stored = get_ollama_model()
+        if stored:
+            status_line = f"✅ Override aktif: <b>{stored}</b>"
+        else:
+            status_line = f"ℹ️ Tidak ada override (menggunakan .env: <b>{settings.ollama_model}</b>)"
+        await update.message.reply_html(
+            f"{status_line}\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setollamamodel &lt;MODEL_NAME&gt;</code>  — simpan nama model baru\n"
+            "<code>/setollamamodel clear</code>           — hapus override\n"
+            "<code>/setollamamodel status</code>          — cek status override",
+        )
+        return
+
+    sub = args[0].strip()
+
+    if sub.lower() == "status":
+        stored = get_ollama_model()
+        if stored:
+            await update.message.reply_text(f"✅ Override aktif: {stored}")
+        else:
+            await update.message.reply_text(
+                f"ℹ️ Tidak ada override — menggunakan model dari .env: {settings.ollama_model}"
+            )
+        return
+
+    if sub.lower() == "clear":
+        clear_ollama_model()
+        logger.info("User %s menghapus Ollama model name override.", user.id)
+        await update.message.reply_text(
+            f"🗑️ Override model Ollama dihapus. Kembali menggunakan model dari .env ({settings.ollama_model})."
+        )
+        return
+
+    new_model = sub
+    set_ollama_model(new_model)
+    logger.info("User %s memperbarui Ollama model name override ke %s.", user.id, new_model)
+    await update.message.reply_text(
+        f"✅ Model Ollama berhasil disimpan: <b>{new_model}</b>.\n"
+        "Override berlaku untuk semua permintaan berikutnya tanpa perlu restart bot.",
+        parse_mode="HTML",
+    )
