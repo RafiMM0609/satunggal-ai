@@ -107,23 +107,29 @@ pengguna menjadi serangkaian langkah browsing yang terurut dan dapat dieksekusi.
 
 Setiap langkah HARUS berupa JSON object dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll", \
-"screenshot", "get_content", "get_links", "extract_data", "save_session", "done"]
+"screenshot", "get_content", "get_links", "extract_data", "save_session", \
+"select_option", "done"]
   "params": object parameter yang sesuai dengan action:
-    - read_url:     {"url": "..."}
-    - navigate:     {"url": "..."}
-    - click:        {"text": "..."}
-    - type:         {"selector": "...", "label": "...", "text": "..."}
-                    (selector = CSS selector jika diketahui; label = teks label/placeholder
-                     field tersebut agar dapat ditemukan secara akurat; keduanya boleh kosong
-                     tapi SANGAT DIANJURKAN untuk mengisi setidaknya salah satu agar field
-                     yang tepat dapat diidentifikasi, terutama saat mengisi lebih dari 1 field)
-    - scroll:       {"direction": "down"|"up"}
-    - screenshot:   {}
-    - get_content:  {}
-    - get_links:    {}
-    - extract_data: {"selector": "...", "attribute": "text"|"href", "limit": 50}
-    - save_session: {"url": "..."}
-    - done:         {"summary": "ringkasan hasil untuk pengguna"}
+    - read_url:       {"url": "..."}
+    - navigate:       {"url": "..."}
+    - click:          {"text": "..."}
+    - type:           {"selector": "...", "label": "...", "text": "..."}
+                      (selector = CSS selector jika diketahui; label = teks label/placeholder
+                       field tersebut agar dapat ditemukan secara akurat; keduanya boleh kosong
+                       tapi SANGAT DIANJURKAN untuk mengisi setidaknya salah satu agar field
+                       yang tepat dapat diidentifikasi, terutama saat mengisi lebih dari 1 field)
+    - scroll:         {"direction": "down"|"up"}
+    - screenshot:     {}
+    - get_content:    {}
+    - get_links:      {}
+    - extract_data:   {"selector": "...", "attribute": "text"|"href", "limit": 50}
+    - save_session:   {"url": "..."}
+    - select_option:  {"text": "...", "selector": "..."}
+                      (text = teks opsi yang ingin dipilih, contoh: "Kopi & Teh";
+                       selector = CSS selector elemen <select> opsional jika diketahui;
+                       GUNAKAN ini untuk memilih kategori, radio button, atau toggle button
+                       yang merupakan elemen kustom dalam form)
+    - done:           {"summary": "ringkasan hasil untuk pengguna"}
 
 Panduan penggunaan action:
   • Gunakan "navigate" untuk membuka URL, lalu "click" untuk berinteraksi,
@@ -146,6 +152,16 @@ Panduan pengisian form (type):
   • Untuk field PIN gunakan label: "PIN" atau label: "Kode PIN".
   • Jangan membiarkan "label" dan "selector" keduanya kosong saat ada beberapa field
     yang harus diisi; hal ini dapat menyebabkan semua input masuk ke field yang sama.
+
+Panduan pemilihan kategori dan opsi form kustom (select_option):
+  • Untuk memilih kategori produk (contoh: "Kopi & Teh"), radio button, atau opsi
+    dalam widget form kustom (bukan elemen <select> standar), SELALU gunakan action
+    "select_option" dengan parameter {"text": "<teks opsi>"}.
+  • Jangan menggunakan "click" untuk elemen kategori karena elemen tersebut mungkin
+    dirender sebagai div/button/label kustom yang memerlukan strategi pencarian
+    khusus (scroll ke dalam modal, force click, dll.).
+  • Jika "select_option" juga gagal, coba "scroll" ke bawah terlebih dahulu agar
+    elemen masuk ke viewport, kemudian ulangi "select_option".
 
 Penanganan login dan navigasi pasca-klik:
   • Setelah mengklik tombol submit login (contoh: "Masuk", "Login", "Sign In",
@@ -215,19 +231,23 @@ riwayat langkah yang sudah dilakukan, tentukan SATU langkah berikutnya yang perl
 Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll",
             "screenshot", "get_content", "get_links", "extract_data",
-            "save_session", "done"]
+            "save_session", "select_option", "done"]
   "params": parameter yang sesuai dengan action:
-    - read_url:     {"url": "..."}
-    - navigate:     {"url": "..."}
-    - click:        {"text": "..."}
-    - type:         {"selector": "...", "label": "...", "text": "..."}
-    - scroll:       {"direction": "down"|"up"}
-    - screenshot:   {}
-    - get_content:  {}
-    - get_links:    {}
-    - extract_data: {"selector": "...", "attribute": "text"|"href", "limit": 50}
-    - save_session: {"url": "..."}
-    - done:         {"summary": "ringkasan lengkap hasil untuk pengguna"}
+    - read_url:      {"url": "..."}
+    - navigate:      {"url": "..."}
+    - click:         {"text": "..."}
+    - type:          {"selector": "...", "label": "...", "text": "..."}
+    - scroll:        {"direction": "down"|"up"}
+    - screenshot:    {}
+    - get_content:   {}
+    - get_links:     {}
+    - extract_data:  {"selector": "...", "attribute": "text"|"href", "limit": 50}
+    - save_session:  {"url": "..."}
+    - select_option: {"text": "...", "selector": "..."}
+                     (text = teks opsi yang ingin dipilih, contoh: "Kopi & Teh";
+                      selector = CSS selector elemen <select> opsional;
+                      GUNAKAN untuk memilih kategori, radio button, toggle button kustom)
+    - done:          {"summary": "ringkasan lengkap hasil untuk pengguna"}
   "reasoning": penjelasan singkat mengapa langkah ini dipilih (1-2 kalimat)
 
 Panduan eksplorasi halaman dokumentasi / pencarian konten:
@@ -247,7 +267,9 @@ Panduan umum:
   • Gunakan "navigate" lalu "get_content" (bukan "read_url") saat sudah ada browser terbuka.
   • Gunakan "read_url" hanya jika ini adalah langkah pertama dan belum ada browser.
   • Setelah "click" yang menyebabkan navigasi, gunakan "get_content" untuk membaca halaman baru.
-  • Untuk form: gunakan "type" dengan "label" yang sesuai placeholder/label field.
+  • Untuk field teks form: gunakan "type" dengan "label" yang sesuai placeholder/label field.
+  • Untuk kategori, radio button, atau opsi kustom dalam form: SELALU gunakan "select_option"
+    (bukan "click") agar elemen dapat ditemukan bahkan jika berada di luar viewport modal.
 
 Gunakan action "done" dengan ringkasan komprehensif ketika:
   - Konten yang relevan sudah ditemukan dan kamu memiliki cukup informasi untuk menjawab query
@@ -617,6 +639,19 @@ class WebAutomationAgent(BaseAgent):
             log = (
                 f"[{step_num}] extract_data selector={params.get('selector', 'auto')!r} → "
                 f"{result.get('count', 0)} items"
+            )
+
+        elif action == "select_option":
+            option_text = params.get("text", "")
+            task.metadata.update({
+                "browser_action":  "select_option",
+                "option_text":     option_text,
+                "option_selector": params.get("selector", ""),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] select_option '{option_text}' → "
+                f"{result.get('message', result.get('error', '?'))}"
             )
 
         else:
