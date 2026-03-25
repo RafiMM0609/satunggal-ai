@@ -258,6 +258,20 @@ class WebAutomationAgent(BaseAgent):
                 f"Detail: {exc}"
             )
         finally:
+            # Auto-save the browser session (cookies & storage) before closing so
+            # that login state is preserved across /reset commands and future tasks.
+            final_url = _session_last_url.get(task.session_id, "")
+            if final_url:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(final_url)
+                    base_url = f"{parsed.scheme}://{parsed.netloc}"
+                    await navigator.save_current_session(base_url)
+                except Exception as exc:
+                    logger.warning(
+                        "WebAutomationAgent: failed to auto-save session for %s: %s",
+                        final_url, exc,
+                    )
             await navigator.close()
 
         return task
