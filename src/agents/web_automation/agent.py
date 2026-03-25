@@ -196,7 +196,7 @@ Penanganan perintah lanjutan (follow-up):
 Aturan:
 1. Balas HANYA dengan JSON array dari langkah-langkah tersebut – tidak ada teks lain.
 2. Selalu akhiri dengan langkah "done" yang berisi ringkasan apa yang sudah dilakukan.
-3. Maksimal 8 langkah (tidak termasuk "done").
+3. Maksimal 15 langkah (tidak termasuk "done").
 4. Gunakan bahasa yang sama dengan permintaan pengguna untuk field "summary".
 """
 
@@ -283,7 +283,7 @@ Aturan:
   3. Selalu akhiri dengan "done" yang berisi ringkasan lengkap.
 """
 
-_MAX_REACT_STEPS       = 12    # max number of tool-execution steps in the ReAct loop
+_MAX_REACT_STEPS       = 20    # max number of tool-execution steps in the ReAct loop
 _MAX_TOKENS            = 2048
 _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
 _SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser
