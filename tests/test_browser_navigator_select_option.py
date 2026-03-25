@@ -149,6 +149,58 @@ class TestActionSelectOption:
             timeout=pytest.approx(30_000, abs=1),
         )
 
+    def test_select_option_auto_detects_native_select(self) -> None:
+        """select_option succeeds via auto-detect native <select> when no selector provided."""
+        self.nav._wait_for_spa_stable = AsyncMock()
+
+        # Simulate: _select_native_auto finds a matching <select> and returns True
+        self.nav._select_native_auto = AsyncMock(return_value=True)
+
+        # Ensure ARIA roles are NOT needed (would raise if called)
+        self.page.get_by_role = MagicMock(side_effect=Exception("should not reach ARIA roles"))
+
+        task = _make_task("select_option", option_text="Option A", option_selector="")
+        result = asyncio.get_event_loop().run_until_complete(
+            self.nav._action_select_option(task)
+        )
+        assert result["success"] is True
+        assert result["option_text"] == "Option A"
+        self.nav._select_native_auto.assert_awaited_once_with("Option A")
+
+    def test_select_native_auto_returns_true_when_evaluate_succeeds(self) -> None:
+        """_select_native_auto returns True when page.evaluate returns True."""
+        nav, page = _make_navigator_with_mock_page()
+        page.evaluate = AsyncMock(return_value=True)
+
+        result = asyncio.get_event_loop().run_until_complete(
+            nav._select_native_auto("Option A")
+        )
+        assert result is True
+        # The JS passed to evaluate must scan <select> elements
+        js_code = page.evaluate.call_args[0][0]
+        assert "querySelectorAll('select')" in js_code
+        assert "HTMLSelectElement.prototype" in js_code
+
+    def test_select_native_auto_returns_false_when_evaluate_returns_false(self) -> None:
+        """_select_native_auto returns False when no matching <select> is found."""
+        nav, page = _make_navigator_with_mock_page()
+        page.evaluate = AsyncMock(return_value=False)
+
+        result = asyncio.get_event_loop().run_until_complete(
+            nav._select_native_auto("Nonexistent")
+        )
+        assert result is False
+
+    def test_select_native_auto_returns_false_on_exception(self) -> None:
+        """_select_native_auto returns False gracefully when evaluate raises."""
+        nav, page = _make_navigator_with_mock_page()
+        page.evaluate = AsyncMock(side_effect=Exception("evaluate error"))
+
+        result = asyncio.get_event_loop().run_until_complete(
+            nav._select_native_auto("Option A")
+        )
+        assert result is False
+
 
 # ── Tests for _click_by_js_text (scroll-into-view improvement) ────────────────
 

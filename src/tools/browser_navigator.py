@@ -594,7 +594,16 @@ class BrowserNavigatorTool(BaseTool):
                                     el.placeholder, el.getAttribute('aria-label'),
                                     el.name, el.id
                                 ];
-                                return attrs.some(a => a && a.toLowerCase().includes(needle));
+                                if (attrs.some(a => a && a.toLowerCase().includes(needle))) return true;
+                                // Also match via associated <label for="..."> element text
+                                if (el.id) {{
+                                    const lbl = document.querySelector('label[for="' + el.id + '"]');
+                                    if (lbl) {{
+                                        const lblText = (lbl.textContent || '').toLowerCase();
+                                        if (lblText.includes(needle)) return true;
+                                    }}
+                                }}
+                                return false;
                             }});
                             const el = candidates[0];
                             if (!el) throw new Error('No element matched label: ' + args.label);
@@ -965,6 +974,55 @@ class BrowserNavigatorTool(BaseTool):
             logger.debug("_click_by_force: failed for '%s': %s", text, exc)
             return False
 
+    async def _select_native_auto(self, option_text: str) -> bool:
+        """Scan every visible native ``<select>`` element on the page and select
+        the first ``<option>`` whose display text or value matches *option_text*.
+
+        This handles the common case where the caller did not supply an explicit
+        CSS selector for the ``<select>`` element.  Because closed ``<option>``
+        elements have zero bounding-box dimensions they are invisible to the
+        normal JS DOM walk, so a dedicated ``querySelectorAll('select')`` pass is
+        required.
+
+        Uses the ``HTMLSelectElement.prototype.value`` native setter so that
+        React / Vue controlled-component ``onChange`` listeners fire correctly.
+
+        Returns ``True`` if a match was found and selected, ``False`` otherwise.
+        """
+        if self._page is None:
+            return False
+        try:
+            selected: bool = await self._page.evaluate(
+                """(needle) => {
+                    const lower = needle.toLowerCase().trim();
+                    for (const sel of document.querySelectorAll('select')) {
+                        const style = window.getComputedStyle(sel);
+                        if (style.display === 'none' || sel.disabled) continue;
+                        // Find the first option whose visible text or value matches
+                        const opt = [...sel.options].find(o => {
+                            const optText  = (o.text  || '').toLowerCase().trim();
+                            const optValue = (o.value || '').toLowerCase().trim();
+                            return optText.includes(lower) || optValue.includes(lower);
+                        });
+                        if (!opt) continue;
+                        // Use the native prototype setter to trigger framework listeners
+                        const setter = Object.getOwnPropertyDescriptor(
+                            window.HTMLSelectElement.prototype, 'value'
+                        ).set;
+                        setter.call(sel, opt.value);
+                        sel.dispatchEvent(new Event('input',  {bubbles: true, cancelable: true}));
+                        sel.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+                        return true;
+                    }
+                    return false;
+                }""",
+                option_text,
+            )
+            return bool(selected)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("_select_native_auto: failed for '%s': %s", option_text, exc)
+            return False
+
     async def _action_select_option(self, task: "AgentTask") -> dict[str, Any]:
         """Select a custom UI option (category button, radio-group item, etc.).
 
@@ -1018,6 +1076,12 @@ class BrowserNavigatorTool(BaseTool):
                     selected = True
                 except Exception:  # noqa: BLE001
                     pass
+
+        # ── 1b. Auto-detect native <select> without explicit CSS selector ────────
+        if not selected:
+            selected = await self._select_native_auto(option_text)
+            if selected:
+                logger.debug("select_option: selected %r via auto-detected native <select>", option_text)
 
         # ── 2. ARIA roles for custom option widgets ───────────────────────────
         if not selected:
