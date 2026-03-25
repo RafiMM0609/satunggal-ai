@@ -58,6 +58,7 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        json_mode: bool = False,
     ) -> str:
         payload: dict = {
             "model":      model      or effective_openrouter_model(self._settings.openrouter_model),
@@ -68,6 +69,8 @@ class LLMClient:
             payload["temperature"] = temperature
         if top_p is not None:
             payload["top_p"] = top_p
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         logger.debug("LLMClient[openrouter].chat → model=%s, messages_count=%d", payload["model"], len(messages))
         try:
             response = await self._http.post(
@@ -129,6 +132,7 @@ class LLMClient:
         model: str | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        json_mode: bool = False,
         **_: object,
     ) -> str:
         host = effective_ollama_host(self._settings.ollama_host)
@@ -152,6 +156,7 @@ class LLMClient:
                 model=resolved_model,
                 messages=messages,
                 stream=False,
+                **({"format": "json"} if json_mode else {}),
                 options=options or None,
             )
         except Exception as exc:
@@ -177,6 +182,7 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        json_mode: bool = False,
     ) -> str:
         """
         Send a messages list and return the assistant's text reply.
@@ -189,6 +195,7 @@ class LLMClient:
             max_tokens:  Override the default max_tokens (OpenRouter only).
             temperature: Sampling temperature (lower = more deterministic).
             top_p:       Nucleus sampling threshold.
+            json_mode:   When True, instructs the LLM to return valid JSON.
         """
         provider = self._active_provider()
         if provider == PROVIDER_OLLAMA:
@@ -197,6 +204,7 @@ class LLMClient:
                 model=model,
                 temperature=temperature,
                 top_p=top_p,
+                json_mode=json_mode,
             )
         # Default: openrouter
         return await self._chat_openrouter(
@@ -205,6 +213,7 @@ class LLMClient:
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
+            json_mode=json_mode,
         )
 
     async def complete(
@@ -216,6 +225,7 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        json_mode: bool = False,
     ) -> str:
         """
         Send a system prompt + messages list and return the assistant's text reply.
@@ -230,6 +240,7 @@ class LLMClient:
             max_tokens:    Override the default max_tokens (OpenRouter only).
             temperature:   Sampling temperature (lower = more deterministic).
             top_p:         Nucleus sampling threshold.
+            json_mode:     When True, instructs the LLM to return valid JSON.
         """
         full_messages = [{"role": "system", "content": system_prompt}, *messages]
         return await self.chat(
@@ -238,6 +249,7 @@ class LLMClient:
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
+            json_mode=json_mode,
         )
 
     async def aclose(self) -> None:

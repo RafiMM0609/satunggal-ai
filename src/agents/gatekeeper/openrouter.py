@@ -1,7 +1,7 @@
 """
 LLM client for the GatekeeperAgent.
 
-Sends user text to OpenRouter and parses the intent JSON response.
+Sends user text to the active LLM provider and parses the intent JSON response.
 """
 
 from __future__ import annotations
@@ -10,11 +10,15 @@ import json
 import logging
 from dataclasses import dataclass
 
-import httpx
-
 from config.settings import Settings
 from src.agents.gatekeeper.schemas import IntentCategory
-from src.memory.key_store import effective_openrouter_auth_header
+from src.agents.llm_client import LLMClient
+from src.memory.key_store import (
+    PROVIDER_OLLAMA,
+    effective_ollama_model,
+    effective_openrouter_model,
+    get_active_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -186,24 +190,18 @@ class LLMIntentResponse:
     clarification_question: str | None      = None
 
 
-class OpenRouterClient:
-    """Thin async HTTP wrapper around the OpenRouter chat-completions API."""
+class GatekeeperLLMClient:
+    """Async LLM client for intent classification, routed through the active provider."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._http = httpx.AsyncClient(
-            base_url=settings.openrouter_base_url,
-            timeout=settings.openrouter_timeout,
-            headers=settings.openrouter_headers,
-        )
+        self._llm = LLMClient(settings)
 
     async def classify_intent(
         self,
         user_text: str,
         history: "list[dict] | None" = None,
     ) -> LLMIntentResponse:
-        auth = effective_openrouter_auth_header(self._settings.openrouter_api_key)
-
         # Inject recent conversation history into system prompt so the LLM can
         # correctly classify follow-up commands (e.g. "berikan screenshot" after
         # a previous web_automation turn).
@@ -223,26 +221,26 @@ class OpenRouterClient:
         else:
             system_content = _SYSTEM_PROMPT
 
-        payload = {
-            "model": self._settings.openrouter_model,
-            "max_tokens": 128,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user",   "content": user_text},
-            ],
-        }
-        logger.debug("OpenRouter classify → model=%s", self._settings.openrouter_model)
-        response = await self._http.post(
-            "/chat/completions", json=payload, headers={"Authorization": auth}
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user",   "content": user_text},
+        ]
+        provider = get_active_provider()
+        if provider == PROVIDER_OLLAMA:
+            model_used = effective_ollama_model(self._settings.ollama_model)
+        else:
+            model_used = effective_openrouter_model(self._settings.openrouter_model)
+        logger.debug(
+            "GatekeeperLLMClient.classify_intent → provider=%s model=%s",
+            provider, model_used,
         )
-        response.raise_for_status()
-        return self._parse(response.json())
+        raw = await self._llm.chat(messages, max_tokens=128, json_mode=True)
+        return self._parse(raw, model_used=model_used)
 
     async def aclose(self) -> None:
-        await self._http.aclose()
+        await self._llm.aclose()
 
-    async def __aenter__(self) -> "OpenRouterClient":
+    async def __aenter__(self) -> "GatekeeperLLMClient":
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -250,22 +248,17 @@ class OpenRouterClient:
 
     # ── private ───────────────────────────────────────────────────────────────
 
-    def _parse(self, data: dict) -> LLMIntentResponse:
-        model_used = data.get("model", self._settings.openrouter_model)
-        content = data["choices"][0]["message"].get("content")
-
-        if content is None:
-            logger.warning("LLM returned null content: %r", data)
+    def _parse(self, raw_content: str, *, model_used: str = "") -> LLMIntentResponse:
+        if not raw_content:
+            logger.warning("LLM returned empty content for intent classification")
             return LLMIntentResponse(
                 intent=IntentCategory.UNKNOWN,
                 confidence=0.0,
                 model_used=model_used,
             )
 
-        raw_content = content.strip()
-
         try:
-            parsed = json.loads(raw_content)
+            parsed = json.loads(raw_content.strip())
             intent_str = parsed.get("intent", "unknown")
             confidence = float(parsed.get("confidence", 0.5))
             intent = IntentCategory(intent_str)
@@ -289,3 +282,8 @@ class OpenRouterClient:
             needs_clarification=needs_clarification,
             clarification_question=clarification_question,
         )
+
+
+# Keep backward-compatible alias so any code still importing OpenRouterClient
+# continues to work without modification.
+OpenRouterClient = GatekeeperLLMClient
