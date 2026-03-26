@@ -717,6 +717,7 @@ class DocAgent(BaseAgent):
         output_path = os.path.join(out_dir, f"{name}_edited_{ts}{ext}")
 
         # Terapkan semua ops sekaligus via DocxEditorTool
+        task.metadata["docx_path"]          = docx_path   # required by DocxEditorTool
         task.metadata["docx_edits"]         = all_ops
         task.metadata["output_docx_path"]   = output_path
 
