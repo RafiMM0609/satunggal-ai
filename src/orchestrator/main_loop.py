@@ -655,7 +655,7 @@ _EDIT_KEYWORDS = frozenset({
 })
 
 
-def _is_edit_intent(user_caption: str) -> bool:
+def is_edit_intent(user_caption: str) -> bool:
     """
     Deteksi apakah caption mengandung instruksi untuk mengedit dokumen.
 
@@ -722,7 +722,7 @@ async def process_docx(
     )
 
     # ── Deteksi mode: edit vs analisis ────────────────────────────────────
-    edit_mode = _is_edit_intent(user_caption)
+    edit_mode = is_edit_intent(user_caption)
     logger.info(
         "process_docx: session=%s file=%r edit_mode=%s caption=%r",
         session_id, original_filename, edit_mode, user_caption[:80],

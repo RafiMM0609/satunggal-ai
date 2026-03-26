@@ -14,7 +14,7 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from src.orchestrator.main_loop import process_message, process_pdf, process_docx
+from src.orchestrator.main_loop import process_message, process_pdf, process_docx, is_edit_intent
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 _MAX_MSG_LEN = 4096
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 20 MB upload limit for all file types
 _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
+
+# ── Pending doc-edit session store ────────────────────────────────────────────
+# Maps user_id (str) → {"docx_path": str, "doc_title": str, "original_filename": str}
+# Populated after a successful doc edit; cleared when the user confirms they
+# are done and the final file is sent.
+_pending_edit_sessions: dict[str, dict] = {}
 
 
 def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
@@ -66,12 +72,135 @@ async def _safe_reply(message, text: str) -> None:
                 logger.error("Failed to send chunk even as plain text: %s", exc2)
 
 
+_FOLLOW_UP_QUESTION = (
+    "✏️ Ada bagian lain yang perlu diedit lagi?\n\n"
+    "Jika **ya**, langsung ketik instruksi editnya.\n"
+    "Jika **tidak**, ketik *tidak* atau *selesai* untuk menerima file."
+)
+
+
+async def _send_edited_docx(message, context, user, user_id_str: str, session: dict) -> None:
+    """Kirim file .docx hasil edit ke user dan hapus sesi pending."""
+    docx_path = session["docx_path"]
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
+        with open(docx_path, "rb") as f:
+            await message.reply_document(
+                document=f,
+                filename=os.path.basename(docx_path),
+                caption="📝 File Word yang sudah diedit siap diunduh.",
+                quote=True,
+            )
+        logger.info("Sent edited DOCX to user=%s path=%s", user.id, docx_path)
+        _pending_edit_sessions.pop(user_id_str, None)
+    except Exception as exc:
+        logger.exception("Failed to send edited DOCX to user=%s: %s", user.id, exc)
+        _pending_edit_sessions.pop(user_id_str, None)
+        await message.reply_text(
+            "⚠️ Gagal mengirim file hasil edit. Coba lagi nanti.", quote=True
+        )
+    finally:
+        try:
+            os.remove(docx_path)
+        except OSError as exc:
+            logger.debug("Could not remove edited DOCX %s: %s", docx_path, exc)
+
+
+async def _handle_pending_edit(
+    message, context, user, user_id_str: str, session: dict, edit_instruction: str
+) -> None:
+    """Terapkan instruksi edit tambahan pada file hasil edit sebelumnya, lalu tanya lagi."""
+    old_docx_path = session["docx_path"]
+    original_filename = session["original_filename"]
+
+    progress_msg = await message.reply_text(
+        telegramify_markdown.markdownify("⏳ *Menerapkan edit tambahan...*"),
+        parse_mode="MarkdownV2",
+        quote=True,
+    )
+
+    async def _progress_callback(rendered_text: str) -> None:
+        try:
+            formatted = telegramify_markdown.markdownify(rendered_text)
+            await context.bot.edit_message_text(
+                chat_id=progress_msg.chat_id,
+                message_id=progress_msg.message_id,
+                text=formatted,
+                parse_mode="MarkdownV2",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Pending edit progress update skipped: %s", exc)
+
+    try:
+        task = await process_docx(
+            session_id=user_id_str,
+            docx_path=old_docx_path,
+            original_filename=original_filename,
+            user_caption=edit_instruction,
+            status_callback=_progress_callback,
+        )
+    except Exception as exc:
+        logger.exception("Re-edit failed for user=%s: %s", user.id, exc)
+        task = None
+
+    try:
+        await context.bot.delete_message(
+            chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    if task is None or task.status.value == "failed":
+        error_msg = (task.result if task else None) or "❌ Gagal mengedit dokumen. Coba lagi."
+        await _safe_reply(message, error_msg)
+        return
+
+    reply = task.result or "✅ Edit tambahan berhasil diterapkan."
+    await _safe_reply(message, reply)
+
+    new_docx_path = task.metadata.get("document_path")
+    if new_docx_path and new_docx_path.lower().endswith(".docx"):
+        # Hapus file lama jika sudah digantikan file baru
+        if old_docx_path != new_docx_path:
+            try:
+                os.remove(old_docx_path)
+            except OSError as exc:
+                logger.debug("Could not remove old DOCX %s: %s", old_docx_path, exc)
+        # Perbarui sesi dan tanya lagi
+        _pending_edit_sessions[user_id_str] = {
+            "docx_path": new_docx_path,
+            "doc_title": task.metadata.get("doc_title", original_filename),
+            "original_filename": original_filename,
+        }
+        await _safe_reply(message, _FOLLOW_UP_QUESTION)
+    else:
+        # Tidak ada file baru – bersihkan sesi
+        _pending_edit_sessions.pop(user_id_str, None)
+        try:
+            os.remove(old_docx_path)
+        except OSError as exc:
+            logger.debug("Could not remove DOCX %s: %s", old_docx_path, exc)
+
+
 async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route a text message through the agent orchestrator and reply."""
     message = update.message
     user    = update.effective_user
 
     logger.info("Text from user=%s: %.100s", user.id, message.text)
+
+    # ── Cek sesi edit dokumen yang sedang menunggu konfirmasi ─────────────
+    user_id_str = str(user.id)
+    pending = _pending_edit_sessions.get(user_id_str)
+    if pending:
+        user_text = message.text or ""
+        if is_edit_intent(user_text):
+            # User memberikan instruksi edit tambahan
+            await _handle_pending_edit(message, context, user, user_id_str, pending, user_text)
+        else:
+            # User selesai mengedit – kirim file
+            await _send_edited_docx(message, context, user, user_id_str, pending)
+        return
 
     # ── Send initial progress message ──────────────────────────────────────
     # This message will be edited live at each pipeline stage so the user
@@ -513,35 +642,19 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
     reply = task.result or "✅ Analisis dokumen selesai."
     await _safe_reply(message, reply)
 
-    # ── Kirim file .docx hasil edit jika ada ──────────────────────────────
+    # ── Tanya apakah ada edit tambahan sebelum mengirim file ──────────────
     edited_docx_path = task.metadata.get("document_path")
     if edited_docx_path and edited_docx_path.lower().endswith(".docx"):
-        try:
-            await context.bot.send_chat_action(
-                chat_id=message.chat_id, action="upload_document"
-            )
-            with open(edited_docx_path, "rb") as f:
-                await message.reply_document(
-                    document=f,
-                    filename=os.path.basename(edited_docx_path),
-                    caption="📝 File Word yang sudah diedit siap diunduh.",
-                    quote=True,
-                )
-            logger.info(
-                "Sent edited DOCX to user=%s path=%s", user.id, edited_docx_path
-            )
-        except Exception as exc:
-            logger.exception(
-                "Failed to send edited DOCX to user=%s: %s", user.id, exc
-            )
-            await message.reply_text(
-                "⚠️ Gagal mengirim file hasil edit. Coba lagi nanti.", quote=True
-            )
-        finally:
-            try:
-                os.remove(edited_docx_path)
-            except OSError:
-                pass
+        # Simpan sesi dan tanya dulu; file baru dikirim setelah user konfirmasi
+        _pending_edit_sessions[str(user.id)] = {
+            "docx_path": edited_docx_path,
+            "doc_title": task.metadata.get("doc_title", original_filename),
+            "original_filename": original_filename,
+        }
+        await _safe_reply(message, _FOLLOW_UP_QUESTION)
+        logger.info(
+            "Pending edit session created for user=%s path=%s", user.id, edited_docx_path
+        )
 
 
 async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
