@@ -114,46 +114,26 @@ Tugas: Jawab pertanyaan pengguna berdasarkan konten bab yang relevan dari dokume
 """
 
 _EDITOR_SYSTEM_PROMPT = """\
-Kamu adalah Document Editor AI yang mengedit dokumen Word (.docx) dengan presisi.
+Hasilkan operasi edit .docx sebagai JSON. JANGAN tambahkan penjelasan, teks, atau markdown apapun di luar JSON.
 
-Kamu diberikan:
-1. Daftar paragraf bernomor dari dokumen (format: [indeks] STYLE: teks)
-2. Instruksi edit dari pengguna (mungkin disertai konten draf yang sudah direvisi)
+Input: daftar paragraf (format: [index] STYLE: teks) + instruksi edit user.
 
-Tugasmu: Analisis instruksi dan hasilkan daftar operasi edit dalam format JSON.
+Operasi yang tersedia (paragraph_index adalah 0-based; null = seluruh dokumen):
+{"op":"replace_text","find":"...","replace":"...","paragraph_index":<int|null>}
+{"op":"add_paragraph","text":"...","after_paragraph_index":<int>,"style_from_index":<int|null>}
+{"op":"delete_paragraph","paragraph_index":<int>}
+{"op":"replace_paragraph","paragraph_index":<int>,"new_text":"..."}
 
-Format operasi yang tersedia:
+Panduan:
+- Gunakan replace_text untuk perubahan kecil (lebih aman untuk format bold/italic)
+- Gunakan replace_paragraph jika konten paragraf berubah seluruhnya
+- Jika instruksi tidak dapat dipetakan ke operasi konkret, kembalikan {"edits":[]}
+- Field "preview" wajib diisi: teks singkat (1-3 kalimat) yang menunjukkan
+  seperti apa hasil edit pada bagian yang berubah, agar user bisa mereview
+  sebelum menerapkan ke file. Jika edits kosong, jelaskan kenapa.
 
-1. Ganti teks (run-level, tanpa merusak format bold/italic):
-   {"op": "replace_text", "find": "teks lama", "replace": "teks baru", "paragraph_index": <int|null>}
-   → paragraph_index=null berarti cari di seluruh dokumen
-
-2. Tambah paragraf baru (mewarisi style/numbering dari referensi):
-   {"op": "add_paragraph", "text": "teks paragraf baru", "after_paragraph_index": <int>, "style_from_index": <int|null>}
-
-3. Hapus paragraf:
-   {"op": "delete_paragraph", "paragraph_index": <int>}
-
-4. Ganti seluruh konten paragraf (mempertahankan pPr/numbering):
-   {"op": "replace_paragraph", "paragraph_index": <int>, "new_text": "konten baru"}
-
-CATATAN PENTING:
-- paragraph_index adalah indeks 0-based (dimulai dari 0)
-- Gunakan "replace_text" untuk perubahan kecil (lebih aman untuk format)
-- Gunakan "replace_paragraph" hanya jika konten paragraf berubah total
-- Jika instruksi tidak jelas, kembalikan edits: [] dan jelaskan di summary
-
-Output HARUS berupa JSON valid di dalam blok ```json ... ```.
-Format output wajib:
-```json
-{
-  "summary": "Ringkasan perubahan dalam Bahasa Indonesia",
-  "edits": [
-    <operasi edit 1>,
-    ...
-  ]
-}
-```
+Output HANYA JSON berikut, tanpa teks lain:
+{"edits":[<op1>,...],"preview":"<deskripsi singkat hasil edit>"}
 """
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -586,14 +566,21 @@ class DocAgent(BaseAgent):
         ]
 
         try:
-            llm_output = await self._llm.chat(messages, max_tokens=2048, temperature=0.1)
+            llm_output = await self._llm.chat(
+                messages, max_tokens=1024, temperature=0.1, json_mode=True
+            )
         except Exception as exc:
             logger.exception("DocAgent: editor LLM failed session=%s: %s", session_id, exc)
             task.result = "❌ Gagal menganalisis instruksi edit. Silakan coba lagi."
             task.mark_failed(str(exc))
             return task
 
-        parsed = _extract_json_from_llm(llm_output)
+        # json_mode → LLM output sudah raw JSON; coba parse langsung dulu
+        parsed: dict | None = None
+        try:
+            parsed = json.loads(llm_output)
+        except (json.JSONDecodeError, TypeError):
+            parsed = _extract_json_from_llm(llm_output)
 
         if parsed is None or not parsed.get("edits"):
             # Tidak ada operasi – jawab Q&A + informasikan ke user
@@ -609,7 +596,20 @@ class DocAgent(BaseAgent):
             return qa_task
 
         edit_ops: list[dict] = parsed.get("edits", [])
-        edit_summary: str    = parsed.get("summary", "")
+        edit_preview: str    = parsed.get("preview", "").strip()
+
+        # Derive ringkasan jenis operasi dari ops (tanpa token LLM tambahan)
+        _OP_LABEL = {
+            "replace_text":      "ganti teks",
+            "replace_paragraph": "ganti paragraf",
+            "add_paragraph":     "tambah paragraf",
+            "delete_paragraph":  "hapus paragraf",
+        }
+        op_counts: dict[str, int] = {}
+        for op in edit_ops:
+            label = _OP_LABEL.get(op.get("op", ""), op.get("op", "?"))
+            op_counts[label] = op_counts.get(label, 0) + 1
+        edit_summary = ", ".join(f"{n} {l}" for l, n in op_counts.items()) or "tidak ada perubahan konkret"
 
         # Step 3: Simpan ke antrian
         await _notify(status_cb, _build_step_edit_msg(3, total_steps, doc_title))
@@ -626,28 +626,15 @@ class DocAgent(BaseAgent):
             edit_order, session_id, len(edit_ops), n_pending,
         )
 
-        # Bangun respons: ringkasan edit + draf konten (via Q&A)
-        # Jalankan Q&A untuk memberikan draf revisi yang bisa dilihat user
-        qa_answer = ""
-        try:
-            qa_task_copy = AgentTask(session_id=session_id, user_input=user_instruction)
-            qa_task_copy.metadata = dict(task.metadata)
-            qa_result = await self._answer_question(qa_task_copy, None)
-            qa_answer = qa_result.result or ""
-        except Exception as exc:
-            logger.debug("DocAgent: QA during edit failed: %s", exc)
-
         confirmation = (
             f"✅ *Edit #{edit_order} dicatat!*\n\n"
-            f"**Ringkasan perubahan:** {edit_summary}\n"
-            f"**Total edit tersimpan:** {n_pending} instruksi\n\n"
+            f"**Operasi:** {edit_summary}\n"
+            f"**Total edit tersimpan:** {n_pending} instruksi\n"
         )
-
-        if qa_answer:
-            confirmation += f"---\n\n{qa_answer}\n\n---\n\n"
-
+        if edit_preview:
+            confirmation += f"\n**Preview hasil edit:**\n_{edit_preview}_\n"
         confirmation += (
-            f"📌 Teruskan percakapan atau berikan instruksi edit lainnya.\n"
+            f"\n📌 Teruskan percakapan atau berikan instruksi edit lainnya.\n"
             f"Ketik _\"berikan file\"_ untuk menerapkan semua {n_pending} edit ke dokumen."
         )
 
