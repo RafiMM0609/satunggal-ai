@@ -15,7 +15,7 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from src.orchestrator.main_loop import process_message, process_pdf, process_docx, is_edit_intent
+from src.orchestrator.main_loop import process_message, process_pdf, process_docx, process_doc_session_message, is_edit_intent
 
 logger = logging.getLogger(__name__)
 
@@ -213,10 +213,11 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _send_edited_docx(message, context, user, user_id_str, pending_edit)
         return
 
-    # ── 2. Cek sesi analisis dokumen ──────────────────────────────────────
-    # DocAgent (via process_message) menangani semua interaksi Q&A, edit, dan
-    # "berikan file" secara internal – tidak perlu routing manual di sini.
-    # Kita hanya perlu memastikan session tetap aktif di _pending_doc_sessions.
+    # ── 2. Cek sesi analisis dokumen aktif ─────────────────────────────────
+    # Jika sesi dokumen aktif, bypass gatekeeper dan langsung ke DocAgent.
+    # Ini mencegah gatekeeper salah mengklasifikasikan instruksi edit sebagai
+    # DOCUMENT_CREATION → technical_writer → document_generator (WeasyPrint).
+    has_doc_session = bool(_pending_doc_sessions.get(user_id_str))
 
     # ── Send initial progress message ──────────────────────────────────────
     progress_msg = await message.reply_text(
@@ -239,11 +240,19 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
 
-    task = await process_message(
-        session_id=str(user.id),
-        user_text=message.text,
-        status_callback=_progress_callback,
-    )
+    if has_doc_session:
+        # Route langsung ke DocAgent tanpa melalui gatekeeper
+        task = await process_doc_session_message(
+            session_id=str(user.id),
+            user_text=message.text,
+            status_callback=_progress_callback,
+        )
+    else:
+        task = await process_message(
+            session_id=str(user.id),
+            user_text=message.text,
+            status_callback=_progress_callback,
+        )
 
     try:
         await context.bot.delete_message(

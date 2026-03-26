@@ -673,6 +673,52 @@ def is_edit_intent(user_caption: str) -> bool:
     )
 
 
+async def process_doc_session_message(
+    session_id: str,
+    user_text: str,
+    status_callback: "StatusCallback" = None,
+) -> "AgentTask":
+    """
+    Pipeline khusus untuk sesi dokumen aktif.
+
+    Membypass gatekeeper dan langsung memanggil DocAgent, sehingga
+    instruksi edit / pertanyaan tidak bisa salah diklasifikasikan sebagai
+    DOCUMENT_CREATION (→ technical_writer → document_generator → WeasyPrint
+    error) oleh gatekeeper.
+    """
+    from src.memory.state import AgentTask
+
+    history, agents, *_ = _get_pipeline()
+
+    history.add(session_id, "user", user_text)
+
+    task = AgentTask(session_id=session_id, user_input=user_text)
+    task.mark_routed("doc_audit")
+    task.mark_processing("doc_agent")
+
+    doc_agent = agents.get("doc_agent")
+    if doc_agent is None:
+        task.mark_failed("doc_agent tidak terdaftar.")
+        task.result = "❌ Doc agent tidak tersedia."
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    task.metadata["status_callback"] = status_callback
+
+    try:
+        task = await doc_agent.run(task)
+    except Exception as exc:
+        logger.exception("process_doc_session_message: doc_agent.run failed session=%s: %s", session_id, exc)
+        task.mark_failed(str(exc))
+        task.result = "❌ Terjadi kesalahan saat memproses. Silakan coba lagi."
+
+    if not task.result:
+        task.result = "Maaf, tidak ada respons yang dihasilkan."
+
+    history.add(session_id, "assistant", task.result)
+    return task
+
+
 async def process_docx(
     session_id: str,
     docx_path: str,
