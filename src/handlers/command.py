@@ -35,6 +35,7 @@ from src.memory.key_store import (
     set_openrouter_max_tokens,
     set_openrouter_model,
 )
+from src.handlers.message import clear_doc_session
 from src.orchestrator.main_loop import clear_session
 
 _DEPLOY_SCRIPT = Path(__file__).resolve().parents[2] / "helper_deploy.sh"
@@ -91,6 +92,9 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     logger.info("User %s mereset sesi.", user.id)
     await clear_session(str(user.id))
+    # Also wipe in-memory doc session state so the next message is routed
+    # normally instead of being sent directly to DocAgent.
+    clear_doc_session(str(user.id))
     await update.message.reply_text(
         "🔄 Riwayat percakapan telah dihapus. Kita mulai dari awal!",
         quote=True,

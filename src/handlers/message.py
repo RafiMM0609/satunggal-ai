@@ -43,6 +43,16 @@ _pending_doc_sessions: dict[str, dict] = {}
 _pending_edit_sessions: dict[str, dict] = {}
 
 
+def clear_doc_session(session_id: str) -> None:
+    """Remove all in-memory doc session state for *session_id*.
+
+    Called by the /reset command so that subsequent messages are no longer
+    routed directly to DocAgent after a session reset.
+    """
+    _pending_doc_sessions.pop(session_id, None)
+    _pending_edit_sessions.pop(session_id, None)
+
+
 def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
     """Split *text* into chunks that each fit within Telegram's message length limit.
 
