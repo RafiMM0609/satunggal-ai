@@ -46,6 +46,51 @@ _pending_doc_sessions: dict[str, dict] = {}
 # are done and the final file is sent.
 _pending_edit_sessions: dict[str, dict] = {}
 
+# ── Pending chat-edit queue ────────────────────────────────────────────────────
+# Maps user_id (str) → list of edit instruction strings collected during a
+# DocAuditorAgent Q&A session.  Accumulated while the user chats, then applied
+# all at once when they say "berikan saya file yang sudah diedit".
+_pending_chat_edits: dict[str, list[str]] = {}
+
+# ── Keywords that trigger "apply all accumulated edits and send file" ──────────
+_APPLY_EDITS_KEYWORDS = frozenset({
+    # Indonesian send/give
+    "berikan", "kirim", "kasih", "beri", "send",
+    # Indonesian apply
+    "terapkan", "apply",
+})
+_APPLY_EDITS_FILE_WORDS = frozenset({"file", "dokumen", "filenya", "dokumennya"})
+_APPLY_EDITS_EDIT_WORDS = frozenset({
+    "edit", "diedit", "editnya", "perubahan", "revisi", "semua",
+    "sudah", "hasil", "yang",
+})
+
+
+def _is_apply_edits_trigger(text: str) -> bool:
+    """Deteksi apakah user meminta file hasil penerapan semua instruksi edit dari chat.
+
+    Mengembalikan True untuk frasa seperti:
+    - "berikan saya file yang sudah diedit"
+    - "kirim file editnya"
+    - "terapkan semua edit"
+    - "apply semua perubahan"
+    """
+    if not text or not text.strip():
+        return False
+    words = {w.strip(",.!?;:\"'-()/\\") for w in text.lower().split()}
+
+    # Pattern A: terapkan/apply + (edit|perubahan|revisi|semua)
+    if {"terapkan", "apply"} & words:
+        if words & (_APPLY_EDITS_EDIT_WORDS | _APPLY_EDITS_FILE_WORDS):
+            return True
+
+    # Pattern B: berikan/kirim/kasih/beri + file/dokumen + edit/diedit/...
+    if {"berikan", "kirim", "kasih", "beri", "send"} & words:
+        if words & _APPLY_EDITS_FILE_WORDS and words & _APPLY_EDITS_EDIT_WORDS:
+            return True
+
+    return False
+
 
 def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
     """Split *text* into chunks that each fit within Telegram's message length limit.
@@ -326,6 +371,125 @@ async def _handle_audited_doc_edit(
         )
 
 
+async def _apply_all_chat_edits(
+    message,
+    context,
+    user,
+    user_id_str: str,
+    session: dict,
+    edits: list[str],
+) -> None:
+    """Terapkan semua instruksi edit yang dikumpulkan dari sesi Q&A ke dokumen.
+
+    Setiap instruksi diproses secara berurutan melalui DocEditorAgent.  File
+    hasil edit terakhir dikirim ke user dan semua sesi yang terkait dibersihkan.
+    """
+    n_edits = len(edits)
+    original_filename = session.get("original_filename", "document.docx")
+    original_path = session["docx_path"]   # Jaga referensi file asli agar tidak terhapus
+    current_path = original_path
+
+    progress_msg = await message.reply_text(
+        telegramify_markdown.markdownify(
+            f"⏳ *Menerapkan {n_edits} instruksi edit dari percakapan...*"
+        ),
+        parse_mode="MarkdownV2",
+        quote=True,
+    )
+
+    applied = 0
+    for i, instruction in enumerate(edits, 1):
+        async def _cb(rendered_text: str, edit_number: int = i) -> None:  # noqa: ANN001
+            try:
+                status = (
+                    f"⏳ *Edit {edit_number}/{n_edits}:* Menerapkan...\n{rendered_text}"
+                )
+                formatted = telegramify_markdown.markdownify(status)
+                await context.bot.edit_message_text(
+                    chat_id=progress_msg.chat_id,
+                    message_id=progress_msg.message_id,
+                    text=formatted,
+                    parse_mode="MarkdownV2",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Chat-edit progress update skipped: %s", exc)
+
+        try:
+            task = await process_docx(
+                session_id=user_id_str,
+                docx_path=current_path,
+                original_filename=original_filename,
+                user_caption=instruction,
+                status_callback=_cb,
+            )
+        except Exception as exc:
+            logger.exception(
+                "apply_all_chat_edits edit %d/%d failed for user=%s: %s",
+                i, n_edits, user.id, exc,
+            )
+            task = None
+
+        if task is not None and task.status.value != "failed":
+            new_path = task.metadata.get("document_path")
+            if new_path and new_path.lower().endswith(".docx"):
+                # Hapus file lama (bukan file asli sesi pertama)
+                if current_path != original_path and current_path != new_path:
+                    try:
+                        os.remove(current_path)
+                    except OSError as exc:
+                        logger.debug("Could not remove intermediate DOCX %s: %s", current_path, exc)
+                current_path = new_path
+                applied += 1
+
+    try:
+        await context.bot.delete_message(
+            chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Bersihkan semua sesi terkait
+    _pending_doc_sessions.pop(user_id_str, None)
+    _pending_chat_edits.pop(user_id_str, None)
+
+    if applied == 0:
+        await _safe_reply(
+            message,
+            "❌ Tidak ada instruksi edit yang berhasil diterapkan. Coba kirim ulang instruksinya.",
+        )
+        return
+
+    await _safe_reply(
+        message,
+        f"✅ *{applied} dari {n_edits} instruksi edit berhasil diterapkan.*\nFile siap dikirim…",
+    )
+
+    # Kirim file langsung (tanpa menyimpan ke _pending_edit_sessions)
+    try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
+        with open(current_path, "rb") as f:
+            await message.reply_document(
+                document=f,
+                filename=os.path.basename(current_path),
+                caption="📝 File Word dengan semua edit dari percakapan siap diunduh.",
+                quote=True,
+            )
+        logger.info(
+            "Sent all-chat-edits DOCX to user=%s path=%s applied=%d/%d",
+            user.id, current_path, applied, n_edits,
+        )
+    except Exception as exc:
+        logger.exception("Failed to send all-chat-edits DOCX to user=%s: %s", user.id, exc)
+        await message.reply_text(
+            "⚠️ Gagal mengirim file hasil edit. Coba lagi nanti.", quote=True
+        )
+    finally:
+        try:
+            os.remove(current_path)
+        except OSError as exc:
+            logger.debug("Could not remove all-chat-edits DOCX %s: %s", current_path, exc)
+
+
 async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route a text message through the agent orchestrator and reply."""
     message = update.message
@@ -343,16 +507,34 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # User memberikan instruksi edit tambahan
             await _handle_pending_edit(message, context, user, user_id_str, pending_edit, user_text)
         else:
-            # User selesai mengedit – kirim file
+            # User selesai mengedit – kirim file (termasuk "berikan file yang sudah diedit")
             await _send_edited_docx(message, context, user, user_id_str, pending_edit)
         return
 
     # ── 2. Cek sesi analisis dokumen – user bisa minta edit atau tanya-jawab
     pending_doc = _pending_doc_sessions.get(user_id_str)
-    if pending_doc and is_edit_intent(user_text):
-        # User meminta edit pada dokumen yang sudah dianalisis
-        await _handle_audited_doc_edit(message, context, user, user_id_str, pending_doc, user_text)
-        return
+    queued_edit_this_turn = False  # Apakah instruksi edit baru saja dikumpulkan
+    if pending_doc:
+        if _is_apply_edits_trigger(user_text):
+            # User minta semua instruksi edit dari percakapan diterapkan sekaligus
+            chat_edits = _pending_chat_edits.get(user_id_str, [])
+            if chat_edits:
+                await _apply_all_chat_edits(
+                    message, context, user, user_id_str, pending_doc, chat_edits
+                )
+            else:
+                await _safe_reply(
+                    message,
+                    "ℹ️ Belum ada instruksi edit yang dikumpulkan dari percakapan.\n\n"
+                    "Ketikkan instruksi seperti _\"ubah bab 1 jadi lebih formal\"_ terlebih dahulu, "
+                    "lalu minta file editannya.",
+                )
+            return
+        if is_edit_intent(user_text):
+            # Kumpulkan instruksi edit; biarkan DocAuditorAgent menjawab via Q&A
+            _pending_chat_edits.setdefault(user_id_str, []).append(user_text)
+            queued_edit_this_turn = True
+            # Tidak return – lanjutkan ke process_message agar Q&A tetap berjalan
     # Jika pending_doc ada tapi bukan edit intent → lanjut ke process_message
     # (DocAuditorAgent akan menjawab pertanyaan menggunakan DocIndex)
 
@@ -401,6 +583,17 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Send text reply (falls back to plain text if Markdown is malformed)
     await _safe_reply(message, reply)
+
+    # ── Notifikasi jika instruksi edit baru saja dikumpulkan ─────────────
+    if queued_edit_this_turn:
+        n_queued = len(_pending_chat_edits.get(user_id_str, []))
+        await _safe_reply(
+            message,
+            f"📌 *Instruksi edit dicatat!* ({n_queued} instruksi tersimpan)\n\n"
+            "Teruskan percakapan atau berikan instruksi edit lainnya.\n"
+            "Ketika sudah siap, ketik _\"berikan saya file yang sudah diedit\"_ "
+            "untuk menerapkan semua instruksi ke dokumen sekaligus.",
+        )
 
     # ── Kirim file Excel jika ada (WBS / mandays) ────────────────────────────
     excel_path = task.metadata.get("excel_path")
@@ -773,6 +966,8 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
             os.remove(old_edit_session["docx_path"])
         except OSError as exc:
             logger.debug("Could not remove old edit session file: %s", exc)
+    # Hapus antrian instruksi edit dari percakapan (sesi baru dimulai)
+    _pending_chat_edits.pop(user_id_str, None)
 
     # ── Deteksi mode lebih awal agar bisa membuat salinan sebelum delete ──
     is_edit_mode = is_edit_intent(user_caption)
