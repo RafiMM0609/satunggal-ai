@@ -80,10 +80,21 @@ def _ensure_tables() -> None:
                 session_id     TEXT NOT NULL,
                 file_id        TEXT NOT NULL,
                 doc_title      TEXT,
+                docx_path      TEXT,
                 total_sections INTEGER DEFAULT 0,
                 total_words    INTEGER DEFAULT 0,
                 indexed_at     TEXT NOT NULL,
                 UNIQUE(session_id, file_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS doc_pending_edits (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   TEXT NOT NULL,
+                file_id      TEXT NOT NULL,
+                edit_order   INTEGER NOT NULL,
+                instruction  TEXT NOT NULL,
+                edit_ops_json TEXT NOT NULL,
+                added_at     TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_sections_session
@@ -91,6 +102,9 @@ def _ensure_tables() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_meta_session
                 ON doc_meta(session_id);
+
+            CREATE INDEX IF NOT EXISTS idx_pending_edits_session
+                ON doc_pending_edits(session_id, file_id, edit_order);
         """)
 
 
@@ -111,6 +125,7 @@ class DocIndex:
         doc_title: str,
         sections: list[dict[str, Any]],
         total_words: int = 0,
+        docx_path: str = "",
     ) -> None:
         """
         Simpan seluruh seksi dokumen ke database.
@@ -121,6 +136,7 @@ class DocIndex:
             doc_title:  Judul dokumen.
             sections:   List dict dari docx_parser: [{index, title, level, content}]
             total_words: Total jumlah kata di dokumen.
+            docx_path:  Path absolut ke file .docx asli (untuk edit lanjutan).
         """
         now = _now_iso()
         with _get_conn() as conn:
@@ -133,15 +149,19 @@ class DocIndex:
                 "DELETE FROM doc_meta WHERE session_id=? AND file_id=?",
                 (session_id, file_id),
             )
+            conn.execute(
+                "DELETE FROM doc_pending_edits WHERE session_id=? AND file_id=?",
+                (session_id, file_id),
+            )
 
             # Insert meta
             conn.execute(
                 """
                 INSERT INTO doc_meta (session_id, file_id, doc_title,
-                    total_sections, total_words, indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    docx_path, total_sections, total_words, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, file_id, doc_title, len(sections), total_words, now),
+                (session_id, file_id, doc_title, docx_path, len(sections), total_words, now),
             )
 
             # Insert sections
@@ -169,6 +189,129 @@ class DocIndex:
             "DocIndex: saved %d sections for session=%s file_id=%r",
             len(sections), session_id, file_id,
         )
+
+    def save_docx_path(self, session_id: str, docx_path: str) -> None:
+        """Update docx_path di doc_meta untuk sesi (pakai file_id terbaru)."""
+        file_id = self.get_latest_file_id(session_id)
+        if file_id is None:
+            return
+        with _get_conn() as conn:
+            conn.execute(
+                "UPDATE doc_meta SET docx_path=? WHERE session_id=? AND file_id=?",
+                (docx_path, session_id, file_id),
+            )
+
+    def get_docx_path(self, session_id: str) -> Optional[str]:
+        """Ambil path file .docx asli untuk sesi ini (dari file_id terbaru)."""
+        meta = self.get_doc_meta(session_id)
+        if meta is None:
+            return None
+        return meta.get("docx_path") or None
+
+    # ── Pending edits ─────────────────────────────────────────────────────────
+
+    def add_pending_edit(
+        self,
+        session_id: str,
+        instruction: str,
+        edit_ops: list[dict[str, Any]],
+    ) -> int:
+        """
+        Simpan satu set operasi edit ke antrian pending.
+
+        Args:
+            session_id:  ID sesi pengguna.
+            instruction: Instruksi asli dari pengguna.
+            edit_ops:    List operasi edit JSON (dari LLM).
+
+        Returns:
+            Nomor urut edit yang baru saja disimpan.
+        """
+        import json as _json
+
+        file_id = self.get_latest_file_id(session_id)
+        if file_id is None:
+            raise ValueError(f"Tidak ada dokumen terindeks untuk sesi {session_id!r}")
+
+        now = _now_iso()
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(edit_order), 0) FROM doc_pending_edits "
+                "WHERE session_id=? AND file_id=?",
+                (session_id, file_id),
+            ).fetchone()
+            next_order = (row[0] or 0) + 1
+
+            conn.execute(
+                """
+                INSERT INTO doc_pending_edits
+                    (session_id, file_id, edit_order, instruction, edit_ops_json, added_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, file_id, next_order, instruction, _json.dumps(edit_ops, ensure_ascii=False), now),
+            )
+
+        logger.info(
+            "DocIndex: added pending edit #%d for session=%s file_id=%r ops=%d",
+            next_order, session_id, file_id, len(edit_ops),
+        )
+        return next_order
+
+    def get_pending_edits(
+        self, session_id: str
+    ) -> list[dict[str, Any]]:
+        """Ambil semua pending edits untuk sesi, diurutkan berdasarkan edit_order."""
+        import json as _json
+
+        file_id = self.get_latest_file_id(session_id)
+        if file_id is None:
+            return []
+        with _get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT edit_order, instruction, edit_ops_json
+                FROM doc_pending_edits
+                WHERE session_id=? AND file_id=?
+                ORDER BY edit_order
+                """,
+                (session_id, file_id),
+            ).fetchall()
+        result = []
+        for r in rows:
+            try:
+                ops = _json.loads(r["edit_ops_json"])
+            except Exception:
+                ops = []
+            result.append({
+                "edit_order":  r["edit_order"],
+                "instruction": r["instruction"],
+                "edit_ops":    ops,
+            })
+        return result
+
+    def get_pending_edit_count(self, session_id: str) -> int:
+        """Kembalikan jumlah pending edits untuk sesi ini."""
+        file_id = self.get_latest_file_id(session_id)
+        if file_id is None:
+            return 0
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM doc_pending_edits WHERE session_id=? AND file_id=?",
+                (session_id, file_id),
+            ).fetchone()
+        return row[0] if row else 0
+
+    def clear_pending_edits(self, session_id: str) -> None:
+        """Hapus semua pending edits untuk sesi ini setelah berhasil diterapkan."""
+        file_id = self.get_latest_file_id(session_id)
+        if file_id is None:
+            return
+        with _get_conn() as conn:
+            conn.execute(
+                "DELETE FROM doc_pending_edits WHERE session_id=? AND file_id=?",
+                (session_id, file_id),
+            )
+        logger.info("DocIndex: cleared pending edits for session=%s", session_id)
 
     def save_summary(
         self,
@@ -292,6 +435,9 @@ class DocIndex:
             )
             conn.execute(
                 "DELETE FROM doc_meta WHERE session_id=?", (session_id,)
+            )
+            conn.execute(
+                "DELETE FROM doc_pending_edits WHERE session_id=?", (session_id,)
             )
         logger.info("DocIndex: cleared all data for session=%s", session_id)
 

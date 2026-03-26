@@ -72,8 +72,7 @@ def _get_pipeline():
     from src.agents.developer.agent import DeveloperAgent
     from src.agents.developer_inspector.agent import DeveloperInspectorAgent
     from src.agents.developer_qna.agent import DeveloperQnAAgent
-    from src.agents.doc_auditor.agent import DocAuditorAgent
-    from src.agents.doc_editor.agent import DocEditorAgent
+    from src.agents.doc_agent.agent import DocAgent
     from src.agents.gatekeeper.agent import GatekeeperAgent
     from src.agents.llm_client import LLMClient
     from src.agents.log_viewer_agent.agent import LogViewerAgent
@@ -142,9 +141,14 @@ def _get_pipeline():
         "log_viewer_agent":    LogViewerAgent(_history, _llm),
         "quiz_agent":          QuizAgent(_llm),
         "web_automation":      WebAutomationAgent(_llm, history=_history),
-        "doc_auditor":         DocAuditorAgent(_history, _llm),
-        "doc_editor":          DocEditorAgent(_history, _llm),
+        "doc_agent":           DocAgent(_history, _llm),
+        # Legacy aliases – kept so any hardcoded name still resolves
+        "doc_auditor":         None,
+        "doc_editor":          None,
     }
+    # Point legacy names to the same instance
+    _agents["doc_auditor"] = _agents["doc_agent"]
+    _agents["doc_editor"]  = _agents["doc_agent"]
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
 
@@ -766,34 +770,34 @@ async def process_docx(
 
     # ── Langkah 2: Routing ke agent yang sesuai ───────────────────────────
     if edit_mode:
-        # ── MODE EDIT: DocEditorAgent ──────────────────────────────────────
-        task.mark_routed("doc_editor")
-        doc_editor = agents.get("doc_editor")
-        if doc_editor is None:
-            task.mark_failed("doc_editor agent tidak terdaftar.")
-            task.result = "❌ Doc Editor agent tidak tersedia."
+        # ── MODE EDIT: DocAgent ────────────────────────────────────────────
+        task.mark_routed("doc_agent")
+        doc_agent = agents.get("doc_agent")
+        if doc_agent is None:
+            task.mark_failed("doc_agent tidak terdaftar.")
+            task.result = "❌ Doc agent tidak tersedia."
             history.add(session_id, "assistant", task.result)
             return task
 
-        task.mark_processing("doc_editor")
-        task = await doc_editor.run(task)
+        task.mark_processing("doc_agent")
+        task = await doc_agent.run(task)
         task.metadata.pop("docx_sections", None)
 
         if not task.result:
             task.result = "✅ Dokumen berhasil diedit."
 
     else:
-        # ── MODE ANALISIS: DocAuditorAgent ─────────────────────────────────
+        # ── MODE ANALISIS: DocAgent ────────────────────────────────────────
         task.mark_routed("doc_audit")
-        doc_auditor = agents.get("doc_auditor")
-        if doc_auditor is None:
-            task.mark_failed("doc_auditor agent tidak terdaftar.")
-            task.result = "❌ Doc Auditor agent tidak tersedia."
+        doc_agent = agents.get("doc_agent")
+        if doc_agent is None:
+            task.mark_failed("doc_agent tidak terdaftar.")
+            task.result = "❌ Doc agent tidak tersedia."
             history.add(session_id, "assistant", task.result)
             return task
 
-        task.mark_processing("doc_auditor")
-        task = await doc_auditor.run(task)
+        task.mark_processing("doc_agent")
+        task = await doc_agent.run(task)
         task.metadata.pop("docx_sections", None)
 
         if not task.result:

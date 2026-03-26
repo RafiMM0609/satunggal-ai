@@ -25,76 +25,22 @@ _MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 20 MB upload limit for all file types
 _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
 # ── Temp directory for doc session copies ─────────────────────────────────────
-# Analyzed .docx files are copied here so they remain available for editing
-# after the original temp download is deleted.
 _SESSIONS_TMP_DIR = os.path.join(tempfile.gettempdir(), "advance_ai_doc_sessions")
 
-# ── Edit suggestion constants ──────────────────────────────────────────────────
-_MAX_SECTIONS_FOR_SUGGESTIONS = 6    # Jumlah bab yang diperiksa untuk saran edit
-_MAX_SUGGESTION_TEXT_LEN      = 120  # Panjang maksimum teks saran per bab (karakter)
-_MAX_SUGGESTIONS_DISPLAY      = 3    # Jumlah maksimum saran yang ditampilkan
-# Batas karakter saran AI yang disertakan ke prompt DocEditorAgent.
-# Cukup panjang untuk menangkap draf konten lengkap, namun tetap aman dari
-# token limit LLM.  Pemotongan dilakukan di batas karakter (bukan kata), sehingga
-# mungkin terpotong di tengah kalimat – namun LLM tetap mendapat konteks utama.
-_MAX_AI_SUGGESTION_FOR_EDITOR = 2000
+# Edit suggestion constants
+_MAX_SECTIONS_FOR_SUGGESTIONS = 6
+_MAX_SUGGESTION_TEXT_LEN      = 120
+_MAX_SUGGESTIONS_DISPLAY      = 3
 
-# ── Pending doc-auditor session store ─────────────────────────────────────────
+# ── Pending doc session store ──────────────────────────────────────────────────
 # Maps user_id (str) → {"docx_path": str, "doc_title": str, "original_filename": str}
-# Populated after DocAuditorAgent successfully analyzes a document so the user
-# can later ask questions OR request edits without re-uploading the file.
+# Populated after DocAgent successfully analyzes a document.
+# Used to keep the .docx file alive and to detect when sessions are active.
 _pending_doc_sessions: dict[str, dict] = {}
 
-# ── Pending doc-edit session store ────────────────────────────────────────────
+# ── Pending doc-edit session (legacy direct-edit via upload caption) ───────────
 # Maps user_id (str) → {"docx_path": str, "doc_title": str, "original_filename": str}
-# Populated after a successful doc edit; cleared when the user confirms they
-# are done and the final file is sent.
 _pending_edit_sessions: dict[str, dict] = {}
-
-# ── Pending chat-edit queue ────────────────────────────────────────────────────
-# Maps user_id (str) → list of edit instruction strings collected during a
-# DocAuditorAgent Q&A session.  Accumulated while the user chats, then applied
-# all at once when they say "berikan saya file yang sudah diedit".
-_pending_chat_edits: dict[str, list[str]] = {}
-
-# ── Keywords that trigger "apply all accumulated edits and send file" ──────────
-_APPLY_EDITS_KEYWORDS = frozenset({
-    # Indonesian send/give
-    "berikan", "kirim", "kasih", "beri", "send",
-    # Indonesian apply
-    "terapkan", "apply",
-})
-_APPLY_EDITS_FILE_WORDS = frozenset({"file", "dokumen", "filenya", "dokumennya"})
-_APPLY_EDITS_EDIT_WORDS = frozenset({
-    "edit", "diedit", "editnya", "perubahan", "revisi", "semua",
-    "sudah", "hasil", "yang",
-})
-
-
-def _is_apply_edits_trigger(text: str) -> bool:
-    """Deteksi apakah user meminta file hasil penerapan semua instruksi edit dari chat.
-
-    Mengembalikan True untuk frasa seperti:
-    - "berikan saya file yang sudah diedit"
-    - "kirim file editnya"
-    - "terapkan semua edit"
-    - "apply semua perubahan"
-    """
-    if not text or not text.strip():
-        return False
-    words = {w.strip(",.!?;:\"'-()/\\") for w in text.lower().split()}
-
-    # Pattern A: terapkan/apply + (edit|perubahan|revisi|semua)
-    if {"terapkan", "apply"} & words:
-        if words & (_APPLY_EDITS_EDIT_WORDS | _APPLY_EDITS_FILE_WORDS):
-            return True
-
-    # Pattern B: berikan/kirim/kasih/beri + file/dokumen + edit/diedit/...
-    if {"berikan", "kirim", "kasih", "beri", "send"} & words:
-        if words & _APPLY_EDITS_FILE_WORDS and words & _APPLY_EDITS_EDIT_WORDS:
-            return True
-
-    return False
 
 
 def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
@@ -139,52 +85,6 @@ async def _safe_reply(message, text: str) -> None:
                 logger.error("Failed to send chunk even as plain text: %s", exc2)
 
 
-def _get_edit_suggestions(session_id: str) -> str:
-    """Ambil saran pengeditan berdasarkan catatan kualitas dari DocAuditorAgent.
-
-    Membaca ringkasan per bab dari DocIndex dan mengekstrak catatan kualitas
-    yang bisa disampaikan kepada pengguna sebagai saran perbaikan lanjutan.
-    """
-    try:
-        from src.memory.doc_index import get_doc_index
-        doc_index = get_doc_index()
-        sections = doc_index.get_sections(session_id)
-        suggestions: list[str] = []
-        for sec in sections[:_MAX_SECTIONS_FOR_SUGGESTIONS]:  # Periksa bab pertama saja
-            summary = sec.get("summary") or ""
-            if "**Catatan Kualitas:**" in summary:
-                parts = summary.split("**Catatan Kualitas:**", 1)
-                if len(parts) > 1:
-                    quality_note = parts[1].strip()
-                    first_line = quality_note.split("\n")[0].strip(" -•*")
-                    if first_line and "Tidak ada catatan khusus" not in first_line:
-                        title = sec.get("bab_title") or f"Bab {sec.get('bab_index', '?')}"
-                        suggestions.append(f"• *{title}*: {first_line[:_MAX_SUGGESTION_TEXT_LEN]}")
-        if suggestions:
-            return "\n".join(suggestions[:_MAX_SUGGESTIONS_DISPLAY])
-    except Exception as exc:
-        logger.debug("_get_edit_suggestions: %s", exc)
-    return ""
-
-
-def _build_follow_up_question(suggestions: str = "") -> str:
-    """Bangun pesan tawaran lanjutan edit, opsional disertai saran kualitas."""
-    msg = (
-        "✏️ *Ada bagian lain yang perlu diedit lagi?*\n\n"
-        "Jika **ya**, langsung ketik instruksi editnya.\n"
-        "Jika **tidak**, ketik *selesai* untuk menerima file."
-    )
-    if suggestions:
-        msg += f"\n\n💡 *Saran perbaikan dari analisis dokumen:*\n{suggestions}"
-    return msg
-
-
-# Alias untuk kompatibilitas kode lama yang masih menggunakan konstanta ini
-_FOLLOW_UP_QUESTION = (
-    "✏️ Ada bagian lain yang perlu diedit lagi?\n\n"
-    "Jika **ya**, langsung ketik instruksi editnya.\n"
-    "Jika **tidak**, ketik *tidak* atau *selesai* untuk menerima file."
-)
 
 
 async def _send_edited_docx(message, context, user, user_id_str: str, session: dict) -> None:
@@ -217,7 +117,7 @@ async def _send_edited_docx(message, context, user, user_id_str: str, session: d
 async def _handle_pending_edit(
     message, context, user, user_id_str: str, session: dict, edit_instruction: str
 ) -> None:
-    """Terapkan instruksi edit tambahan pada file hasil edit sebelumnya, lalu tanya lagi."""
+    """Terapkan instruksi edit tambahan pada file hasil edit sebelumnya."""
     old_docx_path = session["docx_path"]
     original_filename = session["original_filename"]
 
@@ -280,8 +180,11 @@ async def _handle_pending_edit(
             "doc_title": task.metadata.get("doc_title", original_filename),
             "original_filename": original_filename,
         }
-        suggestions = _get_edit_suggestions(user_id_str)
-        await _safe_reply(message, _build_follow_up_question(suggestions))
+        await _safe_reply(
+            message,
+            "✏️ *Ada bagian lain yang perlu diedit?*\n\n"
+            "Ketik instruksi edit selanjutnya, atau ketik *selesai* untuk menerima file.",
+        )
     else:
         # Tidak ada file baru – bersihkan sesi
         _pending_edit_sessions.pop(user_id_str, None)
@@ -289,210 +192,6 @@ async def _handle_pending_edit(
             os.remove(old_docx_path)
         except OSError as exc:
             logger.debug("Could not remove DOCX %s: %s", old_docx_path, exc)
-
-
-async def _handle_audited_doc_edit(
-    message, context, user, user_id_str: str, session: dict, edit_instruction: str
-) -> None:
-    """Terapkan instruksi edit pada dokumen yang sebelumnya dianalisis oleh DocAuditorAgent.
-
-    Dipanggil ketika pengguna memiliki sesi analisis aktif (_pending_doc_sessions)
-    dan mengirim instruksi edit. Setelah berhasil, sesi dipindahkan ke
-    _pending_edit_sessions agar pengguna dapat melakukan edit lanjutan.
-    """
-    docx_path = session["docx_path"]
-    doc_title = session.get("doc_title", "Dokumen")
-    original_filename = session.get("original_filename", "document.docx")
-
-    progress_msg = await message.reply_text(
-        telegramify_markdown.markdownify("⏳ *Menerapkan edit pada dokumen...*"),
-        parse_mode="MarkdownV2",
-        quote=True,
-    )
-
-    async def _progress_callback(rendered_text: str) -> None:
-        try:
-            formatted = telegramify_markdown.markdownify(rendered_text)
-            await context.bot.edit_message_text(
-                chat_id=progress_msg.chat_id,
-                message_id=progress_msg.message_id,
-                text=formatted,
-                parse_mode="MarkdownV2",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Audited doc edit progress update skipped: %s", exc)
-
-    try:
-        task = await process_docx(
-            session_id=user_id_str,
-            docx_path=docx_path,
-            original_filename=original_filename,
-            user_caption=edit_instruction,
-            status_callback=_progress_callback,
-        )
-    except Exception as exc:
-        logger.exception("Audited doc edit failed for user=%s: %s", user.id, exc)
-        task = None
-
-    try:
-        await context.bot.delete_message(
-            chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-    if task is None or task.status.value == "failed":
-        error_msg = (task.result if task else None) or "❌ Gagal mengedit dokumen. Coba lagi."
-        await _safe_reply(message, error_msg)
-        return
-
-    reply = task.result or "✅ Edit berhasil diterapkan."
-    await _safe_reply(message, reply)
-
-    new_docx_path = task.metadata.get("document_path")
-    if new_docx_path and new_docx_path.lower().endswith(".docx"):
-        # Pindahkan dari doc_sessions ke edit_sessions
-        _pending_doc_sessions.pop(user_id_str, None)
-        if docx_path != new_docx_path:
-            try:
-                os.remove(docx_path)
-            except OSError as exc:
-                logger.debug("Could not remove analyzed DOCX %s: %s", docx_path, exc)
-        _pending_edit_sessions[user_id_str] = {
-            "docx_path": new_docx_path,
-            "doc_title": task.metadata.get("doc_title", doc_title),
-            "original_filename": original_filename,
-        }
-        suggestions = _get_edit_suggestions(user_id_str)
-        await _safe_reply(message, _build_follow_up_question(suggestions))
-        logger.info(
-            "Doc session converted to edit session for user=%s path=%s",
-            user.id, new_docx_path,
-        )
-    else:
-        # Tidak ada file baru (tidak ada perubahan) – kembalikan ke sesi analisis
-        logger.info(
-            "No new file from edit for user=%s; doc session kept", user.id
-        )
-
-
-async def _apply_all_chat_edits(
-    message,
-    context,
-    user,
-    user_id_str: str,
-    session: dict,
-    edits: list[str],
-) -> None:
-    """Terapkan semua instruksi edit yang dikumpulkan dari sesi Q&A ke dokumen.
-
-    Setiap instruksi diproses secara berurutan melalui DocEditorAgent.  File
-    hasil edit terakhir dikirim ke user dan semua sesi yang terkait dibersihkan.
-    """
-    n_edits = len(edits)
-    original_filename = session.get("original_filename", "document.docx")
-    original_path = session["docx_path"]   # Jaga referensi file asli agar tidak terhapus
-    current_path = original_path
-
-    progress_msg = await message.reply_text(
-        telegramify_markdown.markdownify(
-            f"⏳ *Menerapkan {n_edits} instruksi edit dari percakapan...*"
-        ),
-        parse_mode="MarkdownV2",
-        quote=True,
-    )
-
-    applied = 0
-    for i, instruction in enumerate(edits, 1):
-        async def _cb(rendered_text: str, edit_number: int = i) -> None:  # noqa: ANN001
-            try:
-                status = (
-                    f"⏳ *Edit {edit_number}/{n_edits}:* Menerapkan...\n{rendered_text}"
-                )
-                formatted = telegramify_markdown.markdownify(status)
-                await context.bot.edit_message_text(
-                    chat_id=progress_msg.chat_id,
-                    message_id=progress_msg.message_id,
-                    text=formatted,
-                    parse_mode="MarkdownV2",
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Chat-edit progress update skipped: %s", exc)
-
-        try:
-            task = await process_docx(
-                session_id=user_id_str,
-                docx_path=current_path,
-                original_filename=original_filename,
-                user_caption=instruction,
-                status_callback=_cb,
-            )
-        except Exception as exc:
-            logger.exception(
-                "apply_all_chat_edits edit %d/%d failed for user=%s: %s",
-                i, n_edits, user.id, exc,
-            )
-            task = None
-
-        if task is not None and task.status.value != "failed":
-            new_path = task.metadata.get("document_path")
-            if new_path and new_path.lower().endswith(".docx"):
-                # Hapus file lama (bukan file asli sesi pertama)
-                if current_path != original_path and current_path != new_path:
-                    try:
-                        os.remove(current_path)
-                    except OSError as exc:
-                        logger.debug("Could not remove intermediate DOCX %s: %s", current_path, exc)
-                current_path = new_path
-                applied += 1
-
-    try:
-        await context.bot.delete_message(
-            chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Bersihkan semua sesi terkait
-    _pending_doc_sessions.pop(user_id_str, None)
-    _pending_chat_edits.pop(user_id_str, None)
-
-    if applied == 0:
-        await _safe_reply(
-            message,
-            "❌ Tidak ada instruksi edit yang berhasil diterapkan. Coba kirim ulang instruksinya.",
-        )
-        return
-
-    await _safe_reply(
-        message,
-        f"✅ *{applied} dari {n_edits} instruksi edit berhasil diterapkan.*\nFile siap dikirim…",
-    )
-
-    # Kirim file langsung (tanpa menyimpan ke _pending_edit_sessions)
-    try:
-        await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
-        with open(current_path, "rb") as f:
-            await message.reply_document(
-                document=f,
-                filename=os.path.basename(current_path),
-                caption="📝 File Word dengan semua edit dari percakapan siap diunduh.",
-                quote=True,
-            )
-        logger.info(
-            "Sent all-chat-edits DOCX to user=%s path=%s applied=%d/%d",
-            user.id, current_path, applied, n_edits,
-        )
-    except Exception as exc:
-        logger.exception("Failed to send all-chat-edits DOCX to user=%s: %s", user.id, exc)
-        await message.reply_text(
-            "⚠️ Gagal mengirim file hasil edit. Coba lagi nanti.", quote=True
-        )
-    finally:
-        try:
-            os.remove(current_path)
-        except OSError as exc:
-            logger.debug("Could not remove all-chat-edits DOCX %s: %s", current_path, exc)
 
 
 async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -509,43 +208,17 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pending_edit = _pending_edit_sessions.get(user_id_str)
     if pending_edit:
         if is_edit_intent(user_text):
-            # User memberikan instruksi edit tambahan
             await _handle_pending_edit(message, context, user, user_id_str, pending_edit, user_text)
         else:
-            # User selesai mengedit – kirim file (termasuk "berikan file yang sudah diedit")
             await _send_edited_docx(message, context, user, user_id_str, pending_edit)
         return
 
-    # ── 2. Cek sesi analisis dokumen – user bisa minta edit atau tanya-jawab
-    pending_doc = _pending_doc_sessions.get(user_id_str)
-    queued_edit_this_turn = False  # Apakah instruksi edit baru saja dikumpulkan
-    if pending_doc:
-        if _is_apply_edits_trigger(user_text):
-            # User minta semua instruksi edit dari percakapan diterapkan sekaligus
-            chat_edits = _pending_chat_edits.get(user_id_str, [])
-            if chat_edits:
-                await _apply_all_chat_edits(
-                    message, context, user, user_id_str, pending_doc, chat_edits
-                )
-            else:
-                await _safe_reply(
-                    message,
-                    "ℹ️ Belum ada instruksi edit yang dikumpulkan dari percakapan.\n\n"
-                    "Ketikkan instruksi seperti _\"ubah bab 1 jadi lebih formal\"_ terlebih dahulu, "
-                    "lalu minta file editannya.",
-                )
-            return
-        if is_edit_intent(user_text):
-            # Kumpulkan instruksi edit; biarkan DocAuditorAgent menjawab via Q&A
-            _pending_chat_edits.setdefault(user_id_str, []).append(user_text)
-            queued_edit_this_turn = True
-            # Tidak return – lanjutkan ke process_message agar Q&A tetap berjalan
-    # Jika pending_doc ada tapi bukan edit intent → lanjut ke process_message
-    # (DocAuditorAgent akan menjawab pertanyaan menggunakan DocIndex)
+    # ── 2. Cek sesi analisis dokumen ──────────────────────────────────────
+    # DocAgent (via process_message) menangani semua interaksi Q&A, edit, dan
+    # "berikan file" secara internal – tidak perlu routing manual di sini.
+    # Kita hanya perlu memastikan session tetap aktif di _pending_doc_sessions.
 
     # ── Send initial progress message ──────────────────────────────────────
-    # This message will be edited live at each pipeline stage so the user
-    # always sees what the bot is doing.
     progress_msg = await message.reply_text(
         telegramify_markdown.markdownify("⏳ *Sedang memproses permintaan...*\n`[░░░░░░░░░░]` *0%*"),
         parse_mode="MarkdownV2",
@@ -553,7 +226,6 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     async def _progress_callback(rendered_text: str) -> None:
-        """Edit the progress message with the latest tracker output."""
         try:
             formatted = telegramify_markdown.markdownify(rendered_text)
             await context.bot.edit_message_text(
@@ -563,10 +235,8 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode="MarkdownV2",
             )
         except Exception as exc:  # noqa: BLE001
-            # Telegram raises if the text didn't change – silently ignore.
             logger.debug("edit_message_text skipped: %s", exc)
 
-    # Show typing indicator while the pipeline runs
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
 
     task = await process_message(
@@ -575,7 +245,6 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         status_callback=_progress_callback,
     )
 
-    # ── Delete the progress message now that we have the real reply ────────
     try:
         await context.bot.delete_message(
             chat_id=progress_msg.chat_id,
@@ -585,36 +254,7 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.debug("Could not delete progress message: %s", exc)
 
     reply = task.result or "Maaf, saya tidak dapat memproses permintaan Anda."
-
-    # Send text reply (falls back to plain text if Markdown is malformed)
     await _safe_reply(message, reply)
-
-    # ── Perkaya instruksi edit dengan saran konten dari AI ────────────────
-    # Ketika DocAuditorAgent menjawab instruksi edit dengan konten yang disarankan
-    # (misal draf revisi Problem Statement), kita simpan jawaban tersebut bersama
-    # instruksi asli agar DocEditorAgent bisa menerapkan teks yang persis sama
-    # seperti yang ditampilkan di chat bubble – bukan interpretasi ulang.
-    if queued_edit_this_turn and task.result:
-        edits_list = _pending_chat_edits.get(user_id_str, [])
-        if edits_list:
-            original_instruction = edits_list[-1]
-            # Batasi panjang saran AI agar prompt DocEditorAgent tidak terlalu panjang
-            ai_suggestion = task.result[:_MAX_AI_SUGGESTION_FOR_EDITOR]
-            edits_list[-1] = (
-                f"{original_instruction}\n\n"
-                f"[Konten yang disarankan AI untuk perubahan ini]:\n{ai_suggestion}"
-            )
-
-    # ── Notifikasi jika instruksi edit baru saja dikumpulkan ─────────────
-    if queued_edit_this_turn:
-        n_queued = len(_pending_chat_edits.get(user_id_str, []))
-        await _safe_reply(
-            message,
-            f"📌 *Instruksi edit dicatat!* ({n_queued} instruksi tersimpan)\n\n"
-            "Teruskan percakapan atau berikan instruksi edit lainnya.\n"
-            "Ketika sudah siap, ketik _\"berikan saya file yang sudah diedit\"_ "
-            "untuk menerapkan semua instruksi ke dokumen sekaligus.",
-        )
 
     # ── Kirim file Excel jika ada (WBS / mandays) ────────────────────────────
     excel_path = task.metadata.get("excel_path")
@@ -637,14 +277,14 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "⚠️ Gagal mengirim file Excel. Coba lagi nanti.", quote=True
             )
 
-    # ── Kirim file dokumen jika ada (PDF / DOCX dari TechnicalWriterAgent) ───
+    # ── Kirim file dokumen jika ada (PDF / DOCX / hasil edit DocAgent) ────────
     document_path = task.metadata.get("document_path")
     if document_path:
         import os  # noqa: PLC0415
         ext = os.path.splitext(document_path)[1].lower()
         caption_map = {
-            ".pdf":  "📝 Dokumen teknis PDF siap.",
-            ".docx": "📝 Dokumen teknis Word siap.",
+            ".pdf":  "📝 Dokumen PDF siap.",
+            ".docx": "📝 Dokumen Word siap.",
         }
         caption = caption_map.get(ext, "📝 Dokumen siap.")
         try:
@@ -987,36 +627,42 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
             os.remove(old_edit_session["docx_path"])
         except OSError as exc:
             logger.debug("Could not remove old edit session file: %s", exc)
-    # Hapus antrian instruksi edit dari percakapan (sesi baru dimulai)
-    _pending_chat_edits.pop(user_id_str, None)
+    # Bersihkan DocIndex sesi lama agar DocAgent mulai fresh
+    try:
+        from src.memory.doc_index import get_doc_index
+        get_doc_index().clear_session(user_id_str)
+    except Exception as exc:
+        logger.debug("Could not clear old DocIndex for user=%s: %s", user.id, exc)
 
     # ── Deteksi mode lebih awal agar bisa membuat salinan sebelum delete ──
     is_edit_mode = is_edit_intent(user_caption)
 
-    # ── Buat salinan file ke session dir jika mode analisis ───────────────
+    # ── Buat salinan file ke session dir ──────────────────────────────────
     # Salinan ini disimpan agar tersedia untuk edit lanjutan setelah
-    # file temp asli dihapus oleh blok finally di bawah.
+    # file temp asli dihapus.  DocAgent menyimpan path-nya di DocIndex.
     session_docx_copy: str | None = None
-    if not is_edit_mode:
-        try:
-            os.makedirs(_SESSIONS_TMP_DIR, exist_ok=True)
-            session_copy_name = f"{user.id}_{safe_name}"
-            session_docx_copy = os.path.join(_SESSIONS_TMP_DIR, session_copy_name)
-            session_docx_copy = os.path.realpath(session_docx_copy)
-            if not session_docx_copy.startswith(os.path.realpath(_SESSIONS_TMP_DIR)):
-                session_docx_copy = os.path.join(
-                    os.path.realpath(_SESSIONS_TMP_DIR), f"{user.id}_upload.docx"
-                )
-            shutil.copy2(docx_path, session_docx_copy)
-        except Exception as exc:
-            logger.warning("Could not copy DOCX to session dir for user=%s: %s", user.id, exc)
-            session_docx_copy = None
+    try:
+        os.makedirs(_SESSIONS_TMP_DIR, exist_ok=True)
+        session_copy_name = f"{user.id}_{safe_name}"
+        session_docx_copy = os.path.join(_SESSIONS_TMP_DIR, session_copy_name)
+        session_docx_copy = os.path.realpath(session_docx_copy)
+        if not session_docx_copy.startswith(os.path.realpath(_SESSIONS_TMP_DIR)):
+            session_docx_copy = os.path.join(
+                os.path.realpath(_SESSIONS_TMP_DIR), f"{user.id}_upload.docx"
+            )
+        shutil.copy2(docx_path, session_docx_copy)
+    except Exception as exc:
+        logger.warning("Could not copy DOCX to session dir for user=%s: %s", user.id, exc)
+        session_docx_copy = None
 
     # ── Jalankan pipeline ──────────────────────────────────────────────────
+    # Untuk mode analisis, gunakan session_docx_copy (persisten) agar DocAgent
+    # bisa menyimpan path yang valid di DocIndex untuk edit lanjutan.
+    pipeline_path = session_docx_copy or docx_path
     try:
         task = await process_docx(
             session_id=str(user.id),
-            docx_path=docx_path,
+            docx_path=pipeline_path,
             original_filename=original_filename,
             user_caption=user_caption,
             status_callback=_progress_callback,
@@ -1025,9 +671,10 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.exception("process_docx raised for user=%s: %s", user.id, exc)
         task = None
     finally:
-        # Hapus file temp setelah diproses
+        # Hapus file temp setelah diproses (session copy sudah terpisah)
         try:
-            os.remove(docx_path)
+            if docx_path != pipeline_path:
+                os.remove(docx_path)
         except OSError:
             pass
 
@@ -1041,7 +688,6 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ── Handle failure ─────────────────────────────────────────────────────
     if task is None or task.status.value == "failed":
-        # Bersihkan salinan jika pipeline gagal
         if session_docx_copy:
             try:
                 os.remove(session_docx_copy)
@@ -1055,11 +701,12 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
     reply = task.result or "✅ Analisis dokumen selesai."
     await _safe_reply(message, reply)
 
-    # ── Tanya apakah ada edit tambahan sebelum mengirim file ──────────────
+    # ── Setelah analisis: catat sesi agar DocAgent tersedia untuk Q&A/edit ─
     edited_docx_path = task.metadata.get("document_path")
     if edited_docx_path and edited_docx_path.lower().endswith(".docx"):
-        # Mode edit: simpan sesi dan tanya dulu; file dikirim setelah user konfirmasi
-        if session_docx_copy:
+        # Mode edit langsung (caption berisi instruksi): simpan ke pending_edit_sessions
+        # agar user bisa melakukan iterasi lebih lanjut via _handle_pending_edit
+        if session_docx_copy and session_docx_copy != edited_docx_path:
             try:
                 os.remove(session_docx_copy)
             except OSError:
@@ -1069,27 +716,21 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
             "doc_title": task.metadata.get("doc_title", original_filename),
             "original_filename": original_filename,
         }
-        suggestions = _get_edit_suggestions(user_id_str)
-        await _safe_reply(message, _build_follow_up_question(suggestions))
-        logger.info(
-            "Pending edit session created for user=%s path=%s", user.id, edited_docx_path
+        await _safe_reply(
+            message,
+            "✏️ *Ada bagian lain yang perlu diedit?*\n\n"
+            "Ketik instruksi edit selanjutnya, atau ketik *selesai* untuk menerima file.",
         )
+        logger.info("Pending edit session created for user=%s path=%s", user.id, edited_docx_path)
     elif session_docx_copy and os.path.isfile(session_docx_copy):
-        # Mode analisis berhasil: simpan salinan untuk edit lanjutan
+        # Mode analisis: DocAgent sudah menyimpan session_docx_copy di DocIndex.
+        # Simpan di _pending_doc_sessions hanya sebagai penanda sesi aktif.
         _pending_doc_sessions[user_id_str] = {
             "docx_path": session_docx_copy,
             "doc_title": task.metadata.get("doc_title", original_filename),
             "original_filename": original_filename,
         }
-        await _safe_reply(
-            message,
-            "💡 *Tip:* Ingin mengedit bagian tertentu dari dokumen ini? "
-            "Langsung ketikkan instruksi editnya, misalnya: "
-            "_\"ubah bagian pendahuluan menjadi lebih formal\"_",
-        )
-        logger.info(
-            "Doc session created for user=%s path=%s", user.id, session_docx_copy
-        )
+        logger.info("Doc session created for user=%s path=%s", user.id, session_docx_copy)
     elif session_docx_copy:
         # Salinan tidak jadi dibuat/tidak ada – bersihkan
         try:
