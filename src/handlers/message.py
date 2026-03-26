@@ -30,9 +30,14 @@ _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
 _SESSIONS_TMP_DIR = os.path.join(tempfile.gettempdir(), "advance_ai_doc_sessions")
 
 # ── Edit suggestion constants ──────────────────────────────────────────────────
-_MAX_SECTIONS_FOR_SUGGESTIONS = 6   # Jumlah bab yang diperiksa untuk saran edit
-_MAX_SUGGESTION_TEXT_LEN      = 120 # Panjang maksimum teks saran per bab (karakter)
-_MAX_SUGGESTIONS_DISPLAY      = 3   # Jumlah maksimum saran yang ditampilkan
+_MAX_SECTIONS_FOR_SUGGESTIONS = 6    # Jumlah bab yang diperiksa untuk saran edit
+_MAX_SUGGESTION_TEXT_LEN      = 120  # Panjang maksimum teks saran per bab (karakter)
+_MAX_SUGGESTIONS_DISPLAY      = 3    # Jumlah maksimum saran yang ditampilkan
+# Batas karakter saran AI yang disertakan ke prompt DocEditorAgent.
+# Cukup panjang untuk menangkap draf konten lengkap, namun tetap aman dari
+# token limit LLM.  Pemotongan dilakukan di batas karakter (bukan kata), sehingga
+# mungkin terpotong di tengah kalimat – namun LLM tetap mendapat konteks utama.
+_MAX_AI_SUGGESTION_FOR_EDITOR = 2000
 
 # ── Pending doc-auditor session store ─────────────────────────────────────────
 # Maps user_id (str) → {"docx_path": str, "doc_title": str, "original_filename": str}
@@ -583,6 +588,22 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Send text reply (falls back to plain text if Markdown is malformed)
     await _safe_reply(message, reply)
+
+    # ── Perkaya instruksi edit dengan saran konten dari AI ────────────────
+    # Ketika DocAuditorAgent menjawab instruksi edit dengan konten yang disarankan
+    # (misal draf revisi Problem Statement), kita simpan jawaban tersebut bersama
+    # instruksi asli agar DocEditorAgent bisa menerapkan teks yang persis sama
+    # seperti yang ditampilkan di chat bubble – bukan interpretasi ulang.
+    if queued_edit_this_turn and task.result:
+        edits_list = _pending_chat_edits.get(user_id_str, [])
+        if edits_list:
+            original_instruction = edits_list[-1]
+            # Batasi panjang saran AI agar prompt DocEditorAgent tidak terlalu panjang
+            ai_suggestion = task.result[:_MAX_AI_SUGGESTION_FOR_EDITOR]
+            edits_list[-1] = (
+                f"{original_instruction}\n\n"
+                f"[Konten yang disarankan AI untuk perubahan ini]:\n{ai_suggestion}"
+            )
 
     # ── Notifikasi jika instruksi edit baru saja dikumpulkan ─────────────
     if queued_edit_this_turn:
