@@ -47,6 +47,39 @@ async def _notify(cb: StatusCallback, text: str) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Progress callback raised: %s", exc)
 
+
+_RATE_LIMIT_KEYWORDS = (
+    "rate limit", "rate_limit", "ratelimit",
+    "too many requests", "quota exceeded", "quota_exceeded",
+    "limit exceeded", "limit_exceeded",
+    "insufficient credits", "insufficient_credits",
+    "credits", "billing", "payment required",
+    "usage limit", "token limit",
+)
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """Return True when *exc* looks like a provider rate-limit / quota-exceeded error.
+
+    Checks:
+    * httpx.HTTPStatusError with status 429 (Too Many Requests) or 402 (Payment Required)
+    * Any exception whose string representation contains known rate-limit keywords
+    """
+    import httpx  # local import to avoid top-level dependency
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code in (402, 429):
+            return True
+
+    exc_text = str(exc).lower()
+    return any(kw in exc_text for kw in _RATE_LIMIT_KEYWORDS)
+
+
+_RATE_LIMIT_REPLY = (
+    "⚠️ Maaf, layanan LLM saat ini telah mencapai batas penggunaan (rate limit) dari provider.\n"
+    "Silakan tunggu beberapa saat dan coba lagi, atau hubungi administrator untuk memeriksa kuota API."
+)
+
 if TYPE_CHECKING:
     from src.memory.state import AgentTask
 
@@ -203,9 +236,21 @@ async def process_message(
     # Pass None (not an empty list) when there are no prior messages so the
     # gatekeeper skips injecting an empty history section into its prompt.
     recent_history = history.get_as_llm_messages(session_id)[:-1][-4:] or None
-    intent_result = await gatekeeper.classify_intent(
-        user_text, session_id=session_id, history=recent_history
-    )
+    try:
+        intent_result = await gatekeeper.classify_intent(
+            user_text, session_id=session_id, history=recent_history
+        )
+    except Exception as gk_exc:
+        if _is_rate_limit_error(gk_exc):
+            logger.warning(
+                "Gatekeeper rate-limit hit: session=%s error=%s", session_id, gk_exc
+            )
+            task.result = _RATE_LIMIT_REPLY
+            history.add(session_id, "assistant", task.result)
+            tracker.advance("done")
+            await _notify(status_callback, tracker.render())
+            return task
+        raise
     task.mark_routed(intent_result.intent.value)
     logger.info(
         "Intent: session=%s intent=%s confidence=%.2f tools=%s needs_clarification=%s",
@@ -270,7 +315,20 @@ async def process_message(
     tracker.advance(f"agent:{agent.name}")
     await _notify(status_callback, tracker.render())
 
-    task = await agent.run(task)
+    try:
+        task = await agent.run(task)
+    except Exception as agent_exc:
+        if _is_rate_limit_error(agent_exc):
+            logger.warning(
+                "Agent rate-limit hit: session=%s agent=%s error=%s",
+                session_id, agent.name, agent_exc,
+            )
+            task.result = _RATE_LIMIT_REPLY
+            history.add(session_id, "assistant", task.result)
+            tracker.advance("done")
+            await _notify(status_callback, tracker.render())
+            return task
+        raise
     logger.info(
         "Agent done: session=%s agent=%s pending_tools=%s",
         session_id, agent.name, task.pending_tools,
