@@ -73,6 +73,7 @@ def _get_pipeline():
     from src.agents.developer_inspector.agent import DeveloperInspectorAgent
     from src.agents.developer_qna.agent import DeveloperQnAAgent
     from src.agents.doc_auditor.agent import DocAuditorAgent
+    from src.agents.doc_editor.agent import DocEditorAgent
     from src.agents.gatekeeper.agent import GatekeeperAgent
     from src.agents.llm_client import LLMClient
     from src.agents.log_viewer_agent.agent import LogViewerAgent
@@ -89,6 +90,7 @@ def _get_pipeline():
     from src.tools.browser_navigator import BrowserNavigatorTool
     from src.tools.diagram_renderer import DiagramRendererTool
     from src.tools.docx_parser import DocxParserTool
+    from src.tools.docx_editor import DocxEditorTool
     from src.tools.document_generator import DocumentGeneratorTool
     from src.tools.mandays_generator import MandaysGeneratorTool
     from src.tools.pdf_parser import PDFParserTool
@@ -110,6 +112,7 @@ def _get_pipeline():
         "document_generator": DocumentGeneratorTool(),
         "pdf_parser":         PDFParserTool(),
         "docx_parser":        DocxParserTool(),
+        "docx_editor":        DocxEditorTool(),
         "web_quiz_builder":   WebQuizBuilderTool(),
         "web_reader":         WebReaderTool(),
         "browser_navigator":  BrowserNavigatorTool(),
@@ -140,6 +143,7 @@ def _get_pipeline():
         "quiz_agent":          QuizAgent(_llm),
         "web_automation":      WebAutomationAgent(_llm, history=_history),
         "doc_auditor":         DocAuditorAgent(_history, _llm),
+        "doc_editor":          DocEditorAgent(_history, _llm),
     }
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
@@ -636,6 +640,35 @@ def _quiz_status_msg(filename: str, phase: str) -> str:
     )
 
 
+# ── Edit intent detection ──────────────────────────────────────────────────────
+
+# Kata kunci yang menandakan pengguna ingin mengedit dokumen (Bahasa Indonesia + English)
+_EDIT_KEYWORDS = frozenset({
+    # Indonesian
+    "edit", "ubah", "ganti", "tambah", "hapus", "perbaiki", "revisi",
+    "modifikasi", "perbarui", "update", "koreksi", "perbaikan", "replace",
+    "rubah", "tukar", "sesuaikan", "sisipkan", "insert", "buang", "delete",
+    "hilangkan", "timpa", "overwrite",
+    # English
+    "change", "modify", "remove", "correct", "fix", "rewrite", "revise",
+    "append", "add", "update", "alter",
+})
+
+
+def _is_edit_intent(user_caption: str) -> bool:
+    """
+    Deteksi apakah caption mengandung instruksi untuk mengedit dokumen.
+
+    Mengembalikan True jika caption mengandung kata kunci edit.
+    """
+    if not user_caption or not user_caption.strip():
+        return False
+    words = user_caption.lower().split()
+    return any(
+        w.strip(",.!?;:\"'-()/\\") in _EDIT_KEYWORDS for w in words
+    )
+
+
 async def process_docx(
     session_id: str,
     docx_path: str,
@@ -644,14 +677,22 @@ async def process_docx(
     status_callback: "StatusCallback" = None,
 ) -> "AgentTask":
     """
-    Pipeline untuk file .docx – memparse, meringkas, mengindeks, dan melaporkan.
+    Pipeline untuk file .docx – memparse lalu menganalisis ATAU mengedit.
 
-    Alur:
+    Alur (Mode Analisis – default):
         1. Jalankan DocxParserTool → dapatkan seksi-seksi dokumen
         2. Serahkan ke DocAuditorAgent (step-planned):
            a. Ringkas setiap bab (LLM)
            b. Simpan ke SQLite (DocIndex)
            c. Kirim laporan (judul + daftar isi + ringkasan)
+
+    Alur (Mode Edit – ketika caption mengandung instruksi edit):
+        1. Jalankan DocxParserTool → dapatkan seksi-seksi + metadata dokumen
+        2. Serahkan ke DocEditorAgent:
+           a. Baca peta paragraf (indeks, style, teks)
+           b. Kirim instruksi + peta ke LLM → hasilkan operasi edit JSON
+           c. Terapkan edit via DocxEditorTool (XML-level precision)
+           d. Kembalikan file .docx yang sudah diedit
 
     Args:
         session_id:        Identifier sesi (Telegram user_id).
@@ -662,6 +703,7 @@ async def process_docx(
 
     Returns:
         AgentTask dengan task.result berisi laporan teks.
+        Jika mode edit: task.metadata["document_path"] berisi path file hasil edit.
     """
     from src.memory.state import AgentTask
 
@@ -677,6 +719,13 @@ async def process_docx(
     history.add(
         session_id, "user",
         user_caption.strip() or f"[Dokumen dikirim: {original_filename}]",
+    )
+
+    # ── Deteksi mode: edit vs analisis ────────────────────────────────────
+    edit_mode = _is_edit_intent(user_caption)
+    logger.info(
+        "process_docx: session=%s file=%r edit_mode=%s caption=%r",
+        session_id, original_filename, edit_mode, user_caption[:80],
     )
 
     # ── Langkah 1: Parse DOCX ─────────────────────────────────────────────
@@ -709,34 +758,51 @@ async def process_docx(
         session_id, original_filename, total_sections, total_words,
     )
 
-    # Masukkan hasil parse ke metadata task untuk DocAuditorAgent
+    # Masukkan hasil parse ke metadata task
     task.metadata["docx_sections"]   = sections
     task.metadata["doc_title"]        = doc_title
     task.metadata["docx_file_id"]     = original_filename
     task.metadata["total_words"]      = total_words
-    task.mark_routed("doc_audit")
 
-    # ── Langkah 2: DocAuditorAgent (step-planned) ─────────────────────────
-    doc_auditor = agents.get("doc_auditor")
-    if doc_auditor is None:
-        task.mark_failed("doc_auditor agent tidak terdaftar.")
-        task.result = "❌ Doc Auditor agent tidak tersedia."
-        history.add(session_id, "assistant", task.result)
-        return task
+    # ── Langkah 2: Routing ke agent yang sesuai ───────────────────────────
+    if edit_mode:
+        # ── MODE EDIT: DocEditorAgent ──────────────────────────────────────
+        task.mark_routed("doc_editor")
+        doc_editor = agents.get("doc_editor")
+        if doc_editor is None:
+            task.mark_failed("doc_editor agent tidak terdaftar.")
+            task.result = "❌ Doc Editor agent tidak tersedia."
+            history.add(session_id, "assistant", task.result)
+            return task
 
-    task.mark_processing("doc_auditor")
-    task = await doc_auditor.run(task)
+        task.mark_processing("doc_editor")
+        task = await doc_editor.run(task)
+        task.metadata.pop("docx_sections", None)
 
-    # Bersihkan seksi dari metadata setelah diproses (hemat RAM)
-    task.metadata.pop("docx_sections", None)
+        if not task.result:
+            task.result = "✅ Dokumen berhasil diedit."
 
-    if not task.result:
-        task.result = "✅ Analisis dokumen selesai."
+    else:
+        # ── MODE ANALISIS: DocAuditorAgent ─────────────────────────────────
+        task.mark_routed("doc_audit")
+        doc_auditor = agents.get("doc_auditor")
+        if doc_auditor is None:
+            task.mark_failed("doc_auditor agent tidak terdaftar.")
+            task.result = "❌ Doc Auditor agent tidak tersedia."
+            history.add(session_id, "assistant", task.result)
+            return task
+
+        task.mark_processing("doc_auditor")
+        task = await doc_auditor.run(task)
+        task.metadata.pop("docx_sections", None)
+
+        if not task.result:
+            task.result = "✅ Analisis dokumen selesai."
 
     history.add(session_id, "assistant", task.result)
     logger.info(
-        "process_docx done | session=%s status=%s",
-        session_id, task.status,
+        "process_docx done | session=%s status=%s mode=%s",
+        session_id, task.status, "edit" if edit_mode else "analyze",
     )
     return task
 

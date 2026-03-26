@@ -513,6 +513,36 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
     reply = task.result or "✅ Analisis dokumen selesai."
     await _safe_reply(message, reply)
 
+    # ── Kirim file .docx hasil edit jika ada ──────────────────────────────
+    edited_docx_path = task.metadata.get("document_path")
+    if edited_docx_path and edited_docx_path.lower().endswith(".docx"):
+        try:
+            await context.bot.send_chat_action(
+                chat_id=message.chat_id, action="upload_document"
+            )
+            with open(edited_docx_path, "rb") as f:
+                await message.reply_document(
+                    document=f,
+                    filename=os.path.basename(edited_docx_path),
+                    caption="📝 File Word yang sudah diedit siap diunduh.",
+                    quote=True,
+                )
+            logger.info(
+                "Sent edited DOCX to user=%s path=%s", user.id, edited_docx_path
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to send edited DOCX to user=%s: %s", user.id, exc
+            )
+            await message.reply_text(
+                "⚠️ Gagal mengirim file hasil edit. Coba lagi nanti.", quote=True
+            )
+        finally:
+            try:
+                os.remove(edited_docx_path)
+            except OSError:
+                pass
+
 
 async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Catch-all for unsupported message types."""
