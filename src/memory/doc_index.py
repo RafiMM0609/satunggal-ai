@@ -60,7 +60,7 @@ def _get_conn() -> Generator[sqlite3.Connection, None, None]:
 
 
 def _ensure_tables() -> None:
-    """Buat tabel jika belum ada."""
+    """Buat tabel jika belum ada, dan jalankan migrasi kolom baru."""
     with _get_conn() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS doc_sections (
@@ -106,6 +106,35 @@ def _ensure_tables() -> None:
             CREATE INDEX IF NOT EXISTS idx_pending_edits_session
                 ON doc_pending_edits(session_id, file_id, edit_order);
         """)
+
+        # ── Schema migrations (safe for existing databases) ───────────────
+        # Add columns introduced after initial deployment.
+        existing_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(doc_meta)").fetchall()
+        }
+        if "docx_path" not in existing_cols:
+            conn.execute("ALTER TABLE doc_meta ADD COLUMN docx_path TEXT")
+            logger.info("DocIndex migration: added doc_meta.docx_path")
+
+        existing_pending = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='doc_pending_edits'"
+        ).fetchone()
+        if existing_pending is None:
+            conn.executescript("""
+                CREATE TABLE doc_pending_edits (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id    TEXT NOT NULL,
+                    file_id       TEXT NOT NULL,
+                    edit_order    INTEGER NOT NULL,
+                    instruction   TEXT NOT NULL,
+                    edit_ops_json TEXT NOT NULL,
+                    added_at      TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_pending_edits_session
+                    ON doc_pending_edits(session_id, file_id, edit_order);
+            """)
+            logger.info("DocIndex migration: created doc_pending_edits table")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
