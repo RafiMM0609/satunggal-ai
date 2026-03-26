@@ -160,7 +160,7 @@ class LLMClient:
                 stream=False,
                 **({"format": "json"} if json_mode else {}),
                 options=options or None,
-                keep_alive="-1",
+                keep_alive=-1,
             )
         except Exception as exc:
             logger.exception("LLM[ollama] request failed: %s", exc)
