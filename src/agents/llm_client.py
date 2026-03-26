@@ -151,6 +151,8 @@ class LLMClient:
         if top_p is not None:
             options["top_p"] = top_p
 
+        options["num_ctx"] = 8192
+
         try:
             response = await client.chat(
                 model=resolved_model,
@@ -158,6 +160,7 @@ class LLMClient:
                 stream=False,
                 **({"format": "json"} if json_mode else {}),
                 options=options or None,
+                keep_alive="-1",
             )
         except Exception as exc:
             logger.exception("LLM[ollama] request failed: %s", exc)
