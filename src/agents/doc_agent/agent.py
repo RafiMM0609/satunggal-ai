@@ -59,24 +59,25 @@ _MAX_PARA_TEXT_CHARS       = 120   # preview di paragraph map
 
 # ── Trigger keywords untuk "apply & send" ─────────────────────────────────────
 
-_APPLY_TRIGGERS = frozenset({
-    "berikan", "kirim", "kasih", "beri", "send", "terapkan", "apply",
-})
-_FILE_WORDS = frozenset({"file", "dokumen", "filenya", "dokumennya"})
-_EDIT_WORDS = frozenset({
-    "edit", "diedit", "editnya", "perubahan", "revisi", "semua", "sudah",
-    "hasil", "yang",
+_FILE_WORDS = frozenset({"file", "dokumen", "filenya", "dokumennya", "hasilnya"})
+_APPLY_EDIT_WORDS = frozenset({
+    "edit", "edits", "perubahan", "revisi",
 })
 
 # ── Edit intent keywords ───────────────────────────────────────────────────────
 
 _EDIT_KEYWORDS = frozenset({
+    # Indonesian
     "edit", "ubah", "ganti", "tambah", "hapus", "perbaiki", "revisi",
     "modifikasi", "perbarui", "update", "koreksi", "perbaikan", "replace",
     "rubah", "tukar", "sesuaikan", "sisipkan", "insert", "buang", "delete",
-    "hilangkan", "timpa", "overwrite", "change", "modify", "remove", "correct",
+    "hilangkan", "timpa", "overwrite", "pertegas", "perjelas", "lengkapi",
+    # Action verbs for implementing suggestions
+    "implementasikan", "implementasi", "terapkan", "laksanakan",
+    "eksekusi", "aplikasikan",
+    # English
+    "change", "modify", "remove", "correct",
     "fix", "rewrite", "revise", "append", "add", "alter", "adjustment",
-    "sesuaikan", "pertegas", "perjelas", "lengkapi",
 })
 
 # ── System prompts ─────────────────────────────────────────────────────────────
@@ -117,6 +118,10 @@ _EDITOR_SYSTEM_PROMPT = """\
 Hasilkan operasi edit .docx sebagai JSON. JANGAN tambahkan penjelasan, teks, atau markdown apapun di luar JSON.
 
 Input: daftar paragraf (format: [index] STYLE: teks) + instruksi edit user.
+Jika disediakan bagian "KONTEKS PERCAKAPAN SEBELUMNYA", gunakan untuk memahami
+referensi user (misal "terapkan saran tadi", "implementasikan perubahan yang disarankan",
+"ubah sesuai yang kamu sarankan"). Ambil saran/rekomendasi spesifik dari konteks
+tersebut dan terjemahkan menjadi operasi edit konkret pada paragraf yang tepat.
 
 Operasi yang tersedia (paragraph_index adalah 0-based; null = seluruh dokumen):
 {"op":"replace_text","find":"...","replace":"...","paragraph_index":<int|null>}
@@ -149,24 +154,27 @@ async def _notify(cb: StatusCallback, text: str) -> None:
 
 
 def _is_apply_trigger(text: str) -> bool:
-    """Deteksi apakah user meminta file hasil penerapan semua instruksi edit."""
+    """Deteksi apakah user meminta file hasil penerapan semua instruksi edit.
+
+    HANYA return True jika user secara eksplisit meminta FILE/DOKUMEN.
+    Frasa seperti 'terapkan saran' atau 'terapkan perubahan' tanpa menyebut
+    file/dokumen dianggap sebagai instruksi edit (bukan permintaan file).
+    """
     if not text or not text.strip():
         return False
     words = {w.strip(",.!?;:\"'-()/\\") for w in text.lower().split()}
 
-    # Pattern A: terapkan/apply + (edit|perubahan|revisi|semua|file|dokumen)
-    if {"terapkan", "apply"} & words:
-        if words & (_EDIT_WORDS | _FILE_WORDS):
-            return True
-
-    # Pattern B: berikan/kirim/kasih/beri + file/dokumen + edit/diedit/...
-    if {"berikan", "kirim", "kasih", "beri", "send"} & words:
-        if words & _FILE_WORDS and words & _EDIT_WORDS:
-            return True
-
-    # Pattern C: "berikan file" / "kirim dokumen" (tanpa kata edit)
+    # Pattern A: berikan/kirim/kasih/beri/send + file/dokumen → minta file
     if {"berikan", "kirim", "kasih", "beri", "send"} & words:
         if words & _FILE_WORDS:
+            return True
+
+    # Pattern B: terapkan/apply + file/dokumen → minta penerapan ke file
+    if {"terapkan", "apply"} & words:
+        if words & _FILE_WORDS:
+            return True
+        # 'terapkan semua edit/perubahan' (tanpa file) → juga apply
+        if "semua" in words and words & _APPLY_EDIT_WORDS:
             return True
 
     return False
@@ -553,12 +561,35 @@ class DocAgent(BaseAgent):
         await _notify(status_cb, _build_step_edit_msg(2, total_steps, doc_title))
 
         paragraph_list_str = _build_paragraph_list(paragraph_map)
+
+        # Ambil konteks percakapan terakhir agar LLM bisa memahami referensi
+        # seperti "terapkan saran tadi" atau "implementasikan perubahan yang
+        # disarankan". Cukup ambil beberapa pesan assistant terakhir.
+        recent_context = ""
+        try:
+            history_msgs = self._history.get_as_llm_messages(session_id)
+            # Ambil pesan-pesan terakhir (maks 4 pesan = 2 putaran percakapan)
+            for msg in reversed(history_msgs):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    # Abaikan pesan sistem/konfirmasi pendek
+                    if len(content) > 100:
+                        recent_context = content[:2000]
+                        break
+        except Exception as exc:
+            logger.debug("DocAgent: failed to get history for edit context: %s", exc)
+
         user_prompt = (
             f"Dokumen: **{doc_title}**\n"
             f"Total paragraf: {len(paragraph_map)}\n\n"
             f"=== DAFTAR PARAGRAF ===\n{paragraph_list_str}\n\n"
-            f"=== INSTRUKSI EDIT ===\n{user_instruction}"
         )
+        if recent_context:
+            user_prompt += (
+                f"=== KONTEKS PERCAKAPAN SEBELUMNYA ===\n"
+                f"{recent_context}\n\n"
+            )
+        user_prompt += f"=== INSTRUKSI EDIT ===\n{user_instruction}"
 
         messages = [
             {"role": "system", "content": _EDITOR_SYSTEM_PROMPT},

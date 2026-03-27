@@ -710,7 +710,10 @@ _EDIT_KEYWORDS = frozenset({
     "edit", "ubah", "ganti", "tambah", "hapus", "perbaiki", "revisi",
     "modifikasi", "perbarui", "update", "koreksi", "perbaikan", "replace",
     "rubah", "tukar", "sesuaikan", "sisipkan", "insert", "buang", "delete",
-    "hilangkan", "timpa", "overwrite",
+    "hilangkan", "timpa", "overwrite", "pertegas", "perjelas", "lengkapi",
+    # Action verbs for implementing suggestions
+    "implementasikan", "implementasi", "terapkan", "laksanakan",
+    "eksekusi", "aplikasikan",
     # English
     "change", "modify", "remove", "correct", "fix", "rewrite", "revise",
     "append", "add", "update", "alter",
