@@ -34,6 +34,7 @@ akibat chaining edits berulang pada file yang sudah dimodifikasi.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -235,7 +236,7 @@ def _build_step_analyze_msg(
     steps = [
         ("📋", "Validasi seksi dokumen"),
         ("🗂️", "Membuat Daftar Isi"),
-        ("🧠", f"Meringkas {total_sections} bab"),
+        ("🧠", f"Meringkas {total_sections} bab (paralel)"),
         ("💾", "Menyimpan indeks ke database"),
         ("📤", "Menyiapkan laporan akhir"),
     ]
@@ -273,11 +274,19 @@ def _build_final_report(
     doc_title: str,
     sections_with_summary: list[dict],
     original_filename: str,
+    detection_method: str = "formal",
 ) -> str:
     """Buat laporan lengkap: judul + daftar isi + ringkasan per bab."""
     parts: list[str] = []
 
     parts.append(f"# 📄 Laporan Analisis Dokumen\n**{doc_title}**\n_{original_filename}_\n")
+
+    if detection_method == "heuristic":
+        parts.append(
+            "⚠️ *Catatan:* Struktur bab dideteksi secara heuristik karena dokumen "
+            "tidak menggunakan Heading style standar (bold/ALL CAPS/numbering). "
+            "Periksa daftar isi di bawah untuk memastikan pembagian bab sudah akurat.\n"
+        )
     parts.append("---\n")
 
     toc_lines = ["## 📋 Daftar Isi\n"]
@@ -401,15 +410,16 @@ class DocAgent(BaseAgent):
         # Step 2: Daftar Isi (no LLM)
         await _notify(status_cb, _build_step_analyze_msg(2, total_steps, doc_title, total_sections))
 
-        # Step 3: Ringkas per bab
+        # Step 3: Ringkas per bab (paralel)
         await _notify(status_cb, _build_step_analyze_msg(3, total_steps, doc_title, total_sections))
 
-        sections_with_summary: list[dict[str, Any]] = []
-        for sec in sections:
-            summary = await self._summarize_section(sec, session_id)
-            sec_copy = dict(sec)
-            sec_copy["summary"] = summary
-            sections_with_summary.append(sec_copy)
+        summaries = await asyncio.gather(
+            *[self._summarize_section(sec, session_id) for sec in sections]
+        )
+        sections_with_summary: list[dict[str, Any]] = [
+            {**sec, "summary": summary}
+            for sec, summary in zip(sections, summaries)
+        ]
 
         # Step 4: Simpan ke database (dengan docx_path)
         await _notify(status_cb, _build_step_analyze_msg(4, total_steps, doc_title, total_sections))
@@ -433,7 +443,10 @@ class DocAgent(BaseAgent):
         # Step 5: Laporan akhir
         await _notify(status_cb, _build_step_analyze_msg(5, total_steps, doc_title, total_sections))
 
-        report = _build_final_report(doc_title, sections_with_summary, original_filename)
+        detection_method = task.metadata.get("detection_method", "formal")
+        report = _build_final_report(
+            doc_title, sections_with_summary, original_filename, detection_method
+        )
         task.mark_done(report)
 
         logger.info("DocAgent: analysis done session=%s file=%r", session_id, file_id)

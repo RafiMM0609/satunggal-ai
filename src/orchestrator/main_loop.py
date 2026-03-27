@@ -863,17 +863,19 @@ async def process_docx(
     doc_title: str       = parse_result.get("doc_title", original_filename)
     total_words: int     = parse_result.get("total_words", 0)
     total_sections: int  = parse_result.get("total_sections", len(sections))
+    detection_method: str = parse_result.get("detection_method", "formal")
 
     logger.info(
-        "process_docx: parsed session=%s file=%r sections=%d words=%d",
-        session_id, original_filename, total_sections, total_words,
+        "process_docx: parsed session=%s file=%r sections=%d words=%d method=%s",
+        session_id, original_filename, total_sections, total_words, detection_method,
     )
 
     # Masukkan hasil parse ke metadata task
-    task.metadata["docx_sections"]   = sections
-    task.metadata["doc_title"]        = doc_title
-    task.metadata["docx_file_id"]     = original_filename
-    task.metadata["total_words"]      = total_words
+    task.metadata["docx_sections"]    = sections
+    task.metadata["doc_title"]         = doc_title
+    task.metadata["docx_file_id"]      = original_filename
+    task.metadata["total_words"]       = total_words
+    task.metadata["detection_method"]  = detection_method
 
     # ── Langkah 2: Routing ke agent yang sesuai ───────────────────────────
     if edit_mode:
