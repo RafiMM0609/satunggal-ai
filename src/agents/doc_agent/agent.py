@@ -120,9 +120,15 @@ Hasilkan operasi edit .docx sebagai JSON. JANGAN tambahkan penjelasan, teks, ata
 
 Input: daftar paragraf (format: [index] STYLE: teks) + instruksi edit user.
 Jika disediakan bagian "KONTEKS PERCAKAPAN SEBELUMNYA", gunakan untuk memahami
-referensi user (misal "terapkan saran tadi", "implementasikan perubahan yang disarankan",
-"ubah sesuai yang kamu sarankan"). Ambil saran/rekomendasi spesifik dari konteks
-tersebut dan terjemahkan menjadi operasi edit konkret pada paragraf yang tepat.
+referensi user:
+- Frasa seperti "terapkan saran tadi", "implementasikan perubahan yang disarankan",
+  "ubah sesuai yang kamu sarankan" → cari TEKS REVISI KONKRET di pesan [Assistant]
+  sebelumnya, lalu buat operasi edit yang memetakan teks ASLI di daftar paragraf
+  ke teks REVISI dari saran assistant tersebut.
+- Jika saran assistant berisi beberapa poin revisi, buat operasi edit untuk
+  SETIAP poin: cari teks paragraf yang paling cocok dan ganti dengan versi revisinya.
+- PENTING: Selalu usahakan menghasilkan minimal satu operasi edit konkret jika
+  ada teks revisi yang dapat ditemukan di konteks percakapan.
 
 Operasi yang tersedia (paragraph_index adalah 0-based; null = seluruh dokumen):
 {"op":"replace_text","find":"...","replace":"...","paragraph_index":<int|null>}
@@ -133,7 +139,9 @@ Operasi yang tersedia (paragraph_index adalah 0-based; null = seluruh dokumen):
 Panduan:
 - Gunakan replace_text untuk perubahan kecil (lebih aman untuk format bold/italic)
 - Gunakan replace_paragraph jika konten paragraf berubah seluruhnya
-- Jika instruksi tidak dapat dipetakan ke operasi konkret, kembalikan {"edits":[]}
+- Untuk "replace_text": "find" harus berupa potongan teks yang PASTI ADA di paragraf asli
+- Hanya kembalikan {"edits":[]} jika benar-benar tidak ada teks yang dapat diidentifikasi
+  untuk diubah (misalnya instruksi terlalu abstrak DAN tidak ada saran konkret di konteks).
 - Field "preview" wajib diisi: teks singkat (1-3 kalimat) yang menunjukkan
   seperti apa hasil edit pada bagian yang berubah, agar user bisa mereview
   sebelum menerapkan ke file. Jika edits kosong, jelaskan kenapa.
@@ -577,18 +585,25 @@ class DocAgent(BaseAgent):
 
         # Ambil konteks percakapan terakhir agar LLM bisa memahami referensi
         # seperti "terapkan saran tadi" atau "implementasikan perubahan yang
-        # disarankan". Cukup ambil beberapa pesan assistant terakhir.
+        # disarankan". Ambil beberapa putaran percakapan terakhir (user+assistant)
+        # agar editor LLM mendapat gambaran lengkap tentang saran yang dimaksud.
         recent_context = ""
         try:
             history_msgs = self._history.get_as_llm_messages(session_id)
-            # Ambil pesan-pesan terakhir (maks 4 pesan = 2 putaran percakapan)
-            for msg in reversed(history_msgs):
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    # Abaikan pesan sistem/konfirmasi pendek
-                    if len(content) > 100:
-                        recent_context = content[:2000]
-                        break
+            # Ambil maks 10 pesan terakhir (5 putaran = user+assistant)
+            recent_msgs = history_msgs[-10:]
+            ctx_parts: list[str] = []
+            for msg in recent_msgs:
+                role    = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "user":
+                    ctx_parts.append(f"[User]: {content[:800]}")
+                elif role == "assistant" and content:
+                    # Untuk pesan assistant yang panjang (berisi saran/revisi),
+                    # berikan lebih banyak ruang agar editor LLM bisa memetakannya
+                    # ke paragraf yang konkret.
+                    ctx_parts.append(f"[Assistant]: {content[:3000]}")
+            recent_context = "\n\n".join(ctx_parts)
         except Exception as exc:
             logger.debug("DocAgent: failed to get history for edit context: %s", exc)
 
@@ -611,7 +626,7 @@ class DocAgent(BaseAgent):
 
         try:
             llm_output = await self._llm.chat(
-                messages, max_tokens=1024, temperature=0.1, json_mode=True
+                messages, max_tokens=4096, temperature=0.1, json_mode=True
             )
         except Exception as exc:
             logger.exception("DocAgent: editor LLM failed session=%s: %s", session_id, exc)
@@ -627,16 +642,26 @@ class DocAgent(BaseAgent):
             parsed = _extract_json_from_llm(llm_output)
 
         if parsed is None or not parsed.get("edits"):
-            # Tidak ada operasi – jawab Q&A + informasikan ke user
+            # Tidak ada operasi konkret – jawab Q&A + informasikan ke user
             qa_task = await self._answer_question(task, status_cb)
             n_pending = self._doc_index.get_pending_edit_count(session_id)
-            suffix = (
-                f"\n\n📌 *Instruksi ini dicatat sebagai catatan.* "
-                f"({n_pending} edit tersimpan sejauh ini)\n"
-                "Ketik _\"berikan file\"_ untuk menerapkan semua edit ke dokumen."
+            no_edit_reason = (parsed or {}).get("preview", "")
+            suffix_lines = [
+                f"\n\n📌 *Edit tidak dapat disimpan secara otomatis.*",
+            ]
+            if no_edit_reason:
+                suffix_lines.append(f"_{no_edit_reason}_")
+            suffix_lines.append(
+                "💡 Coba sebutkan teks spesifik yang ingin diubah, misalnya:\n"
+                "_\"ubah kalimat '...' menjadi '...'\"_"
             )
+            if n_pending > 0:
+                suffix_lines.append(
+                    f"({n_pending} edit sebelumnya masih tersimpan — "
+                    "ketik _\"berikan file\"_ untuk menerapkannya)"
+                )
             if qa_task.result:
-                qa_task.result += suffix
+                qa_task.result += "\n".join(suffix_lines)
             return qa_task
 
         edit_ops: list[dict] = parsed.get("edits", [])
