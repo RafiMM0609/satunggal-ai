@@ -79,6 +79,69 @@ def _make_output_path(docx_path: str, session_id: str) -> str:
 
 # ── Core editing functions ────────────────────────────────────────────────────
 
+def _replace_text_cross_runs(para, find: str, replace: str, actual_idx: int) -> list[str]:
+    """
+    Ganti teks yang tersebar di beberapa Run dalam satu paragraf.
+
+    Strategi:
+    - Bangun peta karakter → run untuk seluruh teks paragraf.
+    - Temukan posisi `find` dalam teks lengkap.
+    - Tentukan run mana saja yang terlibat.
+    - Simpan teks pengganti ke run PERTAMA yang terlibat.
+    - Kosongkan teks di run-run berikutnya yang merupakan bagian dari `find`.
+
+    Returns:
+        list[str]: Deskripsi perubahan yang dilakukan.
+    """
+    full_text = para.text
+    find_start = full_text.find(find)
+    if find_start == -1:
+        return []
+
+    find_end = find_start + len(find)
+
+    # Bangun rentang karakter per run: [(run_start, run_end, run_index), ...]
+    runs = para.runs
+    run_ranges: list[tuple[int, int, int]] = []
+    pos = 0
+    for run_idx, run in enumerate(runs):
+        run_len = len(run.text)
+        run_ranges.append((pos, pos + run_len, run_idx))
+        pos += run_len
+
+    # Tentukan run mana yang beririsan dengan posisi `find`
+    involved: list[int] = [
+        run_idx
+        for (r_start, r_end, run_idx) in run_ranges
+        if r_start < find_end and r_end > find_start
+    ]
+    if not involved:
+        return []
+
+    first_run_idx = involved[0]
+    last_run_idx  = involved[-1]
+
+    first_run_char_start = run_ranges[first_run_idx][0]
+    last_run_char_end    = run_ranges[last_run_idx][1]
+
+    # Teks sebelum `find` dalam run pertama
+    prefix_in_first = full_text[first_run_char_start:find_start]
+    # Teks setelah `find` dalam run terakhir
+    suffix_in_last  = full_text[find_end:last_run_char_end]
+
+    new_first_run_text = prefix_in_first + replace + suffix_in_last
+    old_combined_text  = full_text[first_run_char_start:last_run_char_end]
+
+    # Terapkan perubahan
+    runs[first_run_idx].text = new_first_run_text
+    for run_idx in involved[1:]:
+        runs[run_idx].text = ""
+
+    return [
+        f"[¶{actual_idx}] Run(cross): '{old_combined_text}' → '{new_first_run_text}'"
+    ]
+
+
 def _replace_text_in_run_level(
     paragraphs: list,
     find: str,
@@ -88,16 +151,23 @@ def _replace_text_in_run_level(
     """
     Ganti teks di level Run (<w:t>) tanpa menyentuh <w:rPr> (format).
 
+    Langkah 1: Cari `find` di dalam setiap run secara individual (aman untuk
+               formatting bold/italic per-run).
+    Langkah 2: Jika tidak ditemukan di run manapun tetapi ada di para.text
+               (artinya teks terbagi antar-run), gunakan _replace_text_cross_runs
+               sebagai fallback.
+
     Returns:
         list[str]: Deskripsi perubahan yang dilakukan.
     """
-    from docx.oxml.ns import qn
-
     details: list[str] = []
     targets = [paragraphs[paragraph_index]] if paragraph_index is not None else paragraphs
 
     for para_idx, para in enumerate(targets):
         actual_idx = paragraph_index if paragraph_index is not None else para_idx
+
+        # Langkah 1: coba per-run (preserves per-run formatting)
+        replaced_in_single_run = False
         for run in para.runs:
             if find in run.text:
                 old_text = run.text
@@ -105,6 +175,12 @@ def _replace_text_in_run_level(
                 details.append(
                     f"[¶{actual_idx}] Run: '{old_text}' → '{run.text}'"
                 )
+                replaced_in_single_run = True
+
+        # Langkah 2: fallback cross-run jika tidak ditemukan di run tunggal
+        if not replaced_in_single_run and find in para.text:
+            cross_details = _replace_text_cross_runs(para, find, replace, actual_idx)
+            details.extend(cross_details)
 
     return details
 
