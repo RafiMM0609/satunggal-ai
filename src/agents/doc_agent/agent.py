@@ -58,7 +58,7 @@ _MAX_SECTION_CONTENT_CHARS = 4000   # per chunk saat summarization
 _MAX_QA_CONTENT_CHARS      = 5000   # per bab saat Q&A
 _MAX_PARA_TEXT_CHARS       = 250    # preview di paragraph map
 _CHUNK_OVERLAP_CHARS       = 300    # overlap antar chunk agar konteks tidak terputus
-_MAX_SECTION_CHUNKS        = 8      # maks chunk per bab (mencegah abuse pada dokumen raksasa)
+_SUMMARY_BATCH_SIZE        = 4      # chunk diproses paralel per iterasi refine loop (tidak ada batas total)
 _QA_SECTION_LIMIT          = 6      # bab relevan yang diambil untuk Q&A normal
 
 # Kata kunci yang menandai pertanyaan tentang keseluruhan dokumen
@@ -122,6 +122,35 @@ Tugasmu: gabungkan ringkasan-ringkasan ini menjadi SATU ringkasan akhir yang koh
 - Hilangkan duplikasi poin yang sama
 - Pertahankan semua poin unik yang penting
 - Gabungkan catatan kualitas dari seluruh bagian
+
+Format output WAJIB:
+**Ringkasan:**
+- Poin 1
+- Poin 2
+- ...
+
+**Catatan Kualitas:**
+- Catatan (atau "Tidak ada catatan khusus." jika isinya baik)
+
+Gunakan Bahasa Indonesia yang profesional dan ringkas.
+Jangan tambahkan pembukaan atau penutup di luar format di atas.
+"""
+
+_SUMMARY_REFINE_PROMPT = """\
+Kamu adalah Quality Auditor AI yang memproses dokumen sangat panjang secara bertahap
+menggunakan pola Refine: kamu menerima ringkasan akumulatif dari bagian-bagian yang
+sudah diproses, lalu menyempurnakannya dengan konten dari batch baru.
+
+Input yang kamu terima:
+1. **Ringkasan Akumulatif** – ringkasan kohesif yang sudah dibuat dari bagian-bagian sebelumnya.
+2. **Ringkasan Batch Baru** – ringkasan dari bagian dokumen berikutnya yang belum tercakup.
+
+Tugasmu: perbarui Ringkasan Akumulatif dengan mengintegrasikan informasi dari Batch Baru.
+- Pertahankan semua poin penting dan unik dari ringkasan akumulatif
+- Tambahkan poin baru yang hanya ada di batch baru
+- Perkuat atau perbarui poin yang sudah ada jika batch baru memberikan detail tambahan
+- Hilangkan duplikasi yang timbul dari penggabungan
+- Gabungkan dan perbarui catatan kualitas dari semua bagian
 
 Format output WAJIB:
 **Ringkasan:**
@@ -537,12 +566,20 @@ class DocAgent(BaseAgent):
         return task
 
     async def _summarize_section(self, section: dict, session_id: str) -> str:
-        """Ringkas satu seksi via LLM.
+        """
+        Ringkas satu seksi via LLM menggunakan pola Refine (rolling loop).
 
-        Untuk seksi panjang, konten dipecah menjadi beberapa chunk yang tumpang-tindih
-        (overlap), diringkas secara paralel, lalu digabung menjadi satu ringkasan akhir.
-        Pendekatan ini memastikan SELURUH isi bab terbaca, bukan hanya beberapa halaman
-        pertama saja.
+        Algoritma:
+          1. Konten dipecah menjadi chunk bertumpang-tindih (tidak ada batas keras).
+          2. Chunk diproses dalam batch paralel sebesar _SUMMARY_BATCH_SIZE per iterasi.
+          3. Setelah setiap batch:
+               - Iterasi pertama  → gabung batch awal menjadi summary dasar.
+               - Iterasi berikutnya → refine: perbarui summary akumulatif dengan batch baru.
+          4. Hasil akhir adalah summary akumulatif setelah semua chunk diproses.
+
+        Ini memastikan SELURUH konten bab terbaca tanpa batas keras pada jumlah chunk.
+        Kualitas ringkasan meningkat secara progresif karena setiap iterasi tahu
+        konteks apa yang sudah diringkas sebelumnya.
         """
         title   = section.get("title", "")
         content = section.get("content", "")
@@ -558,27 +595,53 @@ class DocAgent(BaseAgent):
         chunks = _split_content_into_chunks(
             content, _MAX_SECTION_CONTENT_CHARS, _CHUNK_OVERLAP_CHARS
         )
-        chunks = chunks[:_MAX_SECTION_CHUNKS]  # batasi agar tidak abuse
         n = len(chunks)
+        total_batches = (n + _SUMMARY_BATCH_SIZE - 1) // _SUMMARY_BATCH_SIZE
 
         logger.info(
-            "DocAgent: section=%r terlalu panjang (%d chars), dipecah jadi %d chunk",
-            title, len(content), n,
+            "DocAgent: section=%r terlalu panjang (%d chars), dipecah jadi %d chunk → "
+            "rolling refine (%d batch × maks %d chunk/batch)",
+            title, len(content), n, total_batches, _SUMMARY_BATCH_SIZE,
         )
 
         if n == 1:
             return await self._summarize_chunk(title, chunks[0], session_id)
 
-        # Ringkas semua chunk secara paralel
-        chunk_summaries = await asyncio.gather(
-            *[
-                self._summarize_chunk(f"{title} (bagian {i + 1}/{n})", chunk, session_id)
-                for i, chunk in enumerate(chunks)
-            ]
-        )
+        accumulated_summary: str = ""
 
-        # Gabungkan ringkasan chunk menjadi satu ringkasan akhir
-        return await self._merge_summaries(title, list(chunk_summaries), session_id)
+        for batch_num, batch_start in enumerate(range(0, n, _SUMMARY_BATCH_SIZE), start=1):
+            batch       = chunks[batch_start : batch_start + _SUMMARY_BATCH_SIZE]
+            batch_end   = batch_start + len(batch)
+
+            logger.info(
+                "DocAgent: section=%r refine batch %d/%d (chunk %d-%d dari %d)",
+                title, batch_num, total_batches, batch_start + 1, batch_end, n,
+            )
+
+            # Ringkas semua chunk dalam batch ini secara paralel
+            batch_summaries: list[str] = list(await asyncio.gather(
+                *[
+                    self._summarize_chunk(
+                        f"{title} (bagian {batch_start + i + 1}/{n})", chunk, session_id
+                    )
+                    for i, chunk in enumerate(batch)
+                ]
+            ))
+
+            if not accumulated_summary:
+                # Iterasi pertama: buat summary dasar dari batch awal
+                accumulated_summary = (
+                    batch_summaries[0]
+                    if len(batch_summaries) == 1
+                    else await self._merge_summaries(title, batch_summaries, session_id)
+                )
+            else:
+                # Iterasi berikutnya: sempurnakan summary akumulatif dengan batch baru
+                accumulated_summary = await self._refine_summary(
+                    title, accumulated_summary, batch_summaries, session_id
+                )
+
+        return accumulated_summary
 
     async def _summarize_chunk(self, title: str, content: str, session_id: str) -> str:
         """Ringkas satu potongan konten via LLM."""
@@ -595,7 +658,7 @@ class DocAgent(BaseAgent):
     async def _merge_summaries(
         self, title: str, chunk_summaries: list[str], session_id: str
     ) -> str:
-        """Gabungkan beberapa ringkasan chunk menjadi satu ringkasan akhir."""
+        """Gabungkan beberapa ringkasan chunk (dalam satu batch) menjadi satu ringkasan kohesif."""
         combined = "\n\n".join(
             f"--- Ringkasan Bagian {i + 1} ---\n{s}"
             for i, s in enumerate(chunk_summaries)
@@ -611,8 +674,47 @@ class DocAgent(BaseAgent):
             return await self._llm.chat(messages, max_tokens=1536, temperature=0.3)
         except Exception as exc:
             logger.exception("DocAgent: merge_summaries failed bab=%r session=%s: %s", title, session_id, exc)
-            # Fallback: gabung manual
             return "\n\n".join(chunk_summaries)
+
+    async def _refine_summary(
+        self,
+        title: str,
+        accumulated: str,
+        new_batch_summaries: list[str],
+        session_id: str,
+    ) -> str:
+        """
+        Sempurnakan ringkasan akumulatif dengan hasil ringkasan batch baru (pola Refine).
+
+        Berbeda dengan _merge_summaries yang menggabungkan sesama chunk baru,
+        metode ini mengintegrasikan batch baru ke dalam ringkasan yang SUDAH ADA,
+        sehingga konteks dari bagian-bagian sebelumnya tetap dipertahankan.
+        """
+        new_batch_combined = "\n\n".join(
+            f"--- Batch Baru Bagian {i + 1} ---\n{s}"
+            for i, s in enumerate(new_batch_summaries)
+        )
+        messages = [
+            {"role": "system", "content": _SUMMARY_REFINE_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Bab/Seksi: **{title}**\n\n"
+                    f"=== RINGKASAN AKUMULATIF (dari bagian-bagian sebelumnya) ===\n"
+                    f"{accumulated}\n\n"
+                    f"=== RINGKASAN BATCH BARU ===\n"
+                    f"{new_batch_combined}"
+                ),
+            },
+        ]
+        try:
+            return await self._llm.chat(messages, max_tokens=1536, temperature=0.3)
+        except Exception as exc:
+            logger.exception(
+                "DocAgent: refine_summary failed bab=%r session=%s: %s", title, session_id, exc
+            )
+            # Fallback: pertahankan akumulatif + tambah batch baru secara naif
+            return accumulated + "\n\n" + new_batch_combined
 
     # ── MODE 2: Q&A Interaktif ────────────────────────────────────────────────
 
