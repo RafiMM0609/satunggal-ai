@@ -54,9 +54,20 @@ StatusCallback = Optional[Callable[[str], Awaitable[None]]]
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_MAX_SECTION_CONTENT_CHARS = 3000
-_MAX_QA_CONTENT_CHARS      = 2000
-_MAX_PARA_TEXT_CHARS       = 120   # preview di paragraph map
+_MAX_SECTION_CONTENT_CHARS = 4000   # per chunk saat summarization
+_MAX_QA_CONTENT_CHARS      = 5000   # per bab saat Q&A
+_MAX_PARA_TEXT_CHARS       = 250    # preview di paragraph map
+_CHUNK_OVERLAP_CHARS       = 300    # overlap antar chunk agar konteks tidak terputus
+_MAX_SECTION_CHUNKS        = 8      # maks chunk per bab (mencegah abuse pada dokumen raksasa)
+_QA_SECTION_LIMIT          = 6      # bab relevan yang diambil untuk Q&A normal
+
+# Kata kunci yang menandai pertanyaan tentang keseluruhan dokumen
+_FULL_DOC_KEYWORDS = frozenset({
+    "keseluruhan", "seluruh", "semua", "semua bab", "semua bagian",
+    "dokumen", "ringkasan keseluruhan", "rangkuman", "ikhtisar",
+    "overview", "summary", "overall", "entire", "whole",
+    "secara keseluruhan", "secara menyeluruh",
+})
 
 # ── Trigger keywords untuk "apply & send" ─────────────────────────────────────
 
@@ -89,6 +100,28 @@ Kamu adalah Quality Auditor AI yang bertugas merangkum isi dokumen teknis.
 Tugasmu adalah menganalisis teks satu bab/seksi dan menghasilkan:
 1. **Ringkasan objektif** (3-5 poin penting, menggunakan bullet point)
 2. **Catatan kualitas** (apakah ada bagian yang kurang jelas, inkonsisten, atau perlu perbaikan)
+
+Format output WAJIB:
+**Ringkasan:**
+- Poin 1
+- Poin 2
+- ...
+
+**Catatan Kualitas:**
+- Catatan (atau "Tidak ada catatan khusus." jika isinya baik)
+
+Gunakan Bahasa Indonesia yang profesional dan ringkas.
+Jangan tambahkan pembukaan atau penutup di luar format di atas.
+"""
+
+_SUMMARY_MERGE_PROMPT = """\
+Kamu adalah Quality Auditor AI. Kamu diberikan beberapa ringkasan parsial dari
+bagian-bagian sebuah bab/seksi dokumen yang panjang.
+
+Tugasmu: gabungkan ringkasan-ringkasan ini menjadi SATU ringkasan akhir yang kohesif.
+- Hilangkan duplikasi poin yang sama
+- Pertahankan semua poin unik yang penting
+- Gabungkan catatan kualitas dari seluruh bagian
 
 Format output WAJIB:
 **Ringkasan:**
@@ -195,6 +228,49 @@ def _is_edit_intent(text: str) -> bool:
         return False
     words = text.lower().split()
     return any(w.strip(",.!?;:\"'-()/\\") in _EDIT_KEYWORDS for w in words)
+
+
+def _split_content_into_chunks(
+    content: str, chunk_size: int, overlap: int
+) -> list[str]:
+    """
+    Pecah teks panjang menjadi chunk-chunk bertumpang-tindih (overlap).
+
+    Setiap chunk maksimal `chunk_size` karakter. Chunk berikutnya dimulai
+    dari `chunk_size - overlap` karakter setelah awal chunk sebelumnya,
+    sehingga pergantian antar-chunk tidak dipotong di tengah kalimat secara
+    drastis. Pemisahan diprioritaskan pada batas baris/spasi.
+    """
+    if len(content) <= chunk_size:
+        return [content]
+
+    chunks: list[str] = []
+    start = 0
+    while start < len(content):
+        end = start + chunk_size
+        if end >= len(content):
+            chunks.append(content[start:])
+            break
+
+        # Cari batas alami terdekat (baris baru / spasi) agar tidak potong kata
+        boundary = content.rfind("\n", start, end)
+        if boundary <= start:
+            boundary = content.rfind(" ", start, end)
+        if boundary <= start:
+            boundary = end  # Tidak ada batas alami, potong paksa
+
+        chunks.append(content[start:boundary])
+        start = boundary - overlap  # mundur sebesar overlap agar ada tumpang tindih
+
+    return [c for c in chunks if c.strip()]
+
+
+def _is_full_doc_query(text: str) -> bool:
+    """Deteksi apakah pertanyaan membutuhkan konteks seluruh dokumen."""
+    if not text:
+        return False
+    lower = text.lower()
+    return any(kw in lower for kw in _FULL_DOC_KEYWORDS)
 
 
 def _extract_json_from_llm(text: str) -> dict | None:
@@ -461,26 +537,82 @@ class DocAgent(BaseAgent):
         return task
 
     async def _summarize_section(self, section: dict, session_id: str) -> str:
-        """Ringkas satu seksi via LLM."""
+        """Ringkas satu seksi via LLM.
+
+        Untuk seksi panjang, konten dipecah menjadi beberapa chunk yang tumpang-tindih
+        (overlap), diringkas secara paralel, lalu digabung menjadi satu ringkasan akhir.
+        Pendekatan ini memastikan SELURUH isi bab terbaca, bukan hanya beberapa halaman
+        pertama saja.
+        """
         title   = section.get("title", "")
         content = section.get("content", "")
 
         if not content.strip():
             return "_Bab ini tidak memiliki konten teks._"
 
-        truncated = content[:_MAX_SECTION_CONTENT_CHARS]
-        if len(content) > _MAX_SECTION_CONTENT_CHARS:
-            truncated += "\n... _(konten dipotong untuk efisiensi)_"
+        # Jika konten muat dalam satu chunk, proses langsung
+        if len(content) <= _MAX_SECTION_CONTENT_CHARS:
+            return await self._summarize_chunk(title, content, session_id)
 
+        # Pecah jadi chunk-chunk bertumpang-tindih agar konteks antar-chunk terjaga
+        chunks = _split_content_into_chunks(
+            content, _MAX_SECTION_CONTENT_CHARS, _CHUNK_OVERLAP_CHARS
+        )
+        chunks = chunks[:_MAX_SECTION_CHUNKS]  # batasi agar tidak abuse
+        n = len(chunks)
+
+        logger.info(
+            "DocAgent: section=%r terlalu panjang (%d chars), dipecah jadi %d chunk",
+            title, len(content), n,
+        )
+
+        if n == 1:
+            return await self._summarize_chunk(title, chunks[0], session_id)
+
+        # Ringkas semua chunk secara paralel
+        chunk_summaries = await asyncio.gather(
+            *[
+                self._summarize_chunk(f"{title} (bagian {i + 1}/{n})", chunk, session_id)
+                for i, chunk in enumerate(chunks)
+            ]
+        )
+
+        # Gabungkan ringkasan chunk menjadi satu ringkasan akhir
+        return await self._merge_summaries(title, list(chunk_summaries), session_id)
+
+    async def _summarize_chunk(self, title: str, content: str, session_id: str) -> str:
+        """Ringkas satu potongan konten via LLM."""
         messages = [
             {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
-            {"role": "user",   "content": f"Bab/Seksi: **{title}**\n\nKonten:\n{truncated}"},
+            {"role": "user",   "content": f"Bab/Seksi: **{title}**\n\nKonten:\n{content}"},
         ]
         try:
             return await self._llm.chat(messages, max_tokens=1024, temperature=0.3)
         except Exception as exc:
-            logger.exception("DocAgent: summarize failed bab=%r session=%s: %s", title, session_id, exc)
-            return "_Gagal meringkas bab ini._"
+            logger.exception("DocAgent: summarize_chunk failed bab=%r session=%s: %s", title, session_id, exc)
+            return "_Gagal meringkas bagian ini._"
+
+    async def _merge_summaries(
+        self, title: str, chunk_summaries: list[str], session_id: str
+    ) -> str:
+        """Gabungkan beberapa ringkasan chunk menjadi satu ringkasan akhir."""
+        combined = "\n\n".join(
+            f"--- Ringkasan Bagian {i + 1} ---\n{s}"
+            for i, s in enumerate(chunk_summaries)
+        )
+        messages = [
+            {"role": "system", "content": _SUMMARY_MERGE_PROMPT},
+            {
+                "role": "user",
+                "content": f"Bab/Seksi: **{title}**\n\nRingkasan per bagian:\n{combined}",
+            },
+        ]
+        try:
+            return await self._llm.chat(messages, max_tokens=1536, temperature=0.3)
+        except Exception as exc:
+            logger.exception("DocAgent: merge_summaries failed bab=%r session=%s: %s", title, session_id, exc)
+            # Fallback: gabung manual
+            return "\n\n".join(chunk_summaries)
 
     # ── MODE 2: Q&A Interaktif ────────────────────────────────────────────────
 
@@ -492,25 +624,41 @@ class DocAgent(BaseAgent):
         session_id = task.session_id
         user_query = task.user_input
 
-        await _notify(status_cb, "🔍 *Mencari bab yang relevan di dokumen...*")
+        # Deteksi apakah pertanyaan membutuhkan konteks seluruh dokumen
+        is_full_doc_query = _is_full_doc_query(user_query)
 
-        relevant_sections = self._doc_index.search_sections(
-            session_id=session_id,
-            query=user_query,
-            limit=3,
-        )
+        if is_full_doc_query:
+            await _notify(status_cb, "📖 *Membaca keseluruhan dokumen untuk menjawab...*")
+            relevant_sections = self._doc_index.get_sections(session_id)
+        else:
+            await _notify(status_cb, "🔍 *Mencari bab yang relevan di dokumen...*")
+            relevant_sections = self._doc_index.search_sections(
+                session_id=session_id,
+                query=user_query,
+                limit=_QA_SECTION_LIMIT,
+            )
 
         context_parts = []
         for sec in relevant_sections:
             idx     = sec.get("bab_index", "?")
             title   = sec.get("bab_title", "")
-            content = sec.get("content_text", "")
-            summary = sec.get("summary", "")
-            context_parts.append(
-                f"### Bab {idx}: {title}\n\n"
-                f"**Teks Asli:**\n{content[:_MAX_QA_CONTENT_CHARS]}\n\n"
-                f"**Ringkasan:**\n{summary}"
-            )
+            content = sec.get("content_text", "") or ""
+            summary = sec.get("summary", "") or ""
+
+            # Untuk full-doc query, gunakan ringkasan (sudah mencakup seluruh isi)
+            # Untuk query spesifik, sertakan teks asli + ringkasan
+            if is_full_doc_query:
+                context_parts.append(
+                    f"### Bab {idx}: {title}\n\n"
+                    f"**Ringkasan:**\n{summary}\n\n"
+                    f"**Teks Asli (cuplikan):**\n{content[:_MAX_QA_CONTENT_CHARS]}"
+                )
+            else:
+                context_parts.append(
+                    f"### Bab {idx}: {title}\n\n"
+                    f"**Teks Asli:**\n{content[:_MAX_QA_CONTENT_CHARS]}\n\n"
+                    f"**Ringkasan:**\n{summary}"
+                )
 
         doc_context = "\n\n---\n\n".join(context_parts)
         history_messages = self._history.get_as_llm_messages(session_id)
@@ -519,7 +667,8 @@ class DocAgent(BaseAgent):
 
         user_prompt = (
             f"Pertanyaan/Instruksi: {user_query}\n\n"
-            f"Konten bab yang relevan:\n\n{doc_context}"
+            f"{'Seluruh bab dokumen' if is_full_doc_query else 'Bab yang relevan'} "
+            f"({len(relevant_sections)} bab):\n\n{doc_context}"
         )
 
         messages = [{"role": "system", "content": _QA_SYSTEM_PROMPT}]
@@ -530,7 +679,7 @@ class DocAgent(BaseAgent):
             messages[-1] = {"role": "user", "content": user_prompt}
 
         try:
-            answer = await self._llm.chat(messages, max_tokens=2048, temperature=0.5)
+            answer = await self._llm.chat(messages, max_tokens=3000, temperature=0.5)
             task.mark_done(answer)
         except Exception as exc:
             logger.exception("DocAgent QA LLM failed session=%s: %s", session_id, exc)
