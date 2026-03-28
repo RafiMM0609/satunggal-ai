@@ -53,6 +53,12 @@ _SPA_RENDER_WAIT_MS      = 3_000    # extra wait for SPA to render content after
 _CLICK_LOCATE_TIMEOUT_MS = 8_000    # timeout for each individual click locator attempt
 _MAX_LOCATORS            = 60       # max interactive elements returned in get_content "locators"
 
+# Full-page content (get_full_content): auto-scroll settings
+_FULL_PAGE_SCROLL_PX        = 600   # pixels per scroll step when sweeping the full page
+_FULL_PAGE_SCROLL_WAIT_S    = 0.5   # seconds to wait after each scroll for lazy content to render
+_MAX_FULL_PAGE_SCROLL_STEPS = 30    # safety cap – stops auto-scroll after this many steps
+_MAX_FULL_PAGE_TEXT_CHARS   = 50_000  # higher text cap for full-page content extraction
+
 # ARIA roles treated as interactive – used to build the compact locators list in get_content.
 # These match Playwright's get_by_role() expectations, so the LLM can use the "name" value
 # directly in click/type params without reading any raw HTML.
@@ -112,9 +118,9 @@ class BrowserNavigatorTool(BaseTool):
 
         task.metadata["browser_action"]  = "navigate" | "click" | "type" |
                                            "scroll" | "screenshot" |
-                                           "get_content" | "get_links" |
-                                           "extract_data" | "save_session" |
-                                           "select_option"
+                                           "get_content" | "get_full_content" |
+                                           "get_links" | "extract_data" |
+                                           "save_session" | "select_option"
         task.metadata["target_url"]      = "https://..."          # for navigate
         task.metadata["click_text"]      = "Login"                # for click
         task.metadata["type_selector"]   = "#email"               # for type (CSS selector)
@@ -134,8 +140,10 @@ class BrowserNavigatorTool(BaseTool):
     ``success``       : bool – whether the action succeeded
     ``screenshot_b64``: str  – base64-encoded PNG (only for "screenshot")
     ``session_path``  : str  – path to saved session file (only for "save_session")
-    ``page_text``     : str  – visible page text (only for "get_content")
-    ``a11y_tree``     : list – accessibility tree nodes (only for "get_content")
+    ``page_text``     : str  – visible page text ("get_content" / "get_full_content")
+    ``a11y_tree``     : list – accessibility tree nodes ("get_content" / "get_full_content")
+    ``full_page``     : bool – True only for "get_full_content" (signals complete text)
+    ``scroll_steps``  : int  – scroll iterations used (only for "get_full_content")
     ``items``         : list – extracted data items (only for "extract_data")
     ``message``       : str  – human-readable outcome description
     ``error``         : str  – present only on failure
@@ -174,6 +182,8 @@ class BrowserNavigatorTool(BaseTool):
                 return await self._action_screenshot(task)
             elif action == "get_content":
                 return await self._action_get_content(task)
+            elif action == "get_full_content":
+                return await self._action_get_full_content(task)
             elif action == "get_links":
                 return await self._action_get_links(task)
             elif action == "extract_data":
@@ -759,6 +769,99 @@ class BrowserNavigatorTool(BaseTool):
             "locators":  locators,
             "message":   f"Content extracted from {self._page.url} – \"{title}\"",
         }
+
+    async def _action_get_full_content(self, task: "AgentTask") -> dict[str, Any]:
+        """Extract the COMPLETE page content by auto-scrolling from top to bottom.
+
+        When the client explicitly requests **all** content on a page (e.g.
+        "tampilkan semua konten", "berikan seluruh isi halaman"), this action:
+
+        1. Scrolls back to the top of the page.
+        2. Iteratively scrolls down by ``_FULL_PAGE_SCROLL_PX`` pixels at a time,
+           pausing ``_FULL_PAGE_SCROLL_WAIT_S`` seconds after each step so that
+           lazy-loaded (infinite-scroll) content can render into the DOM.
+        3. Stops when the scroll position no longer advances (bottom reached) or
+           after at most ``_MAX_FULL_PAGE_SCROLL_STEPS`` iterations.
+        4. Extracts the full visible text from the now-complete DOM and returns it
+           without the usual ``_MAX_PAGE_TEXT_CHARS`` truncation (capped at the
+           much larger ``_MAX_FULL_PAGE_TEXT_CHARS`` instead).
+
+        The result carries ``"full_page": True`` so downstream code (the agent
+        summariser) can recognise that this is a comprehensive snapshot and
+        allocate a larger text budget when building the LLM summary.
+        """
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "get_full_content",
+            }
+
+        # ── 1. Scroll to the very top so we start consistently ────────────────
+        await self._page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(_FULL_PAGE_SCROLL_WAIT_S)
+
+        # ── 2. Incrementally scroll to the bottom ────────────────────────────
+        scroll_steps = 0
+        prev_scroll_y: float = -1.0
+
+        for _ in range(_MAX_FULL_PAGE_SCROLL_STEPS):
+            scroll_info: dict[str, float] = await self._page.evaluate(
+                """() => ({
+                    scrollY:      window.scrollY,
+                    scrollHeight: document.body.scrollHeight,
+                    innerHeight:  window.innerHeight
+                })"""
+            )
+            scroll_y      = scroll_info["scrollY"]
+            scroll_height = scroll_info["scrollHeight"]
+            inner_height  = scroll_info["innerHeight"]
+
+            # Bottom reached when the viewport touches the end of the document
+            if scroll_y + inner_height >= scroll_height:
+                break
+
+            # Safety: stop if position did not advance (non-scrollable page)
+            if scroll_y == prev_scroll_y:
+                break
+
+            prev_scroll_y = scroll_y
+            await self._page.evaluate(f"window.scrollBy(0, {_FULL_PAGE_SCROLL_PX})")
+            await asyncio.sleep(_FULL_PAGE_SCROLL_WAIT_S)
+            scroll_steps += 1
+
+        # ── 3. Extract full content from the now-complete DOM ─────────────────
+        title     = await self._page.title()
+        page_text = await self._extract_page_text()
+        a11y_tree = await self._extract_page_a11y()
+
+        locators = [
+            n for n in a11y_tree
+            if n.get("role", "").lower() in _INTERACTIVE_ROLES and n.get("name")
+        ][:_MAX_LOCATORS]
+
+        char_count = len(page_text)
+        logger.info(
+            "BrowserNavigatorTool: get_full_content – %d scroll steps, %d chars, url=%s",
+            scroll_steps, char_count, self._page.url,
+        )
+
+        return {
+            "action":       "get_full_content",
+            "success":      True,
+            "title":        title,
+            "url":          self._page.url,
+            "page_text":    page_text[:_MAX_FULL_PAGE_TEXT_CHARS],
+            "a11y_tree":    a11y_tree,
+            "locators":     locators,
+            "full_page":    True,
+            "scroll_steps": scroll_steps,
+            "message": (
+                f"Full content extracted from {self._page.url} – \"{title}\" "
+                f"({scroll_steps} scroll steps, {char_count:,} chars)"
+            ),
+        }
+
 
     async def _action_extract_data(self, task: "AgentTask") -> dict[str, Any]:
         """Extract structured list data from the current page.

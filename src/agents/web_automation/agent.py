@@ -29,10 +29,12 @@ Workflow (true ReAct loop)
 
   Key exploration actions
   -----------------------
-  • ``get_links``   – extracts all navigable links from the current page so the
-                      LLM can pick the most relevant one and follow it.
-  • ``navigate``    – opens a URL (reuses the existing browser context).
-  • ``get_content`` – reads the full text of the current page.
+  • ``get_links``        – extracts all navigable links from the current page so the
+                           LLM can pick the most relevant one and follow it.
+  • ``navigate``         – opens a URL (reuses the existing browser context).
+  • ``get_content``      – reads the visible text of the current page (fast, partial).
+  • ``get_full_content`` – auto-scrolls the full page then returns complete text;
+                           use when the user explicitly requests ALL page content.
 
 VPS constraints honoured
 ─────────────────────────
@@ -107,29 +109,39 @@ pengguna menjadi serangkaian langkah browsing yang terurut dan dapat dieksekusi.
 
 Setiap langkah HARUS berupa JSON object dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll", \
-"screenshot", "get_content", "get_links", "extract_data", "save_session", \
-"select_option", "done"]
+"screenshot", "get_content", "get_full_content", "get_links", "extract_data", \
+"save_session", "select_option", "done"]
   "params": object parameter yang sesuai dengan action:
-    - read_url:       {"url": "..."}
-    - navigate:       {"url": "..."}
-    - click:          {"text": "..."}
-    - type:           {"selector": "...", "label": "...", "text": "..."}
-                      (selector = CSS selector jika diketahui; label = teks label/placeholder
-                       field tersebut agar dapat ditemukan secara akurat; keduanya boleh kosong
-                       tapi SANGAT DIANJURKAN untuk mengisi setidaknya salah satu agar field
-                       yang tepat dapat diidentifikasi, terutama saat mengisi lebih dari 1 field)
-    - scroll:         {"direction": "down"|"up"}
-    - screenshot:     {}
-    - get_content:    {}
-    - get_links:      {}
-    - extract_data:   {"selector": "...", "attribute": "text"|"href", "limit": 50}
-    - save_session:   {"url": "..."}
-    - select_option:  {"text": "...", "selector": "..."}
-                      (text = teks opsi yang ingin dipilih, contoh: "Kopi & Teh";
-                       selector = CSS selector elemen <select> opsional jika diketahui;
-                       GUNAKAN ini untuk memilih kategori, radio button, atau toggle button
-                       yang merupakan elemen kustom dalam form)
-    - done:           {"summary": "ringkasan hasil untuk pengguna"}
+    - read_url:          {"url": "..."}
+    - navigate:          {"url": "..."}
+    - click:             {"text": "..."}
+    - type:              {"selector": "...", "label": "...", "text": "..."}
+                         (selector = CSS selector jika diketahui; label = teks label/placeholder
+                          field tersebut agar dapat ditemukan secara akurat; keduanya boleh kosong
+                          tapi SANGAT DIANJURKAN untuk mengisi setidaknya salah satu agar field
+                          yang tepat dapat diidentifikasi, terutama saat mengisi lebih dari 1 field)
+    - scroll:            {"direction": "down"|"up"}
+    - screenshot:        {}
+    - get_content:       {}
+    - get_full_content:  {}
+    - get_links:         {}
+    - extract_data:      {"selector": "...", "attribute": "text"|"href", "limit": 50}
+    - save_session:      {"url": "..."}
+    - select_option:     {"text": "...", "selector": "..."}
+                         (text = teks opsi yang ingin dipilih, contoh: "Kopi & Teh";
+                          selector = CSS selector elemen <select> opsional jika diketahui;
+                          GUNAKAN ini untuk memilih kategori, radio button, atau toggle button
+                          yang merupakan elemen kustom dalam form)
+    - done:              {"summary": "ringkasan hasil untuk pengguna"}
+
+Kapan menggunakan "get_content" vs "get_full_content":
+  • "get_content"       – gunakan untuk membaca sebagian konten halaman (default, cepat).
+  • "get_full_content"  – gunakan HANYA ketika pengguna secara EKSPLISIT meminta
+    SELURUH isi halaman, misalnya: "tampilkan semua konten", "berikan seluruh isi
+    halaman", "scroll sampai habis", "ambil semua teks di halaman ini", "baca
+    keseluruhan artikel", "full page content". Action ini akan auto-scroll dari
+    atas ke bawah agar konten lazy-load termuat sepenuhnya, lalu mengembalikan
+    teks lengkap tanpa pemotongan.
 
 Strategi Locator Efisien (Hemat Token – WAJIB DIIKUTI):
   • JANGAN memasukkan langkah "get_content" sebelum setiap klik hanya untuk membaca HTML.
@@ -245,25 +257,35 @@ riwayat langkah yang sudah dilakukan, tentukan SATU langkah berikutnya yang perl
 
 Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll",
-            "screenshot", "get_content", "get_links", "extract_data",
-            "save_session", "select_option", "done"]
+            "screenshot", "get_content", "get_full_content", "get_links",
+            "extract_data", "save_session", "select_option", "done"]
   "params": parameter yang sesuai dengan action:
-    - read_url:      {"url": "..."}
-    - navigate:      {"url": "..."}
-    - click:         {"text": "..."}
-    - type:          {"selector": "...", "label": "...", "text": "..."}
-    - scroll:        {"direction": "down"|"up"}
-    - screenshot:    {}
-    - get_content:   {}
-    - get_links:     {}
-    - extract_data:  {"selector": "...", "attribute": "text"|"href", "limit": 50}
-    - save_session:  {"url": "..."}
-    - select_option: {"text": "...", "selector": "..."}
-                     (text = teks opsi yang ingin dipilih, contoh: "Kopi & Teh";
-                      selector = CSS selector elemen <select> opsional;
-                      GUNAKAN untuk memilih kategori, radio button, toggle button kustom)
-    - done:          {"summary": "ringkasan lengkap hasil untuk pengguna"}
+    - read_url:          {"url": "..."}
+    - navigate:          {"url": "..."}
+    - click:             {"text": "..."}
+    - type:              {"selector": "...", "label": "...", "text": "..."}
+    - scroll:            {"direction": "down"|"up"}
+    - screenshot:        {}
+    - get_content:       {}
+    - get_full_content:  {}
+    - get_links:         {}
+    - extract_data:      {"selector": "...", "attribute": "text"|"href", "limit": 50}
+    - save_session:      {"url": "..."}
+    - select_option:     {"text": "...", "selector": "..."}
+                         (text = teks opsi yang ingin dipilih, contoh: "Kopi & Teh";
+                          selector = CSS selector elemen <select> opsional;
+                          GUNAKAN untuk memilih kategori, radio button, toggle button kustom)
+    - done:              {"summary": "ringkasan lengkap hasil untuk pengguna"}
   "reasoning": penjelasan singkat mengapa langkah ini dipilih (1-2 kalimat)
+
+Kapan menggunakan "get_content" vs "get_full_content":
+  • "get_content"       – gunakan untuk membaca sebagian konten halaman (default, hemat token).
+  • "get_full_content"  – gunakan HANYA ketika pengguna secara EKSPLISIT meminta
+    SELURUH isi halaman, misalnya: "tampilkan semua konten", "berikan seluruh isi
+    halaman", "scroll sampai habis dan ambil semua", "full content", "baca semua
+    artikel ini", "keseluruhan konten". Action ini auto-scroll dari atas ke bawah
+    agar konten lazy-load termuat, lalu mengembalikan teks lengkap halaman.
+    JANGAN gunakan jika pengguna hanya ingin berinteraksi dengan halaman.
 
 Strategi Locator Efisien (Hemat Token – WAJIB DIIKUTI):
   • JANGAN membaca seluruh HTML sebelum klik. Playwright mencari elemen secara otomatis
@@ -318,6 +340,7 @@ Aturan:
 _MAX_REACT_STEPS       = 20    # max number of tool-execution steps in the ReAct loop
 _MAX_TOKENS            = 2048
 _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
+_FULL_PAGE_SUMMARISE_TEXT_CHARS = 8_000  # higher budget for get_full_content results
 _SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser
 _HISTORY_MSG_CHARS     = 500   # max characters per message included in planner context
 _MAX_ERROR_MSG_CHARS   = 200   # max error message characters included in action log entries
@@ -418,9 +441,9 @@ class WebAutomationAgent(BaseAgent):
                 task.tool_results[f"step_{i}_{action}"] = tool_result
 
                 # Track the last navigated URL per session for follow-up commands.
-                # get_content and get_links also return the current page URL, which
-                # keeps the session URL accurate even when no navigation occurred.
-                if action in ("navigate", "read_url", "get_content", "get_links"):
+                # get_content, get_full_content, and get_links also return the current
+                # page URL, which keeps the session URL accurate even when no navigation occurred.
+                if action in ("navigate", "read_url", "get_content", "get_full_content", "get_links"):
                     visited_url = tool_result.get("url") or params.get("url", "")
                     if visited_url and not tool_result.get("error"):
                         _session_last_url[task.session_id] = visited_url
@@ -659,6 +682,19 @@ class WebAutomationAgent(BaseAgent):
                 f"nodes={len(result.get('a11y_tree', []))}"
             )
 
+        elif action == "get_full_content":
+            task.metadata["browser_action"] = "get_full_content"
+            result = await navigator.run(task)
+            if result.get("url") and not result.get("error"):
+                _session_last_url[task.session_id] = result["url"]
+            log = (
+                f"[{step_num}] get_full_content → "
+                f"title={result.get('title', '?')!r} "
+                f"chars={len(result.get('page_text', ''))} "
+                f"scroll_steps={result.get('scroll_steps', 0)} "
+                f"nodes={len(result.get('a11y_tree', []))}"
+            )
+
         elif action == "get_links":
             task.metadata["browser_action"] = "get_links"
             result = await navigator.run(task)
@@ -721,12 +757,19 @@ class WebAutomationAgent(BaseAgent):
         for key, val in tool_results.items():
             if not isinstance(val, dict):
                 continue
-            # Page text from read_url or get_content
+            # Page text from read_url, get_content, or get_full_content.
+            # Use a larger text budget for get_full_content so the LLM can
+            # present the complete page content requested by the user.
             if val.get("page_text"):
                 title = val.get("title", "")
                 url   = val.get("url",   "")
                 header = f"[{key}] {title} ({url})" if (title or url) else f"[{key}]"
-                page_snippets.append(f"{header}:\n{val['page_text'][:_SUMMARISE_TEXT_CHARS]}")
+                text_limit = (
+                    _FULL_PAGE_SUMMARISE_TEXT_CHARS
+                    if val.get("full_page")
+                    else _SUMMARISE_TEXT_CHARS
+                )
+                page_snippets.append(f"{header}:\n{val['page_text'][:text_limit]}")
             # Error page info from click results
             if val.get("page_error"):
                 page_snippets.append(f"[{key}] PAGE_ERROR: {val['page_error'][:_SUMMARISE_TEXT_CHARS]}")
