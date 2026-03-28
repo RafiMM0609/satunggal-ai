@@ -131,6 +131,21 @@ Setiap langkah HARUS berupa JSON object dengan field berikut:
                        yang merupakan elemen kustom dalam form)
     - done:           {"summary": "ringkasan hasil untuk pengguna"}
 
+Strategi Locator Efisien (Hemat Token – WAJIB DIIKUTI):
+  • JANGAN memasukkan langkah "get_content" sebelum setiap klik hanya untuk membaca HTML.
+    Playwright menemukan elemen secara otomatis menggunakan strategi bertingkat:
+    get_by_role → get_by_label → get_by_text → JS DOM walk.
+  • Jika teks tombol/link sudah diketahui (misalnya "Login", "Submit", "Masuk"),
+    langsung buat langkah "click" dengan teks tersebut TANPA "get_content" terlebih dahulu.
+  • Playwright menunggu otomatis (auto-wait) – TIDAK PERLU menambahkan langkah "tunggu"
+    atau "screenshot" hanya untuk memastikan elemen sudah muncul sebelum diklik.
+  • Gunakan "get_content" hanya ketika:
+      (a) Halaman baru dibuka dan kamu belum tahu elemen apa yang tersedia, atau
+      (b) Kamu perlu membaca ISI KONTEN halaman untuk menjawab pertanyaan pengguna.
+  • Hasil "get_content" menyertakan field "locators" – daftar elemen interaktif
+    ({role, name}) dari Accessibility Tree. Gunakan "name" sebagai "text" pada "click"
+    atau "label" pada "type". Ini jauh lebih ringkas daripada membaca seluruh page_text.
+
 Panduan penggunaan action:
   • Gunakan "navigate" untuk membuka URL, lalu "click" untuk berinteraksi,
     kemudian "get_content" untuk membaca konten halaman terkini.
@@ -250,6 +265,23 @@ Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
     - done:          {"summary": "ringkasan lengkap hasil untuk pengguna"}
   "reasoning": penjelasan singkat mengapa langkah ini dipilih (1-2 kalimat)
 
+Strategi Locator Efisien (Hemat Token – WAJIB DIIKUTI):
+  • JANGAN membaca seluruh HTML sebelum klik. Playwright mencari elemen secara otomatis
+    menggunakan teks/label – kamu TIDAK perlu memanggil "get_content" sebelum setiap klik.
+  • "click" dan "type" menggunakan strategi bertingkat: get_by_role → get_by_label →
+    get_by_text → JS DOM walk. Cukup berikan teks tombol/link yang terlihat di halaman.
+  • Jika teks tombol/link sudah diketahui (dari riwayat atau konteks), langsung gunakan
+    "click" dengan teks tersebut TANPA memanggil "get_content" terlebih dahulu.
+  • Playwright menunggu otomatis (auto-wait) hingga elemen muncul – TIDAK PERLU menambahkan
+    langkah "tunggu" atau "get_content" hanya untuk memverifikasi elemen ada.
+  • Gunakan "get_content" hanya ketika:
+      (a) Kamu belum tahu elemen apa yang ada di halaman (halaman baru dibuka), atau
+      (b) Kamu perlu membaca ISI KONTEN halaman (bukan hanya berinteraksi dengannya).
+  • Setelah "get_content", gunakan field "locators" dari hasilnya – daftar elemen interaktif
+    ({role, name}) dari Accessibility Tree. Gunakan "name" sebagai "text" pada "click"
+    atau "label" pada "type" untuk langkah berikutnya. JANGAN baca page_text hanya untuk
+    mencari nama tombol; gunakan "locators" yang jauh lebih ringkas.
+
 Panduan eksplorasi halaman dokumentasi / pencarian konten:
   • Saat diminta mengeksplor, mencari, atau menemukan konten tertentu dalam sebuah halaman:
     1. Mulai dengan "navigate" atau "read_url" ke URL yang diberikan
@@ -291,6 +323,7 @@ _HISTORY_MSG_CHARS     = 500   # max characters per message included in planner 
 _MAX_ERROR_MSG_CHARS   = 200   # max error message characters included in action log entries
 _REACT_RESULT_TEXT_CHARS = 800  # max page_text chars kept in each compact ReAct step result
 _REACT_LINKS_LIMIT     = 60    # max links kept per step in compact ReAct context
+_REACT_LOCATORS_LIMIT  = 30    # max interactive element locators kept per step in compact context
 
 _SKIP_KEYS = frozenset({"screenshot_b64", "a11y_tree"})
 
@@ -302,6 +335,11 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
     truncates large text to keep per-step token usage within a safe budget.
     The resulting dict is serialised as JSON and appended to the accumulated
     steps context that the LLM reads on every planning call.
+
+    The ``locators`` field (interactive elements from the a11y tree) is
+    preserved but limited to ``_REACT_LOCATORS_LIMIT`` entries so the LLM
+    can use element names directly in subsequent ``click``/``type`` actions
+    without having to parse the full page HTML.
     """
     compact = {k: v for k, v in result.items() if k not in _SKIP_KEYS}
     # Truncate long page text so it doesn't dominate the context
@@ -314,6 +352,9 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
     # Limit extracted items list
     if "items" in compact and isinstance(compact["items"], list):
         compact["items"] = compact["items"][:30]
+    # Limit interactive locators – the LLM uses these to target click/type actions
+    if "locators" in compact and isinstance(compact["locators"], list):
+        compact["locators"] = compact["locators"][:_REACT_LOCATORS_LIMIT]
     return compact
 
 
