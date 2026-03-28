@@ -51,6 +51,16 @@ _MAX_PAGE_TEXT_CHARS     = 8_000    # truncation limit for get_content page text
 _CLICK_NAV_TEXT_CHARS    = 3_000    # page-text snippet captured inside click result on navigation
 _SPA_RENDER_WAIT_MS      = 3_000    # extra wait for SPA to render content after navigation/click
 _CLICK_LOCATE_TIMEOUT_MS = 8_000    # timeout for each individual click locator attempt
+_MAX_LOCATORS            = 60       # max interactive elements returned in get_content "locators"
+
+# ARIA roles treated as interactive – used to build the compact locators list in get_content.
+# These match Playwright's get_by_role() expectations, so the LLM can use the "name" value
+# directly in click/type params without reading any raw HTML.
+_INTERACTIVE_ROLES = frozenset({
+    "button", "link", "textbox", "checkbox", "radio",
+    "combobox", "option", "tab", "menuitem", "searchbox",
+    "switch", "treeitem", "spinbutton",
+})
 # Maximum ratio of element text length to search text length for JS click fallback.
 # Elements whose text is more than this many times longer than the search term are
 # treated as containers (e.g. a nav bar holding many menu items) and skipped so
@@ -707,7 +717,19 @@ class BrowserNavigatorTool(BaseTool):
         }
 
     async def _action_get_content(self, task: "AgentTask") -> dict[str, Any]:
-        """Extract text content and accessibility tree from the current page."""
+        """Extract text content and accessibility tree from the current page.
+
+        In addition to the raw ``page_text`` and full ``a11y_tree``, the result
+        contains a ``locators`` field – a compact list of **interactive elements
+        only** (buttons, links, inputs, checkboxes, etc.) extracted from the
+        accessibility tree.  The LLM can use ``locators[n]["name"]`` directly as
+        the ``text`` parameter of a ``click`` action or the ``label`` parameter
+        of a ``type`` action, without ever having to parse raw HTML.
+
+        This implements the token-efficient "Accessibility Tree" strategy:
+        instead of reading the full page HTML the agent reads a structured
+        snapshot of interactive elements and targets them by role + name.
+        """
         if self._page is None:
             return {
                 "error":   "No page is open; navigate to a URL first",
@@ -719,6 +741,14 @@ class BrowserNavigatorTool(BaseTool):
         page_text = await self._extract_page_text()
         a11y_tree = await self._extract_page_a11y()
 
+        # Build a compact locators list containing only interactive elements.
+        # These role names match Playwright's get_by_role() expectations, so
+        # the LLM can use the "name" value directly in click/type params.
+        locators = [
+            n for n in a11y_tree
+            if n.get("role", "").lower() in _INTERACTIVE_ROLES and n.get("name")
+        ][:_MAX_LOCATORS]
+
         return {
             "action":    "get_content",
             "success":   True,
@@ -726,6 +756,7 @@ class BrowserNavigatorTool(BaseTool):
             "url":       self._page.url,
             "page_text": page_text[:_MAX_PAGE_TEXT_CHARS],
             "a11y_tree": a11y_tree,
+            "locators":  locators,
             "message":   f"Content extracted from {self._page.url} – \"{title}\"",
         }
 
@@ -1195,21 +1226,40 @@ class BrowserNavigatorTool(BaseTool):
             logger.warning("BrowserNavigatorTool: text extraction failed: %s", exc)
             return ""
 
-    async def _extract_page_a11y(self) -> list[dict[str, str]]:
-        """Return a simplified accessibility tree from the current page."""
+    async def _extract_page_a11y(self) -> list[dict[str, Any]]:
+        """Return a simplified accessibility tree from the current page.
+
+        Each node contains at minimum ``role`` and ``name``.  For interactive
+        elements the following optional fields are also included when present:
+
+        * ``value``       – current value of an input or combobox.
+        * ``checked``     – boolean checked state for checkboxes/radios.
+        * ``disabled``    – True when the element is non-interactive.
+        * ``description`` – accessible description (aria-describedby text).
+        """
         assert self._page is not None  # noqa: S101
         try:
             snapshot = await self._page.accessibility.snapshot(interesting_only=True)
             if not snapshot:
                 return []
 
-            nodes: list[dict[str, str]] = []
+            nodes: list[dict[str, Any]] = []
 
             def _walk(node: dict) -> None:
                 role = node.get("role", "")
                 name = (node.get("name") or "").strip()
                 if role and name:
-                    nodes.append({"role": role, "name": name})
+                    node_info: dict[str, Any] = {"role": role, "name": name}
+                    # Include state info so the LLM can infer current element state
+                    if node.get("checked") is not None:
+                        node_info["checked"] = node["checked"]
+                    if node.get("value"):
+                        node_info["value"] = str(node["value"])[:80]
+                    if node.get("disabled"):
+                        node_info["disabled"] = True
+                    if node.get("description"):
+                        node_info["description"] = (node["description"] or "")[:80]
+                    nodes.append(node_info)
                 for child in node.get("children", []):
                     _walk(child)
 
