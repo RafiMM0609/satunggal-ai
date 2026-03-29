@@ -371,3 +371,47 @@ class TestSystemPromptKeywords:
         planner_src = self._extract_string_constant("_PLANNER_SYSTEM")
         assert planner_src, "_PLANNER_SYSTEM not found as a string constant in agent.py"
         assert "TIDAK PERLU" in planner_src or "auto-wait" in planner_src.lower()
+
+    # ── Registration / account-creation prompt guidance tests ─────────────────
+
+    def test_react_system_contains_registration_guidance(self) -> None:
+        """_REACT_SYSTEM must contain the dedicated registration guidance section."""
+        react_src = self._extract_string_constant("_REACT_SYSTEM")
+        assert react_src, "_REACT_SYSTEM not found as a string constant in agent.py"
+        assert "Panduan pembuatan akun dan registrasi" in react_src
+
+    def test_planner_system_contains_registration_guidance(self) -> None:
+        """_PLANNER_SYSTEM must contain the dedicated registration guidance section."""
+        planner_src = self._extract_string_constant("_PLANNER_SYSTEM")
+        assert planner_src, "_PLANNER_SYSTEM not found as a string constant in agent.py"
+        assert "Panduan pembuatan akun dan registrasi" in planner_src
+
+    def test_react_system_mentions_random_data_generation(self) -> None:
+        """_REACT_SYSTEM must instruct the LLM to generate random data for registration."""
+        react_src = self._extract_string_constant("_REACT_SYSTEM")
+        assert react_src, "_REACT_SYSTEM not found as a string constant in agent.py"
+        assert "data random" in react_src.lower() and "men-generate" in react_src.lower()
+
+    def test_planner_system_mentions_random_data_generation(self) -> None:
+        """_PLANNER_SYSTEM must instruct the LLM to generate random data for registration."""
+        planner_src = self._extract_string_constant("_PLANNER_SYSTEM")
+        assert planner_src, "_PLANNER_SYSTEM not found as a string constant in agent.py"
+        assert "data random" in planner_src.lower() and "men-generate" in planner_src.lower()
+
+    def test_summariser_system_contains_registration_data_reporting(self) -> None:
+        """_SUMMARISER_SYSTEM must instruct the LLM to report registration data in a labelled block."""
+        summariser_src = self._extract_string_constant("_SUMMARISER_SYSTEM")
+        assert summariser_src, "_SUMMARISER_SYSTEM not found as a string constant in agent.py"
+        assert "📋 Data Registrasi yang Digunakan:" in summariser_src
+
+    def test_react_system_instructs_done_to_include_registration_data(self) -> None:
+        """_REACT_SYSTEM must tell the LLM to include generated data in the 'done' summary."""
+        react_src = self._extract_string_constant("_REACT_SYSTEM")
+        assert react_src, "_REACT_SYSTEM not found as a string constant in agent.py"
+        assert "cantumkan" in react_src.lower() and "data registrasi" in react_src.lower()
+
+    def test_planner_system_instructs_done_to_include_registration_data(self) -> None:
+        """_PLANNER_SYSTEM must tell the LLM to include generated data in the 'done' summary."""
+        planner_src = self._extract_string_constant("_PLANNER_SYSTEM")
+        assert planner_src, "_PLANNER_SYSTEM not found as a string constant in agent.py"
+        assert "cantumkan" in planner_src.lower() and "data registrasi" in planner_src.lower()

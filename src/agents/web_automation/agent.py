@@ -220,6 +220,23 @@ Penanganan perintah lanjutan (follow-up):
     sehingga "sign in", "Sign In", maupun "SIGN IN" akan mencocokkan tombol
     yang sama.
 
+Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
+  • Ketika pengguna meminta untuk mendaftar / registrasi dengan "data random" atau
+    "data acak", KAMU WAJIB men-generate data berikut secara otomatis dan menggunakannya
+    saat mengisi setiap field form:
+      - Nama depan  : nama yang terdengar alami, misal "Andi", "Budi", "Citra", "Dewi"
+      - Nama belakang: misal "Pratama", "Santoso", "Rahayu", "Purnama"
+      - Username    : gabungan nama + angka acak, misal "andi_pratama42"
+      - Email       : format <nama><angka>@<domain> – domain bisa gmail.com / yahoo.com /
+                      outlook.com, misal "andi.pratama9472@gmail.com"
+      - Password    : minimal 8 karakter, gabungkan huruf besar, huruf kecil, angka, dan
+                      simbol, misal "RandPass#7291"
+      - Tanggal lahir: tanggal valid (1990–2005), misal "15/08/1995"
+      - No. Telepon : format Indonesia 08xx atau +62xx, misal "08123456789"
+  • Gunakan nilai yang sudah di-generate secara konsisten di semua langkah "type".
+  • Di langkah "done", CANTUMKAN semua data yang digunakan dalam field "summary":
+      "Data Registrasi:\n- Nama: ...\n- Email: ...\n- Password: ...\n- [field lain]"
+
 Aturan:
 1. Balas HANYA dengan JSON array dari langkah-langkah tersebut – tidak ada teks lain.
 2. Selalu akhiri dengan langkah "done" yang berisi ringkasan apa yang sudah dilakukan.
@@ -248,6 +265,10 @@ Berdasarkan log aksi dan konten halaman yang diberikan, buat ringkasan yang:
   - Jika terdapat "page_error" dalam hasil klik (ditandai dengan kunci "page_error"
     dalam log), laporkan dengan jelas bahwa halaman menampilkan error setelah klik
     tersebut, beserta detail pesan error yang ditemukan.
+  - Jika task melibatkan registrasi / pembuatan akun, WAJIB tampilkan semua data yang
+    dimasukkan (nama, email, password, username, dll.) dalam blok tersendiri dengan
+    header "📋 Data Registrasi yang Digunakan:" agar pengguna dapat menyimpannya.
+    Cantumkan setiap field dalam format daftar: "- Nama: ...", "- Email: ...", dst.
   - Menggunakan bahasa yang sama dengan permintaan pengguna (Indonesia atau Inggris).
 """
 
@@ -324,6 +345,23 @@ Panduan umum:
   • Untuk field teks form: gunakan "type" dengan "label" yang sesuai placeholder/label field.
   • Untuk kategori, radio button, atau opsi kustom dalam form: SELALU gunakan "select_option"
     (bukan "click") agar elemen dapat ditemukan bahkan jika berada di luar viewport modal.
+
+Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
+  • Ketika pengguna meminta untuk mendaftar / registrasi dengan "data random" atau
+    "data acak", KAMU WAJIB men-generate data berikut secara otomatis dan menggunakannya
+    saat mengisi setiap field form:
+      - Nama depan  : nama yang terdengar alami, misal "Andi", "Budi", "Citra", "Dewi"
+      - Nama belakang: misal "Pratama", "Santoso", "Rahayu", "Purnama"
+      - Username    : gabungan nama + angka acak, misal "andi_pratama42"
+      - Email       : format <nama><angka>@<domain> – domain bisa gmail.com / yahoo.com /
+                      outlook.com, misal "andi.pratama9472@gmail.com"
+      - Password    : minimal 8 karakter, gabungkan huruf besar, huruf kecil, angka, dan
+                      simbol, misal "RandPass#7291"
+      - Tanggal lahir: tanggal valid (1990–2005), misal "15/08/1995"
+      - No. Telepon : format Indonesia 08xx atau +62xx, misal "08123456789"
+  • Gunakan nilai yang sudah di-generate secara konsisten di semua langkah "type".
+  • Di field "summary" pada langkah "done", CANTUMKAN semua data yang digunakan:
+      "Data Registrasi:\n- Nama: ...\n- Email: ...\n- Password: ...\n- [field lain]"
 
 Gunakan action "done" dengan ringkasan komprehensif ketika:
   - Konten yang relevan sudah ditemukan dan kamu memiliki cukup informasi untuk menjawab query
