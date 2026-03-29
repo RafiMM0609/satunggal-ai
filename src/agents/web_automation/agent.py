@@ -54,6 +54,7 @@ from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
 from src.memory.state import AgentTask
 from src.tools.browser_navigator import BrowserNavigatorTool
+from src.tools.identity_generator import generate_identity
 from src.tools.web_reader import WebReaderTool
 
 if TYPE_CHECKING:
@@ -110,7 +111,7 @@ pengguna menjadi serangkaian langkah browsing yang terurut dan dapat dieksekusi.
 Setiap langkah HARUS berupa JSON object dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll", \
 "screenshot", "get_content", "get_full_content", "get_links", "extract_data", \
-"save_session", "select_option", "done"]
+"save_session", "select_option", "check_captcha", "close_popup", "done"]
   "params": object parameter yang sesuai dengan action:
     - read_url:          {"url": "..."}
     - navigate:          {"url": "..."}
@@ -132,6 +133,12 @@ Setiap langkah HARUS berupa JSON object dengan field berikut:
                           selector = CSS selector elemen <select> opsional jika diketahui;
                           GUNAKAN ini untuk memilih kategori, radio button, atau toggle button
                           yang merupakan elemen kustom dalam form)
+    - check_captcha:     {}
+                         (periksa apakah halaman menampilkan tantangan CAPTCHA;
+                          hasil berisi "captcha_detected": true/false)
+    - close_popup:       {}
+                         (tutup pop-up, modal, overlay, atau banner iklan yang menghalangi form;
+                          gunakan sebelum mencoba klik/isi form jika ada overlay yang menghalangi)
     - done:              {"summary": "ringkasan hasil untuk pengguna"}
 
 Kapan menggunakan "get_content" vs "get_full_content":
@@ -234,6 +241,8 @@ Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
                       simbol, misal "RandPass#7291"
       - Tanggal lahir: tanggal valid (1990–2005), misal "15/08/1995"
       - No. Telepon : format Indonesia 08xx atau +62xx, misal "08123456789"
+  • Jika konteks menyertakan "Data Identitas yang Disiapkan:", GUNAKAN data tersebut secara
+    konsisten di semua langkah "type" – JANGAN buat data baru yang berbeda.
   • Gunakan nilai yang sudah di-generate secara konsisten di semua langkah "type".
   • Di langkah "done", CANTUMKAN semua data yang digunakan dalam field "summary":
       "Data Registrasi:\n- Nama: ...\n- Email: ...\n- Password: ...\n- [field lain]"
@@ -242,6 +251,24 @@ Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
     dan permintaan pengguna adalah untuk mendaftar/registrasi, JANGAN langsung output
     "done". Segera buat langkah-langkah "type" untuk setiap field yang tersedia,
     diikuti "click" pada tombol submit, lalu baru "done" dengan ringkasan data yang diisi.
+
+Penanganan CAPTCHA (WAJIB):
+  • Jika hasil "check_captcha" menunjukkan "captcha_detected": true, SEGERA output "done"
+    dengan pesan: "⚠️ CAPTCHA terdeteksi di halaman ini. Saya memerlukan bantuan manusia
+    untuk mengisi CAPTCHA sebelum dapat melanjutkan. Mohon selesaikan CAPTCHA secara manual,
+    lalu ulangi perintah Anda."
+  • JANGAN mencoba menyelesaikan CAPTCHA sendiri – langsung minta bantuan manusia.
+  • Tambahkan langkah "check_captcha" setelah navigasi ke halaman form pendaftaran jika
+    terdapat kemungkinan CAPTCHA (misalnya situs besar seperti Google, Facebook, dll.).
+
+Penanganan Pop-up dan Iklan (WAJIB):
+  • Jika langkah "click" atau "type" gagal karena ada overlay/modal/banner yang menghalangi,
+    tambahkan langkah "close_popup" sebagai langkah RE-PLANNING sebelum mencoba ulang aksi.
+  • Gunakan "close_popup" sebelum mengisi form jika halaman baru saja dibuka dan mungkin
+    menampilkan cookie consent, pop-up iklan, atau notifikasi yang menghalangi.
+  • Setelah "close_popup" berhasil (dismissed: true), lanjutkan dengan aksi yang sebelumnya gagal.
+  • Jika "close_popup" tidak berhasil (dismissed: false), coba "scroll" ke bawah terlebih dahulu
+    agar form masuk ke viewport, kemudian ulangi aksi.
 
 Aturan:
 1. Balas HANYA dengan JSON array dari langkah-langkah tersebut – tidak ada teks lain.
@@ -285,7 +312,8 @@ riwayat langkah yang sudah dilakukan, tentukan SATU langkah berikutnya yang perl
 Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll",
             "screenshot", "get_content", "get_full_content", "get_links",
-            "extract_data", "save_session", "select_option", "done"]
+            "extract_data", "save_session", "select_option",
+            "check_captcha", "close_popup", "done"]
   "params": parameter yang sesuai dengan action:
     - read_url:          {"url": "..."}
     - navigate:          {"url": "..."}
@@ -302,6 +330,12 @@ Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
                          (text = teks opsi yang ingin dipilih, contoh: "Kopi & Teh";
                           selector = CSS selector elemen <select> opsional;
                           GUNAKAN untuk memilih kategori, radio button, toggle button kustom)
+    - check_captcha:     {}
+                         (periksa apakah halaman menampilkan CAPTCHA;
+                          hasil berisi "captcha_detected": true/false)
+    - close_popup:       {}
+                         (tutup pop-up, modal, overlay, atau banner yang menghalangi;
+                          gunakan sebagai RE-PLAN ketika klik/type gagal karena ada overlay)
     - done:              {"summary": "ringkasan lengkap hasil untuk pengguna"}
   "reasoning": penjelasan singkat mengapa langkah ini dipilih (1-2 kalimat)
 
@@ -366,6 +400,8 @@ Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
                       simbol, misal "RandPass#7291"
       - Tanggal lahir: tanggal valid (1990–2005), misal "15/08/1995"
       - No. Telepon : format Indonesia 08xx atau +62xx, misal "08123456789"
+  • Jika konteks menyertakan "Data Identitas yang Disiapkan:", GUNAKAN data tersebut secara
+    konsisten di semua langkah "type" – JANGAN buat data baru yang berbeda.
   • Gunakan nilai yang sudah di-generate secara konsisten di semua langkah "type".
   • Di field "summary" pada langkah "done", CANTUMKAN semua data yang digunakan:
       "Data Registrasi:\n- Nama: ...\n- Email: ...\n- Password: ...\n- [field lain]"
@@ -376,8 +412,34 @@ Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
     form tersebut. Isi semua field yang tersedia berdasarkan nama/label dari "locators",
     kemudian "click" tombol submit, dan baru output "done" dengan data yang digunakan.
 
+Penanganan CAPTCHA – Re-planning (WAJIB):
+  • Jika hasil "check_captcha" menunjukkan "captcha_detected": true:
+    - SEGERA output "done" dengan pesan bantuan manusia:
+      "⚠️ CAPTCHA terdeteksi. Saya memerlukan bantuan manusia untuk mengisi CAPTCHA
+       sebelum dapat melanjutkan. Mohon selesaikan CAPTCHA secara manual, lalu ulangi
+       perintah Anda."
+    - JANGAN mencoba menyelesaikan CAPTCHA sendiri.
+  • Gunakan "check_captcha" setelah navigasi ke halaman registrasi/login jika situs
+    berpotensi menampilkan CAPTCHA (situs besar, situs dengan bot-protection ketat).
+  • Jika halaman tiba-tiba tidak dapat diinteraksi dan ada teks seperti "verify",
+    "robot", "captcha" di konten – jalankan "check_captcha" untuk konfirmasi.
+
+Penanganan Pop-up dan Iklan – Re-planning (WAJIB):
+  • Jika langkah "click" atau "type" gagal (error atau elemen tidak ditemukan) dan
+    halaman mungkin memiliki overlay/modal/banner yang menghalangi:
+    - Langkah RE-PLANNING berikutnya adalah "close_popup".
+    - Setelah "close_popup" berhasil (dismissed: true), ulangi langkah yang gagal sebelumnya.
+  • Gunakan "close_popup" secara proaktif setelah membuka halaman baru yang besar
+    atau halaman e-commerce, berita, atau situs populer yang sering menampilkan
+    cookie consent, notifikasi push, atau iklan pop-up.
+  • Jika "close_popup" tidak berhasil (dismissed: false), coba:
+    1. "scroll" ke bawah agar form masuk viewport
+    2. Ulangi aksi yang gagal
+    3. Jika masih gagal, laporkan dalam "done"
+
 Gunakan action "done" dengan ringkasan komprehensif ketika:
   - Konten yang relevan sudah ditemukan dan kamu memiliki cukup informasi untuk menjawab query
+  - CAPTCHA terdeteksi dan perlu bantuan manusia
   - Tidak ada lagi link relevan untuk diikuti
   - Langkah-langkah sebelumnya gagal dan sudah ada informasi yang cukup untuk dilaporkan
   - Mendekati batas langkah maksimum
@@ -455,6 +517,11 @@ class WebAutomationAgent(BaseAgent):
         navigator = BrowserNavigatorTool()
         reader    = WebReaderTool()
 
+        # Pre-generate a consistent identity for registration tasks.
+        # This is passed to the LLM planning context so all "type" steps use
+        # the same data set rather than re-generating inconsistent values.
+        identity = generate_identity()
+
         try:
             action_log: list[str] = []
             # Accumulated context for the ReAct loop: each entry holds the
@@ -465,7 +532,7 @@ class WebAutomationAgent(BaseAgent):
             for i in range(1, _MAX_REACT_STEPS + 1):
                 # Plan the single next step given everything done so far
                 next_step = await self._plan_next_step(
-                    task.user_input, task.session_id, steps_done
+                    task.user_input, task.session_id, steps_done, identity=identity
                 )
                 action = next_step.get("action", "done")
                 params = next_step.get("params", {})
@@ -574,12 +641,18 @@ class WebAutomationAgent(BaseAgent):
         user_input: str,
         session_id: str,
         steps_done: list[dict[str, Any]],
+        identity: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Ask the LLM to decide the SINGLE NEXT action to take.
 
         Includes the full accumulated browsing history (actions + compact
         results) so the LLM can make an informed, adaptive decision rather
         than committing to a fixed plan created before any page was seen.
+
+        Args:
+            identity: Pre-generated identity data (from ``generate_identity()``)
+                      to include in the context so the LLM uses consistent
+                      registration data across all ``type`` steps.
         """
         context_parts: list[str] = []
 
@@ -587,6 +660,16 @@ class WebAutomationAgent(BaseAgent):
         last_url = _session_last_url.get(session_id, "")
         if last_url:
             context_parts.append(f"URL terakhir yang dikunjungi: {last_url}")
+
+        # Include pre-generated identity data so the LLM uses consistent values
+        # for all form-filling steps instead of generating new random data each time.
+        if identity:
+            identity_lines = "\n".join(
+                f"  - {k.replace('_', ' ').title()}: {v}" for k, v in identity.items()
+            )
+            context_parts.append(
+                f"Data Identitas yang Disiapkan (gunakan ini untuk isi form):\n{identity_lines}"
+            )
 
         # Include recent conversation history for multi-turn awareness
         if self._history and session_id:
@@ -779,6 +862,26 @@ class WebAutomationAgent(BaseAgent):
             result = await navigator.run(task)
             log = (
                 f"[{step_num}] select_option '{option_text}' → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "check_captcha":
+            task.metadata["browser_action"] = "check_captcha"
+            result = await navigator.run(task)
+            detected = result.get("captcha_detected", False)
+            log = (
+                f"[{step_num}] check_captcha → "
+                f"{'⚠ CAPTCHA DETECTED' if detected else 'no captcha'} "
+                f"({result.get('captcha_type', '')})"
+            )
+
+        elif action == "close_popup":
+            task.metadata["browser_action"] = "close_popup"
+            result = await navigator.run(task)
+            dismissed = result.get("dismissed", False)
+            log = (
+                f"[{step_num}] close_popup → "
+                f"{'dismissed' if dismissed else 'no popup found'}: "
                 f"{result.get('message', result.get('error', '?'))}"
             )
 
