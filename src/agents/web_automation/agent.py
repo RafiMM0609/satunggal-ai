@@ -221,8 +221,9 @@ Penanganan perintah lanjutan (follow-up):
     yang sama.
 
 Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
-  • Ketika pengguna meminta untuk mendaftar / registrasi dengan "data random" atau
-    "data acak", KAMU WAJIB men-generate data berikut secara otomatis dan menggunakannya
+  • Ketika pengguna meminta untuk mendaftar / registrasi / buat akun / sign up / daftar akun
+    (termasuk permintaan dengan "data random", "data acak", maupun tanpa menyebut jenis data),
+    KAMU WAJIB men-generate data berikut secara otomatis dan menggunakannya
     saat mengisi setiap field form:
       - Nama depan  : nama yang terdengar alami, misal "Andi", "Budi", "Citra", "Dewi"
       - Nama belakang: misal "Pratama", "Santoso", "Rahayu", "Purnama"
@@ -236,6 +237,11 @@ Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
   • Gunakan nilai yang sudah di-generate secara konsisten di semua langkah "type".
   • Di langkah "done", CANTUMKAN semua data yang digunakan dalam field "summary":
       "Data Registrasi:\n- Nama: ...\n- Email: ...\n- Password: ...\n- [field lain]"
+  • Jika hasil "read_url" atau "get_content" menampilkan field "locators" berisi
+    elemen bertipe textbox, checkbox, atau radio (artinya halaman memiliki form),
+    dan permintaan pengguna adalah untuk mendaftar/registrasi, JANGAN langsung output
+    "done". Segera buat langkah-langkah "type" untuk setiap field yang tersedia,
+    diikuti "click" pada tombol submit, lalu baru "done" dengan ringkasan data yang diisi.
 
 Aturan:
 1. Balas HANYA dengan JSON array dari langkah-langkah tersebut – tidak ada teks lain.
@@ -347,8 +353,9 @@ Panduan umum:
     (bukan "click") agar elemen dapat ditemukan bahkan jika berada di luar viewport modal.
 
 Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
-  • Ketika pengguna meminta untuk mendaftar / registrasi dengan "data random" atau
-    "data acak", KAMU WAJIB men-generate data berikut secara otomatis dan menggunakannya
+  • Ketika pengguna meminta untuk mendaftar / registrasi / buat akun / sign up / daftar akun
+    (termasuk permintaan dengan "data random", "data acak", maupun tanpa menyebut jenis data),
+    KAMU WAJIB men-generate data berikut secara otomatis dan menggunakannya
     saat mengisi setiap field form:
       - Nama depan  : nama yang terdengar alami, misal "Andi", "Budi", "Citra", "Dewi"
       - Nama belakang: misal "Pratama", "Santoso", "Rahayu", "Purnama"
@@ -362,6 +369,12 @@ Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
   • Gunakan nilai yang sudah di-generate secara konsisten di semua langkah "type".
   • Di field "summary" pada langkah "done", CANTUMKAN semua data yang digunakan:
       "Data Registrasi:\n- Nama: ...\n- Email: ...\n- Password: ...\n- [field lain]"
+  • Jika hasil langkah sebelumnya ("read_url" atau "get_content") menampilkan field
+    "locators" berisi elemen bertipe textbox, checkbox, atau radio (artinya halaman
+    memiliki form isian), dan permintaan pengguna adalah untuk mendaftar/registrasi,
+    JANGAN output "done". Langkah berikutnya WAJIB berupa "type" untuk mengisi field
+    form tersebut. Isi semua field yang tersedia berdasarkan nama/label dari "locators",
+    kemudian "click" tombol submit, dan baru output "done" dengan data yang digunakan.
 
 Gunakan action "done" dengan ringkasan komprehensif ketika:
   - Konten yang relevan sudah ditemukan dan kamu memiliki cukup informasi untuk menjawab query
