@@ -43,6 +43,17 @@ _MAX_TEXT_CHARS = 8_000
 # Navigation timeout in milliseconds
 _NAV_TIMEOUT_MS = 30_000
 
+# Maximum number of interactive locators returned in the ``locators`` field
+_MAX_LOCATORS = 60
+
+# ARIA roles treated as interactive – mirrors browser_navigator._INTERACTIVE_ROLES.
+# The LLM uses "name" values from these nodes directly as ``click``/``type`` params.
+_INTERACTIVE_ROLES = frozenset({
+    "button", "link", "textbox", "checkbox", "radio",
+    "combobox", "option", "tab", "menuitem", "searchbox",
+    "switch", "treeitem", "spinbutton",
+})
+
 
 class WebReaderTool(BaseTool):
     """
@@ -156,12 +167,22 @@ class WebReaderTool(BaseTool):
                 page_text   = await self._extract_text(page)
                 a11y_tree   = await self._extract_a11y(page)
 
+                # Build a compact locators list containing only interactive elements.
+                # This mirrors the BrowserNavigatorTool.get_content locators field so
+                # the LLM can see form fields (textbox, button, etc.) after read_url
+                # and immediately plan type/click steps without a separate get_content.
+                locators = [
+                    n for n in a11y_tree
+                    if n.get("role", "").lower() in _INTERACTIVE_ROLES and n.get("name")
+                ][:_MAX_LOCATORS]
+
                 await context.close()
                 return {
                     "title":     title,
                     "url":       final_url,
                     "page_text": page_text[:_MAX_TEXT_CHARS],
                     "a11y_tree": a11y_tree,
+                    "locators":  locators,
                 }
             finally:
                 await browser.close()
