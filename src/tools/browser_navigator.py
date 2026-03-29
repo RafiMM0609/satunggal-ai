@@ -53,6 +53,50 @@ _SPA_RENDER_WAIT_MS      = 3_000    # extra wait for SPA to render content after
 _CLICK_LOCATE_TIMEOUT_MS = 8_000    # timeout for each individual click locator attempt
 _MAX_LOCATORS            = 60       # max interactive elements returned in get_content "locators"
 
+# Captcha detection: iframe src patterns and text phrases that indicate a CAPTCHA challenge.
+_CAPTCHA_IFRAME_PATTERNS = (
+    "google.com/recaptcha",
+    "recaptcha.net/recaptcha",
+    "hcaptcha.com",
+    "turnstile.cloudflare.com",
+    "funcaptcha.com",
+    "arkoselabs.com",
+)
+_CAPTCHA_TEXT_PHRASES = (
+    "i'm not a robot",
+    "saya bukan robot",
+    "verify you are human",
+    "verifikasi bahwa anda manusia",
+    "complete the captcha",
+    "selesaikan captcha",
+    "recaptcha",
+    "hcaptcha",
+    "captcha challenge",
+)
+
+# Popup/overlay close: text labels that typically appear on dismiss/close buttons.
+_POPUP_CLOSE_TEXTS = (
+    "×", "✕", "✗", "✖", "close", "tutup", "dismiss",
+    "tidak, terima kasih", "no thanks", "no, thanks", "skip",
+    "lewati", "accept", "terima", "ok", "got it", "mengerti",
+    "setuju", "agree", "allow", "izinkan", "continue", "lanjutkan",
+)
+# CSS selectors that commonly identify modal/popup close buttons or overlays.
+_POPUP_CLOSE_SELECTORS = (
+    "[data-dismiss='modal']",
+    "[aria-label='Close']",
+    "[aria-label='close']",
+    "[aria-label='Tutup']",
+    ".modal-close",
+    ".close-button",
+    ".btn-close",
+    ".cookie-close",
+    ".popup-close",
+    ".overlay-close",
+    "[class*='close']",
+    "[id*='close']",
+)
+
 # Full-page content (get_full_content): auto-scroll settings
 _FULL_PAGE_SCROLL_PX        = 600   # pixels per scroll step when sweeping the full page
 _FULL_PAGE_SCROLL_WAIT_S    = 0.5   # seconds to wait after each scroll for lazy content to render
@@ -133,6 +177,7 @@ class BrowserNavigatorTool(BaseTool):
         task.metadata["extract_limit"]   = 50                     # for extract_data (optional)
         task.metadata["option_text"]     = "Kopi & Teh"          # for select_option
         task.metadata["option_selector"] = "input[name='cat']"   # for select_option (optional CSS selector)
+        # check_captcha and close_popup require no extra metadata keys.
 
     Result keys
     -----------
@@ -192,6 +237,10 @@ class BrowserNavigatorTool(BaseTool):
                 return await self._action_save_session(task)
             elif action == "select_option":
                 return await self._action_select_option(task)
+            elif action == "check_captcha":
+                return await self._action_check_captcha(task)
+            elif action == "close_popup":
+                return await self._action_close_popup(task)
             else:
                 return {
                     "error": f"Unknown browser_action: '{action}'",
@@ -1405,4 +1454,190 @@ class BrowserNavigatorTool(BaseTool):
             "session_path": str(path),
             "session_url":  session_url,
             "message":      f"Session saved to {path}",
+        }
+
+    # ── Captcha detection ─────────────────────────────────────────────────────
+
+    async def _detect_captcha(self) -> tuple[bool, str]:
+        """Detect whether the current page presents a CAPTCHA challenge.
+
+        Checks for:
+        * Known captcha iframe sources (reCAPTCHA, hCaptcha, Turnstile, etc.)
+        * Common CAPTCHA-related text phrases in the visible page content.
+
+        Returns:
+            ``(detected, description)`` where ``detected`` is a bool and
+            ``description`` is a human-readable explanation (empty when not
+            detected).
+        """
+        if self._page is None:
+            return False, ""
+        try:
+            # Check iframes whose src attribute matches known captcha patterns
+            iframe_src: str = await self._page.evaluate(
+                """() => {
+                    const iframes = [...document.querySelectorAll('iframe[src]')];
+                    return iframes.map(f => f.src).join(' ');
+                }"""
+            )
+            iframe_lower = iframe_src.lower()
+            for pattern in _CAPTCHA_IFRAME_PATTERNS:
+                if pattern in iframe_lower:
+                    return True, f"CAPTCHA detected: '{pattern}' iframe found on page."
+
+            # Also check page text for well-known CAPTCHA phrases
+            page_text = await self._extract_page_text()
+            page_lower = page_text.lower()
+            for phrase in _CAPTCHA_TEXT_PHRASES:
+                if phrase in page_lower:
+                    return True, f"CAPTCHA detected: phrase '{phrase}' found in page content."
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("_detect_captcha: check failed: %s", exc)
+        return False, ""
+
+    async def _action_check_captcha(self, task: "AgentTask") -> dict[str, Any]:
+        """Check whether the current page shows a CAPTCHA challenge.
+
+        This action is intended to be called by the agent after navigating or
+        clicking when there is a reason to suspect a CAPTCHA might appear.  If
+        a CAPTCHA is found, the result carries ``captcha_detected: True`` and a
+        human-readable description so the LLM can report to the user that manual
+        assistance is required.
+
+        Result keys:
+            ``captcha_detected`` – bool
+            ``captcha_type``     – short identifier (e.g. ``"recaptcha"``)
+            ``message``          – human-readable status
+        """
+        if self._page is None:
+            return {
+                "error":            "No page is open; navigate to a URL first",
+                "success":          False,
+                "action":           "check_captcha",
+                "captcha_detected": False,
+            }
+
+        detected, description = await self._detect_captcha()
+        captcha_type = ""
+        if detected:
+            for pattern in _CAPTCHA_IFRAME_PATTERNS:
+                if pattern in description.lower():
+                    captcha_type = pattern.split(".")[0]
+                    break
+            if not captcha_type:
+                captcha_type = "unknown"
+
+        return {
+            "action":           "check_captcha",
+            "success":          True,
+            "captcha_detected": detected,
+            "captcha_type":     captcha_type,
+            "url":              self._page.url,
+            "message": (
+                description
+                if detected
+                else "No CAPTCHA detected on the current page."
+            ),
+        }
+
+    # ── Popup / overlay dismissal ─────────────────────────────────────────────
+
+    async def _dismiss_popup(self) -> tuple[bool, str]:
+        """Attempt to close visible pop-ups, overlays, and cookie banners.
+
+        Tries the following strategies in order:
+        1. Click elements matching ``_POPUP_CLOSE_SELECTORS`` (common close
+           button CSS patterns).
+        2. Click elements whose visible text matches ``_POPUP_CLOSE_TEXTS``
+           (e.g. "×", "Close", "Tutup").
+        3. Press ``Escape`` to dismiss keyboard-dismissible modals.
+
+        Returns:
+            ``(dismissed, description)`` where ``dismissed`` is True if at
+            least one close action succeeded, and ``description`` summarises
+            what was closed.
+        """
+        if self._page is None:
+            return False, ""
+
+        # ── 1. CSS selector-based close buttons ───────────────────────────────
+        for sel in _POPUP_CLOSE_SELECTORS:
+            try:
+                loc = self._page.locator(sel)
+                count = await loc.count()
+                if count > 0:
+                    first_visible = loc.first
+                    await first_visible.wait_for(state="visible", timeout=3_000)
+                    await first_visible.click(timeout=3_000)
+                    await asyncio.sleep(0.5)
+                    logger.debug("_dismiss_popup: closed via selector %r", sel)
+                    return True, f"Popup closed via selector '{sel}'."
+            except Exception:  # noqa: BLE001
+                continue
+
+        # ── 2. Text-based close button search ────────────────────────────────
+        for close_text in _POPUP_CLOSE_TEXTS:
+            try:
+                # Use get_by_role for × / button patterns
+                for role in ("button", "link"):
+                    loc = self._page.get_by_role(role, name=close_text, exact=False)  # type: ignore[arg-type]
+                    count = await loc.count()
+                    if count > 0:
+                        await loc.first.wait_for(state="visible", timeout=3_000)
+                        await loc.first.click(timeout=3_000)
+                        await asyncio.sleep(0.5)
+                        logger.debug("_dismiss_popup: closed via text %r role=%r", close_text, role)
+                        return True, f"Popup closed via button text '{close_text}'."
+            except Exception:  # noqa: BLE001
+                continue
+
+        # ── 3. Escape key as last resort ─────────────────────────────────────
+        try:
+            await self._page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+            logger.debug("_dismiss_popup: sent Escape key")
+            # Escape doesn't confirm dismissal, so check if any overlay disappeared
+            overlay_gone: bool = await self._page.evaluate(
+                """() => {
+                    const overlays = document.querySelectorAll(
+                        '.modal, .overlay, [role="dialog"], [aria-modal="true"]'
+                    );
+                    return overlays.length === 0;
+                }"""
+            )
+            if overlay_gone:
+                return True, "Popup dismissed via Escape key."
+        except Exception:  # noqa: BLE001
+            pass
+
+        return False, ""
+
+    async def _action_close_popup(self, task: "AgentTask") -> dict[str, Any]:
+        """Close visible pop-ups, modal overlays, or cookie consent banners.
+
+        Tries multiple strategies (CSS selector, text-based button search, Escape
+        key) to dismiss any overlay that may be blocking form interaction.  The
+        agent should call this action when it suspects a pop-up is preventing
+        it from clicking or typing in a form field.
+
+        Result keys:
+            ``dismissed`` – bool, True if a popup was successfully closed
+            ``message``   – human-readable outcome
+        """
+        if self._page is None:
+            return {
+                "error":     "No page is open; navigate to a URL first",
+                "success":   False,
+                "action":    "close_popup",
+                "dismissed": False,
+            }
+
+        dismissed, description = await self._dismiss_popup()
+
+        return {
+            "action":    "close_popup",
+            "success":   True,
+            "dismissed": dismissed,
+            "url":       self._page.url,
+            "message":   description if dismissed else "No dismissible popup found on the current page.",
         }
