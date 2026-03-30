@@ -91,6 +91,16 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
 
 async def _send_startup_notification(app: Application) -> None:
     """Kirim notifikasi startup ke admin saat bot pertama kali berjalan."""
+    # ── Start reminder scheduler and reschedule pending reminders ─────────
+    from src.agents.reminder.scheduler import (
+        set_bot,
+        start_scheduler,
+        reschedule_pending_on_startup,
+    )
+    set_bot(app.bot)
+    start_scheduler()
+    await reschedule_pending_on_startup()
+
     settings = get_settings()
     if not settings.admin_user_id:
         logger.info("ADMIN_USER_ID tidak dikonfigurasi, startup notification dilewati.")
@@ -111,12 +121,19 @@ async def _send_startup_notification(app: Application) -> None:
         logger.warning("Gagal kirim startup notification: %s", exc)
 
 
+async def _shutdown_scheduler(app: Application) -> None:
+    """Stop APScheduler when the bot shuts down."""
+    from src.agents.reminder.scheduler import stop_scheduler
+    stop_scheduler()
+
+
 def build_application(config: Config) -> Application:
     """Build and return a fully wired Application instance."""
     app = (
         Application.builder()
         .token(config.bot_token)
         .post_init(_send_startup_notification)
+        .post_shutdown(_shutdown_scheduler)
         .build()
     )
 

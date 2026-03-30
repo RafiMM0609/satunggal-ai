@@ -47,6 +47,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - quiz_generation    (user wants to convert a PDF into an interactive HTML quiz or a set of MCQ questions from educational/study material)
 - pdf_summarization  (user wants to summarize, ask questions about, or understand the content of a PDF document)
 - doc_audit          (user wants to ask questions about, explore, or get details about a .docx document that was previously uploaded and analyzed in this session)
+- reminder           (user wants to set a timed reminder/alarm, list their reminders, or cancel/delete a reminder)
 - unknown
 
 Pre-agent tools the orchestrator can execute before the specialist agent:
@@ -161,6 +162,15 @@ Rules:
       compare chapters, what is discussed in chapter N, questions about the document
     - This intent is only valid when there is a previously analyzed document in the session.
 
+20. Use "reminder" when the user wants to set, view, or cancel a timed reminder/alarm:
+    - Indonesian: ingatkan saya, set reminder, buat pengingat, jadwalkan pengingat, daftar reminder,
+      lihat reminder, tampilkan reminder, hapus reminder, batalkan reminder, cancel reminder,
+      remind me, alarm, pengingat, set alarm, atur pengingat
+    - English: remind me, set a reminder, create reminder, schedule reminder, list reminders,
+      show reminders, delete reminder, cancel reminder, set alarm
+    - Examples: "ingatkan saya untuk checkin jam 07:59", "remind me to take medicine tomorrow at 8am",
+      "lihat daftar reminderku", "hapus reminder #3"
+
 Example responses:
   {"intent": "data_analysis",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "mandays_planning",   "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
@@ -177,6 +187,7 @@ Example responses:
   {"intent": "quiz_generation",    "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "pdf_summarization",  "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "doc_audit",          "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "reminder",           "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
 """
 
 

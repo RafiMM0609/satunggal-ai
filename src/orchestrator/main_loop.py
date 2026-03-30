@@ -111,6 +111,7 @@ def _get_pipeline():
     from src.agents.log_viewer_agent.agent import LogViewerAgent
     from src.agents.mandays_agent.agent import MandaysAgent
     from src.agents.quiz_agent.agent import QuizAgent
+    from src.agents.reminder.agent import ReminderAgent
     from src.agents.researcher.agent import ResearcherAgent
     from src.agents.responder.agent import ResponderAgent
     from src.agents.sysinfo_agent.agent import SysInfoAgent
@@ -175,6 +176,7 @@ def _get_pipeline():
         "quiz_agent":          QuizAgent(_llm),
         "web_automation":      WebAutomationAgent(_llm, history=_history),
         "doc_agent":           DocAgent(_history, _llm),
+        "reminder_agent":      ReminderAgent(_history, _llm),
         # Legacy aliases – kept so any hardcoded name still resolves
         "doc_auditor":         None,
         "doc_editor":          None,
