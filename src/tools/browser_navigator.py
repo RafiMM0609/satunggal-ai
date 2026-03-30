@@ -302,6 +302,19 @@ class BrowserNavigatorTool(BaseTool):
             self._context    = None
             self._page       = None
 
+    def has_active_page(self) -> bool:
+        """Return True when the browser has an open, non-closed page.
+
+        Used by the ``follow_parent`` feature to decide whether to reuse the
+        existing browser session or start a new one.
+        """
+        if self._page is None:
+            return False
+        try:
+            return not self._page.is_closed()
+        except Exception:  # noqa: BLE001
+            return False
+
     async def save_current_session(self, base_url: str) -> Optional[str]:
         """Persist the current browser context's cookies & storage keyed by *base_url*.
 

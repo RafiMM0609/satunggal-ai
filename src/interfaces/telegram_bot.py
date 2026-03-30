@@ -77,6 +77,7 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
   • Buka URL & ringkas konten halaman web
   • Navigasi, klik tombol & isi form secara otomatis
   • Ekstrak data terstruktur dari halaman web
+  • <b>follow_parent</b> — browser tetap terbuka setelah setiap tugas sehingga pertanyaan lanjutan langsung berinteraksi di halaman yang sama; gunakan /reset untuk menutup browser
 
 🖥️ <b>Monitoring &amp; Debugging</b>
   • <b>SysInfo Agent</b> — monitor CPU, RAM, disk, proses server

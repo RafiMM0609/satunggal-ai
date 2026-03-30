@@ -73,11 +73,24 @@ _session_last_url: dict[str, str] = {}
 # clear_web_automation_session() can delete the right browser session files.
 _session_domains: dict[str, set[str]] = {}
 
+# ── follow_parent state ───────────────────────────────────────────────────────
+# When True for a session, the browser is kept open after a web automation task
+# so that the next request can continue on the same page without re-navigating.
+# Cleared when the user issues /reset.
+_session_follow_parent: dict[str, bool] = {}
 
-def clear_web_automation_session(session_id: str) -> None:
+# ── Persistent browser navigator per session ──────────────────────────────────
+# Holds the live BrowserNavigatorTool instance across requests when follow_parent
+# is active.  Closed and removed by clear_web_automation_session() on /reset.
+_session_navigator: dict[str, "BrowserNavigatorTool"] = {}
+
+
+async def clear_web_automation_session(session_id: str) -> None:
     """Remove all web-automation state for *session_id*.
 
     Clears:
+    * The live browser (BrowserNavigatorTool) kept open by follow_parent.
+    * The follow_parent flag for this session.
     * The last-visited URL entry for this session.
     * All saved Playwright browser session files (cookies/localStorage) for
       every domain visited during this session.
@@ -85,6 +98,24 @@ def clear_web_automation_session(session_id: str) -> None:
     Called by the orchestrator's ``clear_session()`` when the user runs /reset.
     """
     from src.memory.state import BrowserSessionStore
+
+    # Close the persisted browser navigator (follow_parent) if it exists
+    navigator = _session_navigator.pop(session_id, None)
+    if navigator is not None:
+        try:
+            await navigator.close()
+            logger.info(
+                "clear_web_automation_session: closed persistent browser for session=%s",
+                session_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "clear_web_automation_session: failed to close browser for session=%s: %s",
+                session_id, exc,
+            )
+
+    # Clear follow_parent flag
+    _session_follow_parent.pop(session_id, None)
 
     # Remove the last-visited URL for this session
     _session_last_url.pop(session_id, None)
@@ -514,7 +545,26 @@ class WebAutomationAgent(BaseAgent):
 
     async def run(self, task: AgentTask) -> AgentTask:
         task.mark_processing(self.name)
-        navigator = BrowserNavigatorTool()
+
+        # ── follow_parent: reuse the persistent browser if it is still open ──
+        session_id = task.session_id
+        existing_navigator = _session_navigator.get(session_id)
+        follow_parent_active = False
+        if existing_navigator is not None and existing_navigator.has_active_page():
+            navigator = existing_navigator
+            follow_parent_active = True
+            logger.info(
+                "WebAutomationAgent: follow_parent active – reusing browser for session=%s at %s",
+                session_id, _session_last_url.get(session_id, ""),
+            )
+        elif existing_navigator is not None:
+            # Stale reference – clean up and start fresh
+            _session_navigator.pop(session_id, None)
+            _session_follow_parent.pop(session_id, None)
+            navigator = BrowserNavigatorTool()
+        else:
+            navigator = BrowserNavigatorTool()
+
         reader    = WebReaderTool()
 
         # Pre-generate a consistent identity for registration tasks.
@@ -532,7 +582,8 @@ class WebAutomationAgent(BaseAgent):
             for i in range(1, _MAX_REACT_STEPS + 1):
                 # Plan the single next step given everything done so far
                 next_step = await self._plan_next_step(
-                    task.user_input, task.session_id, steps_done, identity=identity
+                    task.user_input, task.session_id, steps_done, identity=identity,
+                    follow_parent=follow_parent_active,
                 )
                 action = next_step.get("action", "done")
                 params = next_step.get("params", {})
@@ -630,6 +681,26 @@ class WebAutomationAgent(BaseAgent):
                         "WebAutomationAgent: failed to auto-save session for %s: %s",
                         final_url, exc,
                     )
+
+            # ── follow_parent: keep the browser open for follow-up requests ──
+            # If the session has a last URL (browser navigated at least once),
+            # persist the navigator so the next request can reuse the open tab.
+            # The browser is only closed when the user issues /reset, which
+            # calls clear_web_automation_session().
+            if final_url and navigator.has_active_page():
+                _session_navigator[task.session_id] = navigator
+                _session_follow_parent[task.session_id] = True
+                task.metadata["follow_parent"] = True
+                logger.info(
+                    "WebAutomationAgent: follow_parent set – browser kept open "
+                    "for session=%s at %s (use /reset to close)",
+                    task.session_id, final_url,
+                )
+                return task  # skip close()
+
+            # No page to maintain, or page already closed – clean up
+            _session_navigator.pop(task.session_id, None)
+            _session_follow_parent.pop(task.session_id, None)
             await navigator.close()
 
         return task
@@ -642,6 +713,7 @@ class WebAutomationAgent(BaseAgent):
         session_id: str,
         steps_done: list[dict[str, Any]],
         identity: dict[str, str] | None = None,
+        follow_parent: bool = False,
     ) -> dict[str, Any]:
         """Ask the LLM to decide the SINGLE NEXT action to take.
 
@@ -650,15 +722,26 @@ class WebAutomationAgent(BaseAgent):
         than committing to a fixed plan created before any page was seen.
 
         Args:
-            identity: Pre-generated identity data (from ``generate_identity()``)
-                      to include in the context so the LLM uses consistent
-                      registration data across all ``type`` steps.
+            identity:      Pre-generated identity data (from ``generate_identity()``)
+                           to include in the context so the LLM uses consistent
+                           registration data across all ``type`` steps.
+            follow_parent: When True the browser is already open on ``last_url``
+                           so the LLM should interact with the existing page
+                           directly without issuing a redundant ``navigate`` step.
         """
         context_parts: list[str] = []
 
         # Include the last visited URL for follow-up command context
         last_url = _session_last_url.get(session_id, "")
-        if last_url:
+        if last_url and follow_parent:
+            context_parts.append(
+                f"[follow_parent AKTIF] Browser sudah terbuka di halaman: {last_url}\n"
+                "Kamu TIDAK perlu navigate ulang ke URL tersebut – langsung gunakan "
+                "action seperti get_content, click, type, atau scroll untuk berinteraksi "
+                "dengan halaman yang sudah terbuka. Gunakan navigate hanya jika perlu "
+                "berpindah ke halaman LAIN."
+            )
+        elif last_url:
             context_parts.append(f"URL terakhir yang dikunjungi: {last_url}")
 
         # Include pre-generated identity data so the LLM uses consistent values
