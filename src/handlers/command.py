@@ -96,7 +96,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # normally instead of being sent directly to DocAgent.
     clear_doc_session(str(user.id))
     await update.message.reply_text(
-        "🔄 Riwayat percakapan telah dihapus. Kita mulai dari awal!",
+        "🔄 Riwayat percakapan telah dihapus. Browser web automation juga ditutup. Kita mulai dari awal!",
         quote=True,
     )
 
