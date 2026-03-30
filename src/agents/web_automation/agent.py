@@ -674,7 +674,7 @@ class WebAutomationAgent(BaseAgent):
         # Include recent conversation history for multi-turn awareness
         if self._history and session_id:
             recent = self._history.get(session_id)
-            prev_messages = recent[:-1][-4:] if len(recent) > 1 else []
+            prev_messages = recent[:-1][-2:] if len(recent) > 1 else []
             if prev_messages:
                 lines = "\n".join(
                     f"[{m.role.upper()}]: {m.content[:_HISTORY_MSG_CHARS]}"
