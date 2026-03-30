@@ -50,7 +50,7 @@ _NETWORK_IDLE_TIMEOUT_MS = 15_000   # post-click/navigate networkidle wait (SPA-
 _MAX_PAGE_TEXT_CHARS     = 8_000    # truncation limit for get_content page text
 _CLICK_NAV_TEXT_CHARS    = 3_000    # page-text snippet captured inside click result on navigation
 _SPA_RENDER_WAIT_MS      = 3_000    # extra wait for SPA to render content after navigation/click
-_CLICK_LOCATE_TIMEOUT_MS = 8_000    # timeout for each individual click locator attempt
+_CLICK_LOCATE_TIMEOUT_MS = 4_000    # timeout for each individual click locator attempt
 _MAX_LOCATORS            = 60       # max interactive elements returned in get_content "locators"
 
 # Captcha detection: iframe src patterns and text phrases that indicate a CAPTCHA challenge.
@@ -391,13 +391,30 @@ class BrowserNavigatorTool(BaseTool):
         await _random_delay(min_ms=200, max_ms=700)
 
         title = await self._page.title()
-        return {
-            "action":  "navigate",
-            "success": True,
-            "url":     self._page.url,
-            "title":   title,
-            "message": f"Navigated to {self._page.url} – \"{title}\"",
+
+        # Eagerly capture a page text snippet so the LLM can see the landing
+        # page content without requiring a separate get_content step.
+        # Truncated to _CLICK_NAV_TEXT_CHARS (same as click-navigation results);
+        # _compact_result will further cap to _REACT_RESULT_TEXT_CHARS for the
+        # ReAct context while the summariser benefits from the larger snapshot.
+        page_text = await self._extract_page_text()
+
+        # Detect error pages immediately after navigation so the LLM knows
+        # the page is broken and can re-plan without wasting extra steps.
+        error_info = await self._detect_error_page()
+
+        result: dict[str, Any] = {
+            "action":    "navigate",
+            "success":   True,
+            "url":       self._page.url,
+            "title":     title,
+            "page_text": (page_text or "")[:_CLICK_NAV_TEXT_CHARS],
+            "message":   f"Navigated to {self._page.url} – \"{title}\"",
         }
+        if error_info:
+            result["page_error"] = error_info
+            logger.warning("navigate: error page detected at %s: %s", self._page.url, error_info)
+        return result
 
     async def _action_click(self, task: "AgentTask") -> dict[str, Any]:
         """Click the first element whose accessible name or text contains *click_text*.
@@ -1065,7 +1082,7 @@ class BrowserNavigatorTool(BaseTool):
             return
         try:
             prev_count: int = -1
-            for _ in range(6):  # up to ~3 s of polling
+            for _ in range(4):  # up to ~2 s of polling
                 await asyncio.sleep(0.5)
                 count: int = await self._page.evaluate(
                     "() => document.querySelectorAll('*').length"
@@ -1075,7 +1092,7 @@ class BrowserNavigatorTool(BaseTool):
                 prev_count = count
         except Exception:  # noqa: BLE001
             # If evaluation fails (e.g. page navigating), just sleep briefly
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
     async def _click_by_js_text(self, text: str) -> bool:
         """Click the first visible DOM element whose text content contains *text*.

@@ -306,8 +306,8 @@ class TestCompactResultFullPage:
         }
         compact = _compact_result(result)
 
-        # ReAct context uses _REACT_RESULT_TEXT_CHARS (800), not the full text
-        assert len(compact["page_text"]) <= 801  # 800 chars + "…"
+        # ReAct context uses _REACT_RESULT_TEXT_CHARS (1500), not the full text
+        assert len(compact["page_text"]) <= 1501  # 1500 chars + "…"
 
 
 # ── Tests for prompt content ───────────────────────────────────────────────────

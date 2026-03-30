@@ -487,10 +487,10 @@ _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in sum
 _FULL_PAGE_SUMMARISE_TEXT_CHARS = 8_000  # higher budget for get_full_content results
 _SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser
 _HISTORY_MSG_CHARS     = 500   # max characters per message included in planner context
-_MAX_ERROR_MSG_CHARS   = 200   # max error message characters included in action log entries
-_REACT_RESULT_TEXT_CHARS = 800  # max page_text chars kept in each compact ReAct step result
+_MAX_ERROR_MSG_CHARS   = 400   # max error message characters included in action log entries
+_REACT_RESULT_TEXT_CHARS = 1500  # max page_text chars kept in each compact ReAct step result
 _REACT_LINKS_LIMIT     = 60    # max links kept per step in compact ReAct context
-_REACT_LOCATORS_LIMIT  = 30    # max interactive element locators kept per step in compact context
+_REACT_LOCATORS_LIMIT  = 50    # max interactive element locators kept per step in compact context
 
 _SKIP_KEYS = frozenset({"screenshot_b64", "a11y_tree"})
 
@@ -783,7 +783,7 @@ class WebAutomationAgent(BaseAgent):
             {"role": "user",   "content": user_input},
         ]
         try:
-            raw = await self._llm.chat(messages, max_tokens=512)
+            raw = await self._llm.chat(messages, max_tokens=1024)
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -831,7 +831,11 @@ class WebAutomationAgent(BaseAgent):
             url = params.get("url", "")
             task.metadata.update({"browser_action": "navigate", "target_url": url})
             result = await navigator.run(task)
-            log = f"[{step_num}] navigate → {result.get('message', result.get('error', '?'))}"
+            if result.get("page_error"):
+                page_error_note = f" ⚠ PAGE_ERROR: {result['page_error'][:_MAX_ERROR_MSG_CHARS]}"
+                log = f"[{step_num}] navigate → {result.get('message', result.get('error', '?'))}{page_error_note}"
+            else:
+                log = f"[{step_num}] navigate → {result.get('message', result.get('error', '?'))}"
 
         elif action == "click":
             text = params.get("text", "")
