@@ -35,6 +35,7 @@ Batasan penting:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -189,6 +190,165 @@ def _resolve_branch_from_reply(user_input: str, detected_branch: str) -> str | N
     return None
 
 
+# ── Comparison question detection ──────────────────────────────────────────────
+# Matches questions asking to compare/contrast two targets. Strong signals only.
+_COMPARISON_RE = re.compile(
+    r"\bkomparasi\b"                         # "komparasi X dan Y"
+    r"|\bbandingkan\b"                        # "bandingkan X dengan Y"
+    r"|\bperbandingan\b"                      # "perbandingan antara X dan Y"
+    r"|\bapa\s+beda(?:nya)?\b"               # "apa bedanya X dan Y"
+    r"|\bbedanya\s"                           # "bedanya X dan Y"
+    r"|\bperbedaan\s+(?:antara\s+)?"         # "perbedaan (antara) X dan Y"
+    r"|\bcompare\b"                           # "compare X and Y"
+    r"|\bversus\b"                            # "X versus Y"
+    r"|\bvs\.?\s"                             # "X vs Y" / "X vs. Y"
+    r"|\bdibandingkan\s+dengan\b",           # "X dibandingkan dengan Y"
+    re.IGNORECASE,
+)
+
+# ── LLM prompt: task decomposition for comparison questions ───────────────────
+_TASK_DECOMPOSE_SYSTEM = """\
+Kamu adalah task planner untuk agen analisis repositori kode.
+User mengajukan pertanyaan perbandingan/komparasi tentang codebase.
+Pecah pertanyaan tersebut menjadi daftar sub-task terstruktur dalam format JSON.
+
+Format output WAJIB (JSON valid, tanpa teks lain):
+{
+  "aspect": "<topik yang dibandingkan, mis: 'implementasi auth', 'elastic apm'>",
+  "tasks": [
+    {"id": 1, "label": "<nama singkat target A>", "scope": "<dir/ atau kosong>", "query": "<pertanyaan spesifik untuk target A>"},
+    {"id": 2, "label": "<nama singkat target B>", "scope": "<dir/ atau kosong>", "query": "<pertanyaan spesifik untuk target B>"},
+    {"id": 3, "label": "komparasi", "scope": "", "query": "<permintaan perbandingan final>"}
+  ]
+}
+
+Aturan:
+- "scope": direktori relatif di repo (mis. "consumer/", "api/"). Kosongkan jika tidak diketahui.
+- Buat TEPAT 2 task pencarian + 1 task komparasi (total 3 tasks).
+- "label": singkat, nama komponen/direktori yang dibandingkan.
+- "query": pertanyaan spesifik untuk setiap sub-task.
+
+Contoh:
+Input: "apa bedanya implementasi elastic apm di consumer/ dan api/"
+Output:
+{
+  "aspect": "implementasi elastic apm",
+  "tasks": [
+    {"id": 1, "label": "consumer", "scope": "consumer/", "query": "implementasi elastic apm di consumer"},
+    {"id": 2, "label": "api", "scope": "api/", "query": "implementasi elastic apm di api"},
+    {"id": 3, "label": "komparasi", "scope": "", "query": "bandingkan implementasi elastic apm di consumer vs api"}
+  ]
+}
+
+Contoh 2:
+Input: "komparasi penerapan auth pada consumer dan producer"
+Output:
+{
+  "aspect": "penerapan autentikasi (auth)",
+  "tasks": [
+    {"id": 1, "label": "consumer", "scope": "consumer/", "query": "penerapan auth di consumer"},
+    {"id": 2, "label": "producer", "scope": "producer/", "query": "penerapan auth di producer"},
+    {"id": 3, "label": "komparasi", "scope": "", "query": "bandingkan penerapan auth di consumer vs producer"}
+  ]
+}
+
+Balas HANYA dengan JSON valid, tanpa penjelasan tambahan.\
+"""
+
+# ── LLM prompt: comparison answer generation ──────────────────────────────────
+_COMPARE_ANSWER_SYSTEM = """\
+Kamu adalah analis kode yang membuat perbandingan mendalam antara dua implementasi.
+Buat jawaban komparasi terstruktur berdasarkan evidence yang diberikan dari repositori.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ ATURAN KRITIS – ANTI-HALUSINASI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Hanya jawab berdasarkan evidence yang diberikan.
+2. Setiap klaim HARUS disertai sumber: nama file + nomor baris.
+3. Gunakan label: 🟢 [CONFIRMED] / 🟡 [LIKELY] / 🔴 [UNVERIFIED].
+4. Jika data tidak cukup untuk salah satu target, tulis [DATA TIDAK CUKUP] dan
+   jelaskan apa yang perlu diperiksa.
+5. DILARANG mengarang detail yang tidak ada dalam evidence.
+6. Gunakan bahasa yang sama dengan pertanyaan pengguna.
+
+Format jawaban yang diharapkan:
+
+## 🔍 Perbandingan: {aspect}
+
+### 📦 {label_a}
+<ringkasan implementasi A dengan sumber file:baris>
+
+### 📦 {label_b}
+<ringkasan implementasi B dengan sumber file:baris>
+
+### ⚖️ Tabel Komparasi
+| Aspek | {label_a} | {label_b} |
+|-------|-----------|-----------|
+| ...   | ...       | ...       |
+
+### 💡 Kesimpulan
+<poin utama perbedaan dan persamaan>\
+"""
+
+# ── Stopwords for keyword extraction ──────────────────────────────────────────
+_KW_STOPWORDS = {
+    # Indonesian
+    "cari", "implementasi", "pada", "di", "dalam", "dan", "yang", "ada", "apa",
+    "berikan", "tampilkan", "tunjukkan", "list", "daftar", "dari", "bagaimana",
+    "cara", "kerja", "fungsi", "class", "modul", "module", "repo", "repositori",
+    "kode", "semua", "setiap", "untuk", "ini", "itu", "bisa", "boleh", "tolong",
+    "jelaskan", "lihat", "komparasi", "bandingkan", "perbandingan", "bedanya",
+    "beda", "perbedaan", "antara", "dengan", "versus",
+    # English
+    "find", "search", "show", "list", "give", "get", "look", "check",
+    "implementation", "of", "in", "at", "the", "a", "an", "is", "are",
+    "on", "for", "from", "with", "how", "what", "where", "all", "compare", "vs",
+}
+
+# Directories to skip when scanning repository files (mirrors repo_qa._SKIP_DIRS).
+_SCAN_SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    "env", "dist", "build", ".next", ".nuxt", "coverage",
+}
+
+# Number of source-code lines of context to show before/after each keyword hit.
+_CONTEXT_LINES_AROUND_HIT = 4
+
+# Prefixes that indicate an evidence string carries no useful information
+# (returned by _scan_scope_for_topic when nothing was found).
+_EMPTY_EVIDENCE_PREFIXES = (
+    "(tidak ditemukan",
+    "(gagal mengumpulkan",
+    "(tidak ada keyword",
+)
+
+
+def _extract_query_keywords(query: str) -> list[str]:
+    """
+    Extract meaningful search keywords from *query*, excluding stopwords.
+
+    Returns a list ordered longest-first (more specific phrases before single words).
+    """
+    text = re.sub(r"https?://\S+", "", query)
+    text = re.sub(r"[^\w\s]", " ", text)
+    words = [
+        w.lower() for w in text.split()
+        if len(w) >= 2 and w.lower() not in _KW_STOPWORDS
+    ]
+    candidates: list[str] = []
+    for i, w in enumerate(words):
+        candidates.append(w)
+        if i + 1 < len(words):
+            candidates.append(f"{w} {words[i + 1]}")
+    seen: set[str] = set()
+    result: list[str] = []
+    for c in sorted(candidates, key=len, reverse=True):
+        if c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
+
+
 # ── Agent ──────────────────────────────────────────────────────────────────────
 
 class DeveloperQnAAgent(RepoAgentBase):
@@ -261,6 +421,418 @@ class DeveloperQnAAgent(RepoAgentBase):
 
         return QAIntent.FULL_INSPECTION
 
+    # ── Comparison: task decomposition ────────────────────────────────────────
+
+    async def _decompose_comparison_tasks(self, user_input: str) -> dict | None:
+        """
+        Use LLM to decompose a comparison question into structured sub-tasks.
+
+        Returns a dict with:
+          "aspect" – the topic being compared (string)
+          "tasks"  – list of dicts: {id, label, scope, query}
+                     Last task is always the comparison synthesis task.
+
+        Returns None on any failure (LLM error, bad JSON, unexpected structure).
+        Warnings are logged for all failure paths so nothing is silent.
+        """
+        logger.info("QnA comparison: calling LLM to decompose question=%r", user_input[:120])
+        response = ""  # initialised here so it's reachable in the JSONDecodeError handler
+        try:
+            response = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _TASK_DECOMPOSE_SYSTEM},
+                    {"role": "user",   "content": user_input[:800]},
+                ],
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=512,
+            )
+            if not response.strip():
+                logger.warning(
+                    "QnA comparison: task decomposition returned EMPTY response "
+                    "(possible max-token hit or model error). question=%r",
+                    user_input[:120],
+                )
+                return None
+
+            # Extract JSON block – LLM sometimes wraps in markdown code fences
+            json_match = re.search(r"\{.*\}", response, re.DOTALL)
+            if not json_match:
+                logger.warning(
+                    "QnA comparison: task decomposition returned non-JSON response: %r",
+                    response[:300],
+                )
+                return None
+
+            data = json.loads(json_match.group(0))
+
+            if not isinstance(data.get("tasks"), list) or len(data["tasks"]) < 2:
+                logger.warning(
+                    "QnA comparison: unexpected task structure (need ≥2 tasks): %r", data
+                )
+                return None
+
+            logger.info(
+                "QnA comparison: decomposed into %d tasks, aspect=%r, labels=%r",
+                len(data["tasks"]),
+                data.get("aspect", ""),
+                [t.get("label") for t in data["tasks"]],
+            )
+            return data
+
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "QnA comparison: task decomposition produced invalid JSON: %s (response=%r)",
+                exc, response[:300],
+            )
+            return None
+        except Exception as exc:
+            logger.warning("QnA comparison: task decomposition failed with error: %s", exc)
+            return None
+
+    # ── Comparison: evidence gathering for a single scope ─────────────────────
+
+    async def _scan_scope_for_topic(
+        self,
+        repo_path: Path,
+        scope: str,
+        query: str,
+        *,
+        max_files: int = 8,
+    ) -> str:
+        """
+        Search files within *scope* directory for topic keywords extracted from *query*.
+
+        Args:
+            repo_path: Root of the cloned repository.
+            scope:     Relative directory path to restrict search (e.g. "consumer/").
+                       Empty string or None means search the whole repo.
+            query:     Natural-language description of what to look for; keywords are
+                       extracted from this string.
+            max_files: Maximum number of matching files to include in output.
+
+        Returns markdown-formatted evidence string, or an informative message if
+        nothing was found.  Warnings are logged for missing directories, unreadable
+        files, and empty results.
+        """
+        # Resolve scope directory
+        scope_clean = (scope or "").strip("/")
+        if scope_clean:
+            scope_path = repo_path / scope_clean
+            if not scope_path.exists():
+                logger.warning(
+                    "QnA comparison: scope directory %r not found in repo %s – "
+                    "will search full repo and add scope as keyword",
+                    scope_clean, repo_path,
+                )
+                # Treat scope label as an extra keyword and search full repo
+                scope_path = repo_path
+                extra_keyword = scope_clean.lower()
+            else:
+                extra_keyword = ""
+        else:
+            scope_path = repo_path
+            extra_keyword = ""
+
+        # Extract keywords from query
+        keywords = _extract_query_keywords(query)
+        if extra_keyword and extra_keyword not in keywords:
+            keywords = [extra_keyword] + keywords
+
+        if not keywords:
+            logger.warning(
+                "QnA comparison: no keywords extracted from query=%r scope=%r",
+                query, scope_clean,
+            )
+            return "(tidak ada keyword yang dapat diekstrak dari pertanyaan)"
+
+        logger.info(
+            "QnA comparison: scanning scope=%r for keywords=%r (top 5)",
+            scope_clean or "(root)", keywords[:5],
+        )
+
+        source_exts = {
+            ".py", ".go", ".js", ".ts", ".jsx", ".tsx", ".java", ".php",
+            ".rb", ".rs", ".kt", ".cs",
+            # Config/infra files – often contain APM/auth config
+            ".yaml", ".yml", ".json", ".toml", ".env", ".ini", ".cfg",
+        }
+        findings: list[str] = []
+
+        for fpath in sorted(scope_path.rglob("*")):
+            if fpath.is_dir() or fpath.suffix.lower() not in source_exts:
+                continue
+            # Skip undesired directories (use module-level constant)
+            rel_parts = fpath.relative_to(repo_path).parts
+            if any(p in _SCAN_SKIP_DIRS for p in rel_parts[:-1]):
+                continue
+
+            try:
+                text = fpath.read_text(errors="replace")
+            except OSError as exc:
+                logger.warning("QnA comparison: cannot read %s: %s", fpath, exc)
+                continue
+
+            file_lines = text.splitlines()
+            hit_line_indices: set[int] = set()
+            matched_kw = ""
+
+            for kw in keywords[:10]:
+                kw_lower = kw.lower()
+                kw_compact = kw_lower.replace(" ", "")
+                for i, line in enumerate(file_lines):
+                    line_lower = line.lower()
+                    if kw_lower in line_lower or (
+                        kw_compact != kw_lower and kw_compact in line_lower
+                    ):
+                        hit_line_indices.add(i)
+                if hit_line_indices:
+                    matched_kw = kw
+                    break  # stop at first keyword with matches
+
+            if not hit_line_indices:
+                continue
+
+            rel = fpath.relative_to(repo_path).as_posix()
+            # Expand hits with context lines (module-level constant)
+            context_lines: list[str] = []
+            for idx in sorted(hit_line_indices)[:15]:  # cap to 15 hits per file
+                start = max(0, idx - _CONTEXT_LINES_AROUND_HIT)
+                end = min(len(file_lines), idx + _CONTEXT_LINES_AROUND_HIT + 1)
+                for j in range(start, end):
+                    marker = "→" if j in hit_line_indices else " "
+                    context_lines.append(f"  {marker} L{j + 1}: {file_lines[j].rstrip()}")
+
+            findings.append(
+                f"**`{rel}`** — keyword: `{matched_kw}` "
+                f"({len(hit_line_indices)} hit):\n"
+                + "\n".join(context_lines[:60])  # cap output lines per file
+            )
+            if len(findings) >= max_files:
+                logger.debug(
+                    "QnA comparison: reached max_files=%d for scope=%r", max_files, scope_clean
+                )
+                break
+
+        if not findings:
+            logger.warning(
+                "QnA comparison: NO evidence found for scope=%r keywords=%r – "
+                "evidence will be marked as insufficient",
+                scope_clean or "(root)", keywords[:5],
+            )
+            return (
+                f"(tidak ditemukan implementasi terkait di `{scope_clean or 'root'}` "
+                f"untuk keyword: {', '.join(keywords[:3])})"
+            )
+
+        logger.info(
+            "QnA comparison: found %d relevant file(s) in scope=%r",
+            len(findings), scope_clean or "(root)",
+        )
+        return "\n\n".join(findings)
+
+    # ── Comparison: orchestration ──────────────────────────────────────────────
+
+    async def _run_comparison_flow(
+        self,
+        task:      AgentTask,
+        repo_path: Path,
+        req:       RepoExtractionRequest,
+        intent:    QAIntent,
+    ) -> AgentTask:
+        """
+        Handle comparison/contrast questions by decomposing into sub-tasks:
+
+          Sub-task 1 – Gather evidence for target A (scoped directory scan).
+          Sub-task 2 – Gather evidence for target B (scoped directory scan).
+          Sub-task 3 – LLM generates structured comparison from A + B evidence.
+
+        All sub-tasks are logged at INFO level so the full execution trace is
+        visible.  Warnings are emitted for empty evidence, LLM empty responses,
+        and evidence truncation.
+
+        Falls back to the normal Q/A flow (with _skip_comparison=True) if task
+        decomposition fails, so the user always gets an answer.
+        """
+        try:
+            t_start = time.monotonic()
+            logger.info(
+                "QnA comparison flow: starting — session=%s problem=%r",
+                task.session_id, req.problem,
+            )
+
+            # ── Step 1: Decompose question into tasks via LLM ────────────
+            decomposed = await self._decompose_comparison_tasks(task.user_input)
+            if not decomposed:
+                logger.warning(
+                    "QnA comparison: task decomposition failed – falling back to "
+                    "normal Q/A flow for session=%s",
+                    task.session_id,
+                )
+                return await self._run_qa_flow(
+                    task, repo_path, req, intent, _skip_comparison=True
+                )
+
+            aspect = decomposed.get("aspect") or req.problem or task.user_input
+            all_tasks: list[dict] = decomposed["tasks"]
+
+            # Search tasks = all but last; synthesis task = last
+            search_tasks = all_tasks[:-1]
+            synthesis_task = all_tasks[-1]
+
+            # ── Log all sub-tasks clearly ─────────────────────────────────
+            logger.info(
+                "QnA comparison: %d sub-tasks planned, aspect=%r",
+                len(all_tasks), aspect,
+            )
+            for st in all_tasks:
+                logger.info(
+                    "QnA comparison: sub-task id=%s label=%r scope=%r query=%r",
+                    st.get("id"), st.get("label"), st.get("scope", ""), st.get("query", ""),
+                )
+
+            # ── Step 2: Gather evidence for each search target (parallel) ─
+            logger.info(
+                "QnA comparison: gathering evidence for %d targets in parallel",
+                len(search_tasks),
+            )
+            evidence_coros = [
+                self._scan_scope_for_topic(
+                    repo_path,
+                    st.get("scope", ""),
+                    st.get("query") or aspect,
+                )
+                for st in search_tasks
+            ]
+            raw_results = await asyncio.gather(*evidence_coros, return_exceptions=True)
+
+            evidence_per_target: list[tuple[str, str]] = []
+            for st, result in zip(search_tasks, raw_results):
+                label = st.get("label", f"target{len(evidence_per_target) + 1}")
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "QnA comparison: evidence gathering raised exception for "
+                        "label=%r scope=%r: %s",
+                        label, st.get("scope", ""), result,
+                    )
+                    evidence_per_target.append(
+                        (label, f"(gagal mengumpulkan evidence: {result})")
+                    )
+                else:
+                    ev = str(result)
+                    if not ev.strip() or any(ev.startswith(p) for p in _EMPTY_EVIDENCE_PREFIXES):
+                        logger.warning(
+                            "QnA comparison: EMPTY evidence for label=%r scope=%r – "
+                            "answer may be marked [DATA TIDAK CUKUP]",
+                            label, st.get("scope", ""),
+                        )
+                    evidence_per_target.append((label, ev))
+
+            t_extract = time.monotonic()
+            logger.info(
+                "QnA comparison: evidence gathering done in %.2fs — targets=%r",
+                t_extract - t_start,
+                [label for label, _ in evidence_per_target],
+            )
+
+            # ── Step 3: Build prompt and call LLM for comparison ──────────
+            label_a = evidence_per_target[0][0] if len(evidence_per_target) > 0 else "target_a"
+            label_b = evidence_per_target[1][0] if len(evidence_per_target) > 1 else "target_b"
+
+            ev_sections: list[str] = []
+            for label, evidence in evidence_per_target:
+                ev_sections.append(f"## 📦 Evidence: {label}\n\n{evidence}")
+            evidence_text = "\n\n---\n\n".join(ev_sections)
+
+            # Cap total evidence to avoid max-token issues
+            _MAX_COMPARISON_EVIDENCE = 14_000
+            if len(evidence_text) > _MAX_COMPARISON_EVIDENCE:
+                logger.warning(
+                    "QnA comparison: evidence text too large (%d chars), truncating to %d – "
+                    "some context may be lost",
+                    len(evidence_text), _MAX_COMPARISON_EVIDENCE,
+                )
+                evidence_text = (
+                    evidence_text[:_MAX_COMPARISON_EVIDENCE]
+                    + f"\n\n... [evidence dipotong pada {_MAX_COMPARISON_EVIDENCE} karakter "
+                    "untuk menghindari batas token]"
+                )
+
+            system_prompt = _COMPARE_ANSWER_SYSTEM.format(
+                aspect=aspect,
+                label_a=label_a,
+                label_b=label_b,
+            )
+            user_msg = (
+                f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
+                f"**Aspek yang dibandingkan:** {aspect}\n"
+                f"**Target A:** {label_a}\n"
+                f"**Target B:** {label_b}\n\n"
+                f"---\n\n"
+                f"**Data dari repositori:**\n\n{evidence_text}"
+            )
+
+            logger.info(
+                "QnA comparison: calling LLM for synthesis — "
+                "evidence_chars=%d aspect=%r",
+                len(evidence_text), aspect,
+            )
+            qa_response = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=QNA_TEMPERATURE,
+                top_p=QNA_TOP_P,
+                max_tokens=QNA_MAX_TOKENS,
+            )
+
+            if not qa_response.strip():
+                logger.warning(
+                    "QnA comparison: LLM synthesis returned EMPTY response — "
+                    "possible max-token hit or model error. "
+                    "aspect=%r session=%s",
+                    aspect, task.session_id,
+                )
+                qa_response = (
+                    "[DATA TIDAK CUKUP] LLM tidak menghasilkan jawaban perbandingan. "
+                    "Kemungkinan batas token tercapai. "
+                    "Coba persempit scope pertanyaan atau sebutkan aspek yang lebih spesifik."
+                )
+
+            t_total = time.monotonic() - t_start
+            logger.info(
+                "QnA comparison: synthesis complete in %.2fs total "
+                "(extract: %.2fs, llm: %.2fs)",
+                t_total, t_extract - t_start, t_total - (t_extract - t_start),
+            )
+
+            branch_note = f"🌿 **Branch:** `{req.branch}`\n\n" if req.branch else ""
+            target_labels = ", ".join(label for label, _ in evidence_per_target)
+            perf_footer = (
+                f"\n\n---\n"
+                f"⏱️ *⚖️ Komparasi · {t_total:.1f}s "
+                f"(ekstraksi: {t_extract - t_start:.1f}s · target: {target_labels})*"
+            )
+            task.mark_done(branch_note + qa_response.strip() + perf_footer)
+
+            # Save session context for follow-ups
+            self._save_session_context(
+                task.session_id,
+                req.repo_url,
+                req.branch,
+                req.candidate_route_filenames or None,
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "QnA comparison flow: unexpected error — session=%s error=%s",
+                task.session_id, exc,
+            )
+            task.mark_failed(f"❌ Komparasi gagal karena error tidak terduga: {exc}")
+
+        return task
+
     # ── Q/A flow ───────────────────────────────────────────────────────────────
 
     async def _run_qa_flow(
@@ -269,16 +841,29 @@ class DeveloperQnAAgent(RepoAgentBase):
         repo_path: Path,
         req:       RepoExtractionRequest,
         intent:    QAIntent,
+        *,
+        _skip_comparison: bool = False,
     ) -> AgentTask:
         """
         Run topic-specific extraction + RAG, then answer via LLM.
 
         Flow:
+          0. If question is a comparison and _skip_comparison is False,
+             delegate to _run_comparison_flow().
           1. Run topic extractor + RAG + Tavily + dir tree concurrently.
           2. Build LLM prompt from aggregated evidence.
           3. Return direct factual answer with [CONFIRMED/LIKELY/UNVERIFIED] labels.
         """
         try:
+            # ── Step 0: Route comparison questions to dedicated flow ───────
+            if not _skip_comparison and _COMPARISON_RE.search(task.user_input):
+                logger.info(
+                    "QnA: comparison question detected — routing to comparison flow "
+                    "(session=%s)",
+                    task.session_id,
+                )
+                return await self._run_comparison_flow(task, repo_path, req, intent)
+
             logger.info(
                 "QnA: intent=%s repo=%s problem=%r",
                 intent.value, repo_path, req.problem,
@@ -423,6 +1008,13 @@ class DeveloperQnAAgent(RepoAgentBase):
                 top_p=QNA_TOP_P,
                 max_tokens=QNA_MAX_TOKENS,
             )
+
+            if not qa_response.strip():
+                logger.warning(
+                    "QnA: LLM returned EMPTY response — possible max-token hit or "
+                    "silent model error. intent=%s session=%s problem=%r",
+                    intent.value, task.session_id, req.problem,
+                )
 
             t_total = time.monotonic() - t_start
             logger.info("QnA: done in %.2fs total", t_total)

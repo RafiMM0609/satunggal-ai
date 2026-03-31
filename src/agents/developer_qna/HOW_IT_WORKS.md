@@ -9,6 +9,341 @@
 - "Bagaimana alur utama aplikasi?"
 - "Jelaskan fungsi `HandleDownload`"
 - "Model data apa yang ada?"
+- "Komparasi penerapan auth pada consumer dan producer"
+- "Apa bedanya implementasi elastic APM di consumer/ dan api/?"
+
+**Perbedaan utama dengan `DeveloperInspectorAgent`:**
+
+| Aspek | DeveloperQnAAgent | DeveloperInspectorAgent |
+|---|---|---|
+| Tujuan | Menjawab pertanyaan tentang ISI repo | Menemukan BUG & root cause |
+| Output | Jawaban singkat dan faktual | Laporan inspeksi penuh + critic pass |
+| Trigger | "ada API apa", "jelaskan fungsi X", "komparasi X vs Y" | "kenapa error", "ada bug di" |
+
+---
+
+## Arsitektur & Komponen
+
+```
+DeveloperQnAAgent (src/agents/developer_qna/agent.py)
+    │
+    ├── RepoAgentBase     (src/agents/repo_agent_base.py)
+    │     ├── Repo clone/pull       → ~/sandbox_repos/<repo-name>
+    │     ├── Branch checkout       → git checkout <branch>
+    │     ├── RAG (file relevan)    → TF-IDF relevance ranking
+    │     ├── Dir tree              → find . -not (skip-dirs)
+    │     ├── Tavily search         → opsional web context
+    │     └── LLM extraction        → parse repo_url, problem, branch
+    │
+    └── repo_qa.py        (src/tools/repo_qa.py)
+          ├── classify_intent()     → tentukan topik
+          ├── extract_api_endpoints()
+          ├── extract_tech_stack()
+          ├── extract_data_models()
+          ├── extract_dependencies()
+          ├── extract_ci_cd()
+          ├── extract_security()
+          ├── extract_main_flow()
+          └── extract_specific_symbol()
+```
+
+---
+
+## Alur Kerja Lengkap (Step-by-Step)
+
+### Jalur Normal (dengan URL repo)
+
+```
+User Input
+    │
+    ▼
+[1] Cek pending branch confirmation
+    │ (ada?) → lanjut ke _run_qa_flow dengan branch yang dikonfirmasi
+    │ (tidak ada?) ↓
+    ▼
+[2] classify_intent()  ← regex-based, cepat
+    │  Hasilkan: API_ENDPOINTS | TECH_STACK | DATA_MODELS |
+    │            DEPENDENCIES | CI_CD | SECURITY | MAIN_FLOW |
+    │            SPECIFIC_SYMBOL | FULL_INSPECTION
+    ▼
+[3] _extract_request()  ← LLM call
+    │  Parse: repo_url, problem, keywords, branch, verbosity
+    ▼
+[4] _resolve_repo()
+    │  Clone atau pull repo → ~/sandbox_repos/<repo-name>
+    │  (jika tidak ada URL → jawab dari deskripsi saja)
+    ▼
+[5] Branch selection
+    │  a. Branch sudah ditentukan → checkout langsung → _run_qa_flow
+    │  b. Tidak ada branch → deteksi branch aktif → tanya user
+    │     → simpan ke _qna_pending_confirmations[session_id]
+    ▼
+[6] _run_qa_flow()  ← inti Q/A
+    │
+    ├── [6a] Deteksi Comparison → jika ya, _run_comparison_flow()
+    │         (lihat bagian "Comparison Flow" di bawah)
+    │
+    ├── [6b] Resolve symbol target (untuk SPECIFIC_SYMBOL intent)
+    │
+    ├── [6c] asyncio.gather() — semua dijalankan PARALEL:
+    │         ├── run_qa_extraction()      → ekstrak evidence topik-spesifik
+    │         ├── _read_relevant_files()   → RAG: file paling relevan
+    │         ├── _fetch_tavily_context()  → opsional: pencarian web
+    │         └── _get_dir_tree()          → struktur direktori repo
+    │
+    ├── [6d] Bangun evidence dict dari semua hasil
+    │
+    ├── [6e] LLM call (temperature=0.15, top_p=0.90, max_tokens=16384)
+    │         ⚠️ WARNING log jika respons kosong (possible max-token hit)
+    │
+    └── [6f] mark_done() dengan jawaban + branch info + performance footer
+             Simpan session context untuk follow-up
+```
+
+---
+
+## Comparison Flow (Alur Khusus Komparasi)
+
+### Kapan Aktif?
+
+Regex `_COMPARISON_RE` mendeteksi kata-kata komparasi dalam pertanyaan:
+- `komparasi`, `bandingkan`, `perbandingan`
+- `apa bedanya`, `bedanya`, `perbedaan`
+- `compare`, `versus`, `vs`
+- `dibandingkan dengan`
+
+### Alur Komparasi Step-by-Step
+
+```
+User Input (comparison question)
+    │
+    ▼
+[C1] _run_comparison_flow() dipanggil dari _run_qa_flow()
+    │
+    ▼
+[C2] _decompose_comparison_tasks()  ← LLM call
+    │  Dekomposisi pertanyaan menjadi 3 sub-task:
+    │  - Sub-task 1: "cari X di target A" (misal: auth di consumer/)
+    │  - Sub-task 2: "cari X di target B" (misal: auth di producer/)
+    │  - Sub-task 3: "bandingkan hasil task 1 vs task 2"
+    │
+    │  Output JSON:
+    │  {
+    │    "aspect": "penerapan auth",
+    │    "tasks": [
+    │      {"id": 1, "label": "consumer", "scope": "consumer/", "query": "..."},
+    │      {"id": 2, "label": "producer", "scope": "producer/", "query": "..."},
+    │      {"id": 3, "label": "komparasi", "scope": "", "query": "..."}
+    │    ]
+    │  }
+    │
+    │  ⚠️ WARNING log jika:
+    │     - Respons LLM kosong (max-token hit)
+    │     - JSON tidak valid
+    │     - Struktur task tidak lengkap (<2 tasks)
+    │     → Fallback ke _run_qa_flow(skip_comparison=True)
+    │
+    ▼
+[C3] asyncio.gather() — semua search tasks dijalankan PARALEL:
+    │   ├── _scan_scope_for_topic(repo, "consumer/", query_1)
+    │   │     → Walk files dalam consumer/, grep keywords
+    │   └── _scan_scope_for_topic(repo, "producer/", query_2)
+    │         → Walk files dalam producer/, grep keywords
+    │
+    │  ⚠️ WARNING log jika:
+    │     - Directory scope tidak ditemukan di repo
+    │     - Tidak ada evidence untuk suatu target
+    │     - Exception saat membaca file
+    │
+    ▼
+[C4] Evidence digabung dan di-cap (max 14.000 karakter)
+    │  ⚠️ WARNING log jika evidence di-truncate
+    │
+    ▼
+[C5] LLM call dengan _COMPARE_ANSWER_SYSTEM prompt
+    │  → Menghasilkan tabel komparasi terstruktur
+    │
+    │  ⚠️ WARNING log jika respons kosong (possible max-token hit)
+    │
+    ▼
+[C6] mark_done() dengan:
+     - Header branch
+     - Jawaban komparasi terstruktur (tabel + kesimpulan)
+     - Footer performa: ⏱️ ⚖️ Komparasi · Xs (ekstraksi: Xs · target: A, B)
+```
+
+### Contoh Dekomposisi
+
+**Input:** `"coba apa bedanya dari implementasi elastic apm di consumer/ dan api/"`
+
+**Sub-tasks yang dihasilkan:**
+1. `label: "consumer"` · `scope: "consumer/"` · `query: "implementasi elastic apm di consumer"`
+2. `label: "api"` · `scope: "api/"` · `query: "implementasi elastic apm di api"`
+3. `label: "komparasi"` · `query: "bandingkan implementasi elastic apm di consumer vs api"`
+
+**Input:** `"komparasi penerapan auth pada consumer dan producer"`
+
+**Sub-tasks yang dihasilkan:**
+1. `label: "consumer"` · `scope: "consumer/"` · `query: "penerapan auth di consumer"`
+2. `label: "producer"` · `scope: "producer/"` · `query: "penerapan auth di producer"`
+3. `label: "komparasi"` · `query: "bandingkan penerapan auth consumer vs producer"`
+
+---
+
+## Detail Setiap Langkah (Normal Flow)
+
+### Langkah 1 — Cek Pending Branch Confirmation
+
+Setiap kali ada permintaan Q/A, agen pertama-tama memeriksa apakah ada entri di dictionary `_qna_pending_confirmations[session_id]`. Ini terjadi ketika pada request sebelumnya user tidak menyebutkan branch — agen mendeteksi branch aktif dan menunggu konfirmasi.
+
+Jika ada pending:
+- Input user dicek dengan `_resolve_branch_from_reply()`.
+- Kata seperti "ya", "lanjutkan", "ok", "lanjut" → gunakan branch yang terdeteksi.
+- Input berupa nama branch valid (e.g., `develop`) → gunakan nama itu.
+- Selain itu → fall through ke alur parse normal.
+
+### Langkah 2 — Klasifikasi Intent (`classify_intent`)
+
+Fungsi ini masih menggunakan regex sebagai jalur cepat (deterministik dan hampir nol-latensi), tetapi sekarang memakai pendekatan hybrid: **regex pertama, LLM fallback** hanya ketika regex gagal mengklasifikasikan (yaitu ketika regex mengembalikan `FULL_INSPECTION` sebagai fallback).
+
+### Langkah 3 — Ekstraksi Terstruktur via LLM (`_extract_request`)
+
+LLM dipanggil dengan prompt yang meminta output JSON:
+
+```json
+{
+  "repo_url":  "https://github.com/user/repo",
+  "problem":   "deskripsi singkat pertanyaan",
+  "keywords":  ["keyword1", "keyword2"],
+  "branch":    "main"
+}
+```
+
+### Langkah 4 — Resolusi Repo (`_resolve_repo`)
+
+Repo dikloning ke `~/sandbox_repos/<repo-name>/`. Jika sudah ada, dilakukan `git pull`. PAT (Personal Access Token) di-inject ke URL untuk akses private repo (GitHub PAT / GitLab PAT dari settings).
+
+Jika tidak ada URL sama sekali → agen tetap menjawab berdasarkan deskripsi user saja, dengan catatan warning bahwa tidak ada data repo yang diakses.
+
+### Langkah 5 — Branch Selection
+
+- **Branch disebutkan** di request → langsung `git checkout <branch>` dan lanjut ke `_run_qa_flow`.
+- **Branch tidak disebutkan** → agen membaca branch aktif (`git rev-parse --abbrev-ref HEAD`) dan meminta konfirmasi user sebelum melanjutkan.
+
+### Langkah 6 — Q/A Flow Utama (`_run_qa_flow`)
+
+#### 6a. Deteksi Comparison
+
+Sebelum semua langkah lain, `_run_qa_flow` memeriksa apakah pertanyaan adalah komparasi menggunakan `_COMPARISON_RE`. Jika ya, dialihkan ke `_run_comparison_flow()` (lihat bagian Comparison Flow di atas).
+
+#### 6b. Resolve Symbol Target
+
+Berlaku hanya untuk intent `SPECIFIC_SYMBOL`. Fungsi `extract_specific_target()` mengekstrak nama target dari input user.
+
+#### 6c. Pengumpulan Evidence (Paralel)
+
+Empat operasi dijalankan secara bersamaan dengan `asyncio.gather()`:
+
+| Operasi | Fungsi | Hasil |
+|---|---|---|
+| Topic extraction | `run_qa_extraction()` | Evidence utama sesuai intent |
+| RAG | `_read_relevant_files()` | File-file paling relevan (TF-IDF) |
+| Tavily | `_fetch_tavily_context()` | Konteks web opsional |
+| Dir tree | `_get_dir_tree()` | Struktur folder repo |
+
+#### 6d. LLM Call
+
+```python
+_llm.chat(
+    messages=[
+        {"role": "system", "content": _QA_SYSTEM_PROMPT},
+        {"role": "user",   "content": user_msg},
+    ],
+    temperature=0.15,
+    top_p=0.90,
+    max_tokens=16384,
+)
+```
+
+⚠️ **Warning log** jika respons kosong (kemungkinan max-token hit atau error silent):
+```
+WARNING QnA: LLM returned EMPTY response — possible max-token hit or silent model error. intent=... session=... problem=...
+```
+
+---
+
+## Logging & Warning Policy
+
+Semua kejadian penting dicatat dengan level yang tepat:
+
+| Kejadian | Level | Contoh log |
+|---|---|---|
+| Max-token hit / respons kosong | `WARNING` | `QnA: LLM returned EMPTY response — possible max-token hit` |
+| Scope directory tidak ditemukan | `WARNING` | `QnA comparison: scope directory 'consumer/' not found in repo` |
+| Evidence kosong untuk target | `WARNING` | `QnA comparison: EMPTY evidence for label='consumer'` |
+| Evidence di-truncate | `WARNING` | `QnA comparison: evidence text truncated from X to Y chars` |
+| Task decomposition gagal | `WARNING` | `QnA comparison: task decomposition failed — falling back` |
+| JSON tidak valid dari LLM | `WARNING` | `QnA comparison: task decomposition produced invalid JSON` |
+| File tidak bisa dibaca | `WARNING` | `QnA comparison: cannot read /path/to/file: [Errno]` |
+| LLM synthesis kosong | `WARNING` | `QnA comparison: LLM synthesis returned EMPTY response` |
+| Intent tidak dikenal dari LLM | `WARNING` | `QnA intent: LLM returned unrecognised token` |
+| Normal flow dimulai | `INFO` | `QnA: intent=... repo=... problem=...` |
+| Sub-task dieksekusi | `INFO` | `QnA comparison: sub-task id=1 label='consumer' scope='consumer/' query='...'` |
+| Evidence terkumpul | `INFO` | `QnA comparison: evidence gathering done in X.Xs — targets=['consumer', 'api']` |
+| Selesai | `INFO` | `QnA: done in X.Xs total` |
+
+---
+
+## Extractor Topik-Spesifik (`run_qa_extraction`)
+
+Setiap intent dipetakan ke satu extractor di `repo_qa.py`:
+
+| Intent | Extractor | Strategi Ekstraksi |
+|---|---|---|
+| `API_ENDPOINTS` | `extract_api_endpoints()` | Cari file OpenAPI/Swagger → grep pola route decorator → baca file routing |
+| `TECH_STACK` | `extract_tech_stack()` | Baca requirements.txt/package.json/go.mod → grep import framework → cari Dockerfile |
+| `DATA_MODELS` | `extract_data_models()` | Grep pattern ORM (SQLAlchemy, Pydantic, GORM, Sequelize) → baca file models/schemas |
+| `DEPENDENCIES` | `extract_dependencies()` | Baca requirements.txt, package.json, pyproject.toml, go.mod, Gemfile, composer.json |
+| `CI_CD` | `extract_ci_cd()` | Baca .github/workflows/*.yml, .gitlab-ci.yml, Jenkinsfile, Dockerfile, docker-compose.yml |
+| `SECURITY` | `extract_security()` | Grep pola auth middleware, JWT, OAuth, env vars, secret patterns |
+| `MAIN_FLOW` | `extract_main_flow()` | Baca entry points (main.py, app.py, index.js), grep startup sequence, request lifecycle |
+| `SPECIFIC_SYMBOL` | `extract_specific_symbol()` | Cari definisi + penggunaan simbol target; dual-trace untuk qualified names + API paths |
+
+---
+
+## Pembatasan & Prinsip Keamanan
+
+1. **READ-ONLY** — tidak ada `git add`, `git commit`, atau `git push`.
+2. **Tidak ada eksekusi kode** — hanya membaca dan menganalisis file statis.
+3. **Anti-halusinasi** — LLM wajib menyebut sumber (file + baris) untuk setiap klaim.
+4. **Anti-code-dump** — untuk pertanyaan "cara kerja", LLM dilarang menyalin ulang kode; harus menjelaskan dalam prosa.
+5. **Batas ukuran** — per-file max 40.000 karakter, max 12 file per extractor, max 100 baris per grep result.
+6. **Comparison evidence cap** — evidence komparasi di-cap pada 14.000 karakter; warning log jika terjadi truncation.
+
+---
+
+## File yang Terlibat
+
+| File | Peran |
+|---|---|
+| [agent.py](agent.py) | Class utama `DeveloperQnAAgent`, orkestrasi alur (termasuk comparison flow) |
+| [src/agents/repo_agent_base.py](../repo_agent_base.py) | Base class: repo clone/pull, branch, RAG, Tavily, LLM extraction |
+| [src/tools/repo_qa.py](../../tools/repo_qa.py) | Engine Q/A: `classify_intent`, semua extractor topik, `run_qa_extraction` |
+| [src/agents/llm_client.py](../llm_client.py) | Abstraksi pemanggilan LLM (OpenRouter/OpenAI compatible) |
+| [src/memory/state.py](../../memory/state.py) | `AgentTask` — data task in/out |
+| [src/memory/repo_tracker.py](../../memory/repo_tracker.py) | Tracking repo yang sudah di-clone |
+| [src/tools/cli_executor.py](../../tools/cli_executor.py) | Eksekutor shell command async (git, find, grep) |
+
+
+## Ringkasan
+
+`DeveloperQnAAgent` adalah agen tanya-jawab (Q&A) berbasis repositori yang menjawab pertanyaan spesifik tentang isi codebase — bukan untuk menemukan bug. Agen ini memahami konten repositori dan dapat menjawab pertanyaan seperti:
+
+- "Ada API apa saja di repo ini?"
+- "Tech stack apa yang dipakai?"
+- "Bagaimana alur utama aplikasi?"
+- "Jelaskan fungsi `HandleDownload`"
+- "Model data apa yang ada?"
 
 **Perbedaan utama dengan `DeveloperInspectorAgent`:**
 
