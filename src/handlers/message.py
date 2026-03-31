@@ -19,6 +19,7 @@ from src.orchestrator.main_loop import process_message, process_pdf, process_doc
 
 logger = logging.getLogger(__name__)
 
+_GROUP_CHAT_TYPES = ("group", "supergroup")
 
 _MAX_MSG_LEN = 4096
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 20 MB upload limit for all file types
@@ -51,6 +52,51 @@ def clear_doc_session(session_id: str) -> None:
     """
     _pending_doc_sessions.pop(session_id, None)
     _pending_edit_sessions.pop(session_id, None)
+
+
+def _is_addressed_in_group(message, context) -> bool:
+    """Return True if the bot should respond to *message* in a group/supergroup.
+
+    The bot only responds when:
+    - The message is a direct reply to one of the bot's own messages, or
+    - The bot is explicitly @mentioned in the message text or caption.
+
+    In private chats this function is never called.
+    """
+    # Reply to the bot's own message
+    reply = message.reply_to_message
+    if reply and reply.from_user and reply.from_user.id == context.bot.id:
+        return True
+
+    bot_username = context.bot.username
+    if not bot_username:
+        return False
+
+    mention = f"@{bot_username}".lower()
+
+    # @mention in regular text entities
+    for entity in message.entities or []:
+        if entity.type == "mention":
+            text = message.text or ""
+            if text[entity.offset : entity.offset + entity.length].lower() == mention:
+                return True
+
+    # @mention in caption entities (photos / documents)
+    for entity in message.caption_entities or []:
+        if entity.type == "mention":
+            text = message.caption or ""
+            if text[entity.offset : entity.offset + entity.length].lower() == mention:
+                return True
+
+    return False
+
+
+def _strip_bot_mention(text: str | None, bot_username: str | None) -> str:
+    """Remove *@bot_username* from *text* and strip surrounding whitespace."""
+    if not bot_username or not text:
+        return text or ""
+    pattern = re.compile(r"@" + re.escape(bot_username), re.IGNORECASE)
+    return pattern.sub("", text).strip()
 
 
 def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
@@ -208,11 +254,18 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route a text message through the agent orchestrator and reply."""
     message = update.message
     user    = update.effective_user
+    chat    = update.effective_chat
 
-    logger.info("Text from user=%s: %.100s", user.id, message.text)
+    # ── Group chat: only respond when addressed to the bot ────────────────
+    if chat.type in _GROUP_CHAT_TYPES:
+        if not _is_addressed_in_group(message, context):
+            return
+
+    logger.info("Text from user=%s chat_type=%s: %.100s", user.id, chat.type, message.text)
 
     user_id_str = str(user.id)
-    user_text   = message.text or ""
+    # Strip @botname mention so the LLM sees clean user intent
+    user_text   = _strip_bot_mention(message.text or "", context.bot.username)
 
     # ── 1. Cek sesi edit dokumen yang sedang menunggu konfirmasi ──────────
     pending_edit = _pending_edit_sessions.get(user_id_str)
@@ -370,10 +423,16 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
     """
     message = update.message
     user    = update.effective_user
+    chat    = update.effective_chat
     doc     = message.document
 
     original_filename = doc.file_name or "document.pdf"
-    user_caption      = message.caption or ""
+    user_caption      = _strip_bot_mention(message.caption or "", context.bot.username)
+
+    # In groups: only respond when addressed to the bot
+    if chat.type in _GROUP_CHAT_TYPES:
+        if not _is_addressed_in_group(message, context):
+            return
 
     # Reject clearly non-PDF files (defence-in-depth against filter bypass)
     mime_ok = doc.mime_type in (None, "application/pdf", "application/octet-stream")
@@ -531,11 +590,19 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Acknowledge photo uploads (image analysis is a future feature)."""
-    user = update.effective_user
+    message = update.message
+    user    = update.effective_user
+    chat    = update.effective_chat
+
+    # In groups: only respond when addressed to the bot
+    if chat.type in _GROUP_CHAT_TYPES:
+        if not _is_addressed_in_group(message, context):
+            return
+
     logger.info("Photo from user=%s.", user.id)
 
-    photo = update.message.photo[-1]
-    await update.message.reply_text(
+    photo = message.photo[-1]
+    await message.reply_text(
         f"📷 Foto diterima! (file_id: <code>{photo.file_id}</code>)\n\n"
         "Analisis gambar akan segera hadir. 🚀",
         parse_mode="HTML",
@@ -555,10 +622,16 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     message = update.message
     user    = update.effective_user
+    chat    = update.effective_chat
     doc     = message.document
 
     original_filename = doc.file_name or "document.docx"
-    user_caption      = message.caption or ""
+    user_caption      = _strip_bot_mention(message.caption or "", context.bot.username)
+
+    # In groups: only respond when addressed to the bot
+    if chat.type in _GROUP_CHAT_TYPES:
+        if not _is_addressed_in_group(message, context):
+            return
 
     # Validasi ekstensi
     if not original_filename.lower().endswith(".docx"):
@@ -760,8 +833,16 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Catch-all for unsupported message types."""
+    message = update.message
+    chat    = update.effective_chat
+
+    # In groups: silently ignore unsupported messages unless addressed to bot
+    if chat.type in _GROUP_CHAT_TYPES:
+        if not _is_addressed_in_group(message, context):
+            return
+
     logger.debug("Unknown message type from user=%s.", update.effective_user.id)
-    await update.message.reply_text(
+    await message.reply_text(
         "⚠️ Tipe pesan ini belum didukung. Coba kirim teks.",
         quote=True,
     )
