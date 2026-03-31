@@ -175,53 +175,81 @@ WBSAgent: task.pending_tools.append("wbs_generator")
 ```
 src/
 ├── agents/
-│   ├── base_agent.py           ← ABC: semua agent wajib extends ini
-│   ├── llm_client.py           ← Wrapper HTTP ke OpenRouter
+│   ├── base_agent.py            ← ABC: semua agent wajib extends ini
+│   ├── llm_client.py            ← Wrapper HTTP ke OpenRouter (OpenAI-compatible)
+│   ├── repo_agent_base.py       ← Base class untuk agent berbasis repo (clone/pull/RAG/Tavily)
 │   ├── gatekeeper/
-│   │   ├── agent.py            ← GatekeeperAgent.classify_intent()
-│   │   ├── openrouter.py       ← HTTP call + parse JSON intent dari LLM
-│   │   └── schemas.py          ← IntentCategory enum + IntentResult model
-│   ├── responder/agent.py
-│   ├── researcher/agent.py     ← Membaca task.tool_results["tavily_search"]
-│   ├── content_creator/agent.py
-│   ├── wbs_agent/agent.py      ← LLM → JSON → task.pending_tools
-│   ├── mandays_agent/agent.py  ← LLM → JSON → task.pending_tools
-│   └── developer/
-│       ├── __init__.py
-│       └── agent.py            ← DeveloperAgent: clone → edit → sandbox → push (self-contained)
+│   │   ├── agent.py             ← GatekeeperAgent.classify_intent()
+│   │   ├── openrouter.py        ← HTTP call + parse JSON intent dari LLM
+│   │   └── schemas.py           ← IntentCategory enum + IntentResult model
+│   ├── responder/agent.py       ← Percakapan umum, support, billing
+│   ├── researcher/agent.py      ← Riset mendalam; baca task.tool_results["tavily_search"]
+│   ├── content_creator/agent.py ← Konten platform digital
+│   ├── wbs_agent/agent.py       ← LLM → JSON → task.pending_tools["wbs_generator"]
+│   ├── mandays_agent/agent.py   ← LLM → JSON → task.pending_tools["mandays_generator"]
+│   ├── developer/agent.py       ← Clone → edit → Docker sandbox → push (self-contained)
+│   ├── developer_inspector/agent.py ← Read-only: inspeksi repo, root cause analysis
+│   ├── developer_qna/
+│   │   ├── agent.py             ← Q&A factual tentang isi codebase
+│   │   └── HOW_IT_WORKS.md
+│   ├── technical_writer/agent.py← Dokumen teknis chunked → PDF/DOCX
+│   ├── doc_agent/agent.py       ← Analisis, Q&A, edit .docx (4 mode)
+│   ├── quiz_agent/
+│   │   ├── agent.py             ← PDF → soal kuis → WebQuizBuilderTool
+│   │   └── HOW_IT_WORKS.md
+│   ├── sysinfo_agent/agent.py   ← CPU/RAM/disk via psutil
+│   ├── log_viewer_agent/agent.py← Tampilkan log dari ring buffer
+│   ├── web_automation/agent.py  ← ReAct loop: navigate/click/fill/screenshot
+│   └── reminder/
+│       ├── agent.py             ← Set/list/cancel timed reminders
+│       └── scheduler.py         ← APScheduler instance (process-wide)
 │
 ├── orchestrator/
-│   ├── main_loop.py            ← process_message() – controller utama
-│   └── router.py               ← INTENT_AGENT_MAP: intent → agent name
+│   ├── main_loop.py             ← process_message() – controller utama
+│   └── router.py                ← INTENT_AGENT_MAP: intent → agent name
 │
 ├── tools/
-│   ├── base_tool.py            ← ABC: semua tool wajib extends ini
-│   ├── tavily_search.py        ← Pre-agent: live web search
-│   ├── wbs_generator.py        ← Post-agent: build WBS Excel
-│   ├── mandays_generator.py    ← Post-agent: build Mandays Excel
-│   ├── cli_executor.py         ← Internal DeveloperAgent: async non-interactive shell runner
-│   ├── sandbox_runner.py       ← Internal DeveloperAgent: Docker build/run + traceback detection
-│   ├── git_manager.py          ← Internal DeveloperAgent: git commit/push with PAT auth
+│   ├── base_tool.py             ← ABC: semua tool wajib extends ini
+│   ├── tavily_search.py         ← Pre-agent: live web search
+│   ├── wbs_generator.py         ← Post-agent: build WBS Excel Gantt
+│   ├── mandays_generator.py     ← Post-agent: build Mandays Excel
+│   ├── diagram_renderer.py      ← Post-agent: render Mermaid → PNG via mmdc
+│   ├── document_generator.py    ← Post-agent: Markdown → DOCX/PDF (Pandoc/WeasyPrint)
+│   ├── web_quiz_builder.py      ← Post-agent: soal JSON → HTML kuis interaktif
+│   ├── browser_navigator.py     ← Playwright controller (klik/type/scroll/screenshot)
+│   ├── web_reader.py            ← HTTP page reader + a11y locators
+│   ├── pdf_parser.py            ← Ekstraksi teks PDF via PyMuPDF (chunked, anti-OOM)
+│   ├── docx_parser.py           ← Ekstraksi seksi/bab dari .docx
+│   ├── docx_editor.py           ← Edit .docx via XML operations
+│   ├── cli_executor.py          ← Async non-interactive shell runner (timeout 5 mnt)
+│   ├── sandbox_runner.py        ← Docker build/run + traceback detection + fallback
+│   ├── git_manager.py           ← git add -A → commit → push dengan PAT auth
+│   ├── sysinfo_tool.py          ← Metrik CPU/RAM/disk via psutil
+│   ├── reminder_store.py        ← SQLite store untuk reminder jobs
+│   ├── log_buffer.py            ← In-memory ring buffer log bot
+│   ├── repo_qa.py               ← Engine Q&A: extractor API, model, tech stack, dll.
+│   ├── identity_generator.py    ← Pembuat identitas acak (untuk web automation)
+│   ├── progress_tracker.py      ← Live-update progress message di Telegram
 │   ├── wbs/
-│   │   ├── generate_wbs.py     ← Core Excel rendering logic (WBS)
-│   │   └── extract_wbs.py      ← Excel → JSON (standalone utility)
+│   │   ├── generate_wbs.py      ← Core Excel rendering logic (WBS)
+│   │   └── extract_wbs.py       ← Excel → JSON (standalone utility)
 │   └── mandays/
-│       ├── generate_mandays.py ← Core Excel rendering logic (Mandays)
-│       └── extract_mandays.py  ← Excel → JSON (standalone utility)
+│       ├── generate_mandays.py  ← Core Excel rendering logic (Mandays)
+│       └── extract_mandays.py   ← Excel → JSON (standalone utility)
 │
 ├── memory/
-│   ├── state.py                ← AgentTask dataclass (blackboard)
-│   ├── history.py              ← ConversationHistory (in-memory)
-│   └── repo_tracker.py         ← RepoTracker: SQLite registry repo yang pernah di-clone (data/repos.db)
+│   ├── state.py                 ← AgentTask dataclass (blackboard)
+│   ├── history.py               ← ConversationHistory (in-memory)
+│   └── repo_tracker.py          ← RepoTracker: SQLite registry repo yang pernah di-clone
 │
 ├── interfaces/
-│   ├── telegram_bot.py
-│   ├── rest_api.py
-│   └── webhook.py
+│   ├── telegram_bot.py          ← Telegram Application builder
+│   ├── rest_api.py              ← FastAPI: /chat, /health, /session/{id}
+│   └── webhook.py               ← Webhook runner (uvicorn)
 │
 └── handlers/
-    ├── message.py              ← Routing pesan Telegram → process_message()
-    └── command.py              ← Handler /start /help /ping /reset
+    ├── message.py               ← Routing pesan Telegram → process_message()
+    └── command.py               ← Handler /start /help /ping /reset
 ```
 
 ---
