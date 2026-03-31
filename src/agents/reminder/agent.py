@@ -47,22 +47,22 @@ Ekstrak dari pesan pengguna:
 4. "cancel_id" – integer id reminder yang akan dihapus (hanya untuk action "cancel"), atau null
 
 Balas HANYA dengan JSON, tanpa markdown, tanpa penjelasan:
-{
+{{
   "action": "set" | "list" | "cancel",
   "message": "<isi reminder atau null>",
   "remind_at_iso": "<ISO-8601 UTC datetime atau null>",
   "cancel_id": <integer atau null>
-}
+}}
 
 Contoh:
 User: "ingatkan saya untuk checkin pada pukul 07:59"
-→ {"action": "set", "message": "checkin", "remind_at_iso": "2025-01-15T00:59:00", "cancel_id": null}
+→ {{"action": "set", "message": "checkin", "remind_at_iso": "2025-01-15T00:59:00", "cancel_id": null}}
 
 User: "lihat daftar reminder saya"
-→ {"action": "list", "message": null, "remind_at_iso": null, "cancel_id": null}
+→ {{"action": "list", "message": null, "remind_at_iso": null, "cancel_id": null}}
 
 User: "hapus reminder nomor 3"
-→ {"action": "cancel", "message": null, "remind_at_iso": null, "cancel_id": 3}
+→ {{"action": "cancel", "message": null, "remind_at_iso": null, "cancel_id": 3}}
 """
 
 _PARSE_USER_TEMPLATE = "Pesan pengguna: {user_input}"
