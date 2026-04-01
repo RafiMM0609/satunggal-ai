@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 
 _GROUP_CHAT_TYPES = ("group", "supergroup")
 
+
+def _chat_session_id(user_id: int, chat_id: int) -> str:
+    """Return a session identifier scoped to both user and chat.
+
+    Using user_id + chat_id means conversation history is isolated between
+    a direct-message session and any group session, so concurrent requests
+    from different chats never share the same history context.
+    """
+    return f"{user_id}_{chat_id}"
+
 _MAX_MSG_LEN = 4096
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 20 MB upload limit for all file types
 _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
@@ -264,6 +274,7 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Text from user=%s chat_type=%s: %.100s", user.id, chat.type, message.text)
 
     user_id_str = str(user.id)
+    session_id  = _chat_session_id(user.id, chat.id)
     # Strip @botname mention so the LLM sees clean user intent
     user_text   = _strip_bot_mention(message.text or "", context.bot.username)
 
@@ -306,13 +317,13 @@ async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if has_doc_session:
         # Route langsung ke DocAgent tanpa melalui gatekeeper
         task = await process_doc_session_message(
-            session_id=str(user.id),
+            session_id=session_id,
             user_text=message.text,
             status_callback=_progress_callback,
         )
     else:
         task = await process_message(
-            session_id=str(user.id),
+            session_id=session_id,
             user_text=message.text,
             status_callback=_progress_callback,
         )
@@ -514,7 +525,7 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
     # ── Run the quiz pipeline ──────────────────────────────────────────────
     try:
         task = await process_pdf(
-            session_id=str(user.id),
+            session_id=_chat_session_id(user.id, chat.id),
             pdf_path=pdf_path,
             original_filename=original_filename,
             user_caption=user_caption,
@@ -753,7 +764,7 @@ async def handle_docx_document(update: Update, context: ContextTypes.DEFAULT_TYP
     pipeline_path = session_docx_copy or docx_path
     try:
         task = await process_docx(
-            session_id=str(user.id),
+            session_id=_chat_session_id(user.id, chat.id),
             docx_path=pipeline_path,
             original_filename=original_filename,
             user_caption=user_caption,

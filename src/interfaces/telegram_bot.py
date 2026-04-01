@@ -132,6 +132,7 @@ def build_application(config: Config) -> Application:
     app = (
         Application.builder()
         .token(config.bot_token)
+        .concurrent_updates(True)
         .post_init(_send_startup_notification)
         .post_shutdown(_shutdown_scheduler)
         .build()
