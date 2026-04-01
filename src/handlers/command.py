@@ -35,7 +35,7 @@ from src.memory.key_store import (
     set_openrouter_max_tokens,
     set_openrouter_model,
 )
-from src.handlers.message import clear_doc_session
+from src.handlers.message import clear_doc_session, _chat_session_id
 from src.orchestrator.main_loop import clear_session
 
 _DEPLOY_SCRIPT = Path(__file__).resolve().parents[2] / "helper_deploy.sh"
@@ -90,8 +90,9 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler /reset — hapus riwayat percakapan pengguna."""
     user = update.effective_user
+    chat = update.effective_chat
     logger.info("User %s mereset sesi.", user.id)
-    await clear_session(str(user.id))
+    await clear_session(_chat_session_id(user.id, chat.id))
     # Also wipe in-memory doc session state so the next message is routed
     # normally instead of being sent directly to DocAgent.
     clear_doc_session(str(user.id))
