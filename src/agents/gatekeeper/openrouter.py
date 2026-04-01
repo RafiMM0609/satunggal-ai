@@ -80,7 +80,7 @@ Rules:
    - Or phrases like: "teliti dengan baik", "lakukan riset tentang", "berikan analisis mendalam", "selidiki kondisi"
    A question that is simply asking for information (without explicit research keywords) is NOT "research".
 8. Use "technical_support" for technical troubleshooting questions that do NOT use explicit research/investigation keywords.
-9. Use "content_creation" when the user asks to create, write, draft, or generate content for social media or publishing, such as:
+9. Use "content_creation" when the user asks to create content, write content, draft content, or generate content for social media or publishing, such as:
    - Indonesian: buat konten, tulis artikel, buat postingan, buat draft, konten LinkedIn, posting LinkedIn, tulis konten, rangkum untuk postingan
    - English: create content, write post, draft LinkedIn, make a post, write article, create draft, generate content
 10. Use "code_development" when the user mentions cloning a repo/GitHub URL, fixing/editing code with AI CLI (Copilot, Claude), running code in Docker/sandbox, or listing cloned repos:
