@@ -29,6 +29,7 @@ class IntentCategory(str, Enum):
     LOG_VIEWER         = "log_viewer"         # lihat log bot untuk debugging
     QUIZ_GENERATION    = "quiz_generation"    # konversi PDF menjadi kuis interaktif HTML
     TELEGRAM_QUIZ      = "telegram_quiz"      # konversi PDF menjadi kuis polling interaktif via Telegram sendPoll
+    TELEGRAM_QUIZ_BANK = "telegram_quiz_bank" # ekstrak soal langsung dari PDF bank soal untuk Telegram sendPoll
     PDF_SUMMARIZATION  = "pdf_summarization"  # ringkas / QnA / pahami isi dokumen PDF
     WEB_AUTOMATION     = "web_automation"     # autonomous browsing: buka URL, klik, isi form, screenshot
     DOC_AUDIT          = "doc_audit"          # analisis / QnA isi dokumen .docx yang sudah dikirim

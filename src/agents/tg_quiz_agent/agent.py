@@ -97,6 +97,57 @@ Harap perbaiki dan kirimkan ulang HANYA JSON yang valid sesuai format yang dimin
 Tidak ada teks di luar JSON.
 """
 
+_EXTRACTION_SYSTEM_PROMPT = """\
+Kamu adalah SoalEkstraktor – spesialis mengekstrak soal pilihan ganda yang SUDAH ADA \
+dalam dokumen (bank soal, soal ujian, kumpulan soal) untuk dikirim via Telegram \
+menggunakan fitur Poll (Quiz Mode).
+
+Tugasmu adalah mengidentifikasi dan mengekstrak soal-soal pilihan ganda yang sudah ada \
+dalam teks yang diberikan. JANGAN membuat soal baru. Hanya ekstrak soal yang sudah ada.
+
+## ATURAN EKSTRAKSI ##
+
+1. Temukan soal-soal yang ada dalam teks (biasanya ditandai nomor urut: 1., 2., 3., dst.)
+2. Identifikasi pilihan jawaban yang ada (biasanya A/B/C/D atau a/b/c/d atau 1/2/3/4)
+3. Tentukan jawaban yang benar berdasarkan:
+   - Kunci jawaban eksplisit (misalnya "Jawaban: A", "Kunci: B", "Answer: C")
+   - Tanda visual: tanda bintang (*), huruf tebal, atau tanda kurung kotak ([x])
+   - Jika tidak ada petunjuk, gunakan penilaian terbaik berdasarkan konteks soal
+4. Hapus prefix huruf atau angka dari teks pilihan jawaban (A., B., C., D., 1., 2., dst.)
+5. Jika soal asli memiliki lebih dari 4 pilihan, ambil 4 yang paling relevan
+6. Lewati soal yang memiliki kurang dari 4 pilihan jawaban atau tidak memiliki struktur MCQ
+
+## ATURAN KETAT ##
+
+1. OUTPUT HARUS BERUPA JSON VALID SAJA. Tidak ada teks, penjelasan, atau komentar di luar JSON.
+2. Ekstrak semua soal MCQ yang ditemukan, hingga jumlah yang diminta.
+3. Setiap soal WAJIB memiliki TEPAT 4 pilihan jawaban.
+4. Field "correct_option_id" adalah INTEGER INDEX 0-3 (0=pilihan pertama, 1=pilihan kedua, dst.).
+5. PENTING: Pilihan jawaban TIDAK BOLEH menggunakan prefix "A. " / "B. " / "C. " / "D. ".
+   Tulis langsung teks pilihan tanpa huruf depan.
+6. Pastikan correct_option_id sesuai dengan posisi jawaban yang benar (0-indexed).
+7. Gunakan Bahasa Indonesia yang baku (pertahankan bahasa asli soal jika sudah formal).
+8. Panjang karakter (WAJIB dipatuhi karena ini limit API Telegram):
+   - "question"    : maks 300 karakter
+   - setiap option : maks 100 karakter
+   - "explanation" : maks 200 karakter (isi jika ada pembahasan di teks, kosongkan jika tidak ada)
+
+## FORMAT JSON WAJIB ##
+[
+  {
+    "question": "Pertanyaan yang diekstrak dari teks (maks 300 karakter)",
+    "options": [
+      "Pilihan pertama (tanpa prefix huruf)",
+      "Pilihan kedua",
+      "Pilihan ketiga",
+      "Pilihan keempat"
+    ],
+    "correct_option_id": 0,
+    "explanation": "Pembahasan singkat jika tersedia di teks. (maks 200 karakter)"
+  }
+]
+"""
+
 
 # ── TelegramQuizAgent ─────────────────────────────────────────────────────────
 
@@ -118,6 +169,10 @@ class TelegramQuizAgent(BaseAgent):
           - task.metadata["quiz_title"]:        str        – optional quiz title
           - task.metadata["quiz_question_count"]: int      – optional desired total
           - task.metadata["status_callback"]:   callable   – optional progress callback
+          - task.metadata["quiz_mode"]:         str        – "generate" (default) or "extract"
+
+        Mode "generate": LLM creates NEW questions from study-material PDF.
+        Mode "extract":  LLM EXTRACTS existing MCQ questions from a question-bank PDF.
 
         Produces:
           - task.metadata["tg_quiz_questions"]: list[dict] – Telegram-ready question dicts
@@ -135,6 +190,7 @@ class TelegramQuizAgent(BaseAgent):
         quiz_title: str = task.metadata.get("quiz_title", "Kuis Telegram dari PDF")
         status_cb       = task.metadata.get("status_callback")
         desired_total: int | None = task.metadata.get("quiz_question_count")
+        mode: str = task.metadata.get("quiz_mode", "generate")
 
         import math as _math
 
@@ -170,6 +226,7 @@ class TelegramQuizAgent(BaseAgent):
                 questions_done=question_counter,
                 batch_current=batch_idx,
                 batch_total=total_batches,
+                mode=mode,
             )
 
             batch_questions = await self._process_chunk_with_correction(
@@ -179,6 +236,7 @@ class TelegramQuizAgent(BaseAgent):
                 existing_count=question_counter,
                 questions_per_batch=per_batch_count,
                 existing_questions=all_questions,
+                mode=mode,
             )
 
             # Free the chunk text from memory immediately after processing
@@ -205,11 +263,18 @@ class TelegramQuizAgent(BaseAgent):
                 )
 
         if not all_questions:
-            task.mark_failed("LLM tidak menghasilkan soal valid dari PDF ini.")
-            task.result = (
-                "❌ Gagal membuat kuis Telegram: tidak ada soal yang berhasil dibuat. "
-                "Coba dengan PDF yang lebih padat kontennya."
-            )
+            if mode == "extract":
+                task.mark_failed("LLM tidak menemukan soal MCQ yang valid dalam PDF ini.")
+                task.result = (
+                    "❌ Gagal mengekstrak soal dari PDF: tidak ada soal pilihan ganda (MCQ) yang valid ditemukan. "
+                    "Pastikan PDF berisi soal pilihan ganda dengan 4 pilihan jawaban."
+                )
+            else:
+                task.mark_failed("LLM tidak menghasilkan soal valid dari PDF ini.")
+                task.result = (
+                    "❌ Gagal membuat kuis Telegram: tidak ada soal yang berhasil dibuat. "
+                    "Coba dengan PDF yang lebih padat kontennya."
+                )
             return task
 
         # Trim to desired total
@@ -237,8 +302,8 @@ class TelegramQuizAgent(BaseAgent):
         task.metadata["quiz_title"]        = quiz_title
 
         task.mark_done(
-            f"✅ Kuis Telegram berhasil dibuat dengan *{len(all_questions)} soal*. "
-            "Mengirim soal ke chat..."
+            f"✅ {'Ekstraksi' if mode == 'extract' else 'Pembuatan'} kuis Telegram berhasil "
+            f"dengan *{len(all_questions)} soal*. Mengirim soal ke chat..."
         )
 
         logger.info(
@@ -258,10 +323,14 @@ class TelegramQuizAgent(BaseAgent):
         questions_per_batch: int = 5,
         existing_questions: list[dict] | None = None,
         max_retries: int = 2,
+        mode: str = "generate",
     ) -> list[dict[str, Any]]:
         """
         Call the LLM with one text chunk, running a self-correction loop
         on validation failure (up to *max_retries* additional attempts).
+
+        *mode* controls whether the LLM generates new questions ("generate")
+        or extracts existing MCQ questions from a question-bank PDF ("extract").
 
         Returns a (possibly empty) list of validated question dicts.
         """
@@ -276,15 +345,27 @@ class TelegramQuizAgent(BaseAgent):
                 f"Buat soal yang BERBEDA dari semua soal di atas."
             )
 
-        user_prompt = (
-            f"Berikut adalah teks sumber untuk Batch {batch_index}.\n"
-            f"Buat TEPAT {questions_per_batch} soal pilihan ganda dari teks ini.\n"
-            f"{avoid_hint}\n\n"
-            f"TEKS:\n{chunk_text}"
-        )
+        if mode == "extract":
+            system_prompt = _EXTRACTION_SYSTEM_PROMPT
+            user_prompt = (
+                f"Berikut adalah teks bank soal untuk Batch {batch_index}.\n"
+                f"Ekstrak soal-soal pilihan ganda yang SUDAH ADA dalam teks ini "
+                f"(maksimal {questions_per_batch} soal dari batch ini).\n"
+                f"JANGAN membuat soal baru. Hanya ekstrak soal yang sudah ada.\n"
+                f"{avoid_hint}\n\n"
+                f"TEKS:\n{chunk_text}"
+            )
+        else:
+            system_prompt = _SYSTEM_PROMPT
+            user_prompt = (
+                f"Berikut adalah teks sumber untuk Batch {batch_index}.\n"
+                f"Buat TEPAT {questions_per_batch} soal pilihan ganda dari teks ini.\n"
+                f"{avoid_hint}\n\n"
+                f"TEKS:\n{chunk_text}"
+            )
 
         messages: list[dict] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_prompt},
         ]
 
@@ -475,16 +556,19 @@ async def _notify_progress(
     questions_done: int,
     batch_current: int,
     batch_total: int,
+    mode: str = "generate",
 ) -> None:
     """Send a structured quiz progress message via the status callback."""
     if cb is None:
         return
 
+    action_label = "Mengekstrak Soal" if mode == "extract" else "Menghasilkan Soal"
+
     text = (
-        f"⏳ *Proses Pembuatan Kuis Telegram Aktif*\n\n"
+        f"⏳ *Proses {'Ekstraksi' if mode == 'extract' else 'Pembuatan'} Kuis Telegram Aktif*\n\n"
         f"📝 *{quiz_title}*\n\n"
         f"  • 📄 Membaca PDF: ✅ Selesai\n"
-        f"  • 🧠 Menghasilkan Soal: ⏳ [{questions_done} soal dibuat...]\n"
+        f"  • 🧠 {action_label}: ⏳ [{questions_done} soal {'diekstrak' if mode == 'extract' else 'dibuat'}...]\n"
         f"  • 📨 Siap Kirim ke Telegram: ⏳ Menunggu\n\n"
         f"_(Batch {batch_current} dari {batch_total})_"
     )

@@ -46,6 +46,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - web_automation     (user wants the bot to autonomously browse a website, click buttons, fill forms, take screenshots, read page content, or interact with a web page)
 - quiz_generation    (user wants to convert a PDF into an interactive HTML quiz or a set of MCQ questions from educational/study material)
 - telegram_quiz      (user explicitly wants quiz questions sent as interactive Telegram polls/polls — keywords: "kuis telegram", "kirim polling", "kirim soal poll", "sendPoll", "kuis via telegram", "polling kuis", "quiz telegram")
+- telegram_quiz_bank (user uploads a PDF that ALREADY CONTAINS a collection of questions/exam problems and wants them EXTRACTED (not generated) as Telegram polls — keywords: "bank soal", "kumpulan soal", "soal ujian", "soal latihan", "ekstrak soal", "import soal", "ambil soal dari pdf", "soal sudah ada", "pdf soal", "bank kuis")
 - pdf_summarization  (user wants to summarize, ask questions about, or understand the content of a PDF document)
 - doc_audit          (user wants to ask questions about, explore, or get details about a .docx document that was previously uploaded and analyzed in this session)
 - reminder           (user wants to set a timed reminder/alarm, list their reminders, or cancel/delete a reminder)
@@ -136,11 +137,13 @@ Rules:
     Classify based on BOTH the caption intent AND the document preview:
     - Caption contains "kuis" / "soal" / "quiz" / "pertanyaan" / "latihan" OR preview looks like structured educational/study material (chapters, definitions, numbered items) → quiz_generation
     - Caption contains "kuis telegram" / "polling kuis" / "kirim poll" / "kirim soal poll" / "quiz telegram" / "soal telegram" → telegram_quiz
+    - Caption contains "bank soal" / "kumpulan soal" / "soal ujian" / "soal latihan" / "ekstrak soal" / "import soal" / "ambil soal" / "pdf soal" / "bank kuis" OR preview looks like a question bank (numbered questions with A/B/C/D options, "kunci jawaban", answer keys) → telegram_quiz_bank
     - Caption contains "ringkas" / "rangkum" / "summarize" / "apa isi" / "ceritakan" / "jelaskan" / "apa yang ada" / "kesimpulan" → pdf_summarization
     - Caption is "(tidak ada pesan dari pengguna)" or vague and document type is unclear → needs_clarification asking what they want done with the PDF
     Examples:
       Input has "[Pesan user: buat kuis dari ini]" → {"intent": "quiz_generation", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
       Input has "[Pesan user: buat kuis telegram]" → {"intent": "telegram_quiz", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+      Input has "[Pesan user: bank soal ini ekstrak jadi kuis telegram]" → {"intent": "telegram_quiz_bank", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
       Input has "[Pesan user: ringkas dokumen ini]" → {"intent": "pdf_summarization", "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
       Input has "[Pesan user: (tidak ada pesan dari pengguna)]" → {"intent": "unknown", "confidence": 0.20, "tools": [], "needs_clarification": true, "clarification_question": "Mau diapakan dokumen ini? Misalnya: buat kuis interaktif, kuis telegram, ringkasan, atau ada keperluan lain?"}
 
@@ -174,6 +177,18 @@ Rules:
     - Examples: "ingatkan saya untuk checkin jam 07:59", "remind me to take medicine tomorrow at 8am",
       "lihat daftar reminderku", "hapus reminder #3"
 
+21. Use "telegram_quiz_bank" when the user uploads a PDF that ALREADY CONTAINS a collection of exam/quiz
+    questions (bank soal) and wants those questions EXTRACTED and sent as Telegram polls — NOT generating
+    new questions from study material:
+    - Indonesian: bank soal, kumpulan soal, soal ujian, soal latihan, ekstrak soal, import soal,
+      ambil soal dari pdf, soal sudah ada, pdf soal, bank kuis, soal-soal, ekstrak kuis,
+      jadikan polling soal-soal ini, kirim soal dari pdf ini, ambilkan soal dari sini
+    - English: question bank, exam questions, extract questions, import questions, get questions from pdf,
+      questions already in pdf, bank of questions, existing questions
+    - Key differentiator: user wants to EXTRACT pre-existing questions, NOT generate new ones.
+      If caption says "buat soal" / "generate soal" → quiz_generation or telegram_quiz.
+      If caption says "bank soal" / "ekstrak soal" / "soal yang ada di pdf ini" → telegram_quiz_bank.
+
 Example responses:
   {"intent": "data_analysis",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "mandays_planning",   "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
@@ -189,6 +204,7 @@ Example responses:
   {"intent": "unknown",            "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?"}
   {"intent": "quiz_generation",    "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "telegram_quiz",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "telegram_quiz_bank", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "pdf_summarization",  "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "doc_audit",          "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "reminder",           "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}

@@ -577,6 +577,84 @@ async def _run_tg_quiz_pipeline(
     return task
 
 
+async def _run_tg_quiz_bank_pipeline(
+    task: "AgentTask",
+    agents: dict,
+    tools: dict,
+    session_id: str,
+    original_filename: str,
+    status_callback: "StatusCallback",
+    history,
+) -> "AgentTask":
+    """
+    Inner pipeline: Bank-soal PDF → Telegram Poll Quiz (extraction mode).
+    Called by process_pdf after gatekeeper confirms telegram_quiz_bank intent.
+    Unlike _run_tg_quiz_pipeline (which generates new questions from material),
+    this pipeline instructs TelegramQuizAgent to EXTRACT existing MCQ questions
+    that are already present in the PDF.
+    """
+    # ── Full Parse ─────────────────────────────────────────────────────────
+    await _notify(status_callback, _tg_quiz_bank_status_msg(original_filename, phase="parsing"))
+    pdf_tool = tools.get("pdf_parser")
+    if pdf_tool is None:
+        task.mark_failed("pdf_parser tool tidak terdaftar.")
+        task.result = "❌ Sistem tidak dapat memproses PDF saat ini."
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    parser_result = await pdf_tool.run(task)
+    if "error" in parser_result:
+        task.mark_failed(parser_result["error"])
+        task.result = f"❌ Gagal membaca PDF: {parser_result['error']}"
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    chunks: list[str] = parser_result["chunks"]
+    task.metadata["pdf_chunks"] = chunks
+    task.metadata["quiz_mode"]  = "extract"
+
+    logger.info(
+        "TG quiz bank full-parse: session=%s pages=%d words=%d chunks=%d",
+        session_id,
+        parser_result.get("total_pages", 0),
+        parser_result.get("total_words", 0),
+        len(chunks),
+    )
+
+    # ── TelegramQuizAgent (extraction mode) ───────────────────────────────
+    tg_quiz_agent = agents.get("tg_quiz_agent")
+    if tg_quiz_agent is None:
+        task.mark_failed("tg_quiz_agent tidak terdaftar.")
+        task.result = "❌ Telegram Quiz agent tidak tersedia."
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    await _notify(status_callback, _tg_quiz_bank_status_msg(original_filename, phase="extracting"))
+    task.mark_processing("tg_quiz_agent")
+    task = await tg_quiz_agent.run(task)
+
+    # Free parsed chunks from memory
+    task.metadata.pop("pdf_chunks", None)
+    task.metadata.pop("quiz_mode", None)
+
+    if task.status.value == "failed":
+        history.add(session_id, "assistant", task.result or "")
+        return task
+
+    await _notify(status_callback, _tg_quiz_bank_status_msg(original_filename, phase="done"))
+
+    if not task.result:
+        task.result = "✅ Soal berhasil diekstrak dari bank soal!"
+
+    history.add(session_id, "assistant", task.result)
+    logger.info(
+        "_run_tg_quiz_bank_pipeline done | session=%s questions=%d",
+        session_id,
+        len(task.metadata.get("tg_quiz_questions", [])),
+    )
+    return task
+
+
 async def process_pdf(
     session_id: str,
     pdf_path: str,
@@ -709,12 +787,28 @@ async def process_pdf(
             task, agents, tools, session_id, original_filename, status_callback, history,
         )
 
+    if intent_value == "telegram_quiz_bank":
+        task.metadata["quiz_title"] = _make_quiz_title(original_filename)
+        question_count = _extract_question_count(user_caption)
+        if not question_count:
+            for msg in reversed(history.get(session_id)[-6:]):
+                if msg.role == "user":
+                    question_count = _extract_question_count(msg.content)
+                    if question_count:
+                        break
+        if question_count:
+            task.metadata["quiz_question_count"] = question_count
+        return await _run_tg_quiz_bank_pipeline(
+            task, agents, tools, session_id, original_filename, status_callback, history,
+        )
+
     # Unsupported intent – friendly explanation
     task.result = (
         f"ℹ️ Saya menerima PDF *{original_filename}* dan mendeteksi permintaan: *{intent_value}*.\n\n"
         f"Saat ini PDF mendukung:\n"
         f"  • _\"buat kuis\"_ → kuis website interaktif (HTML)\n"
-        f"  • _\"buat kuis telegram\"_ → kuis polling langsung di Telegram\n\n"
+        f"  • _\"buat kuis telegram\"_ → kuis polling langsung di Telegram (generate soal baru dari materi)\n"
+        f"  • _\"bank soal\"_ / _\"ekstrak soal\"_ → kirim soal yang sudah ada di PDF sebagai polling Telegram\n\n"
         f"Kirim ulang PDF dengan salah satu pesan di atas untuk memulai. 🎯"
     )
     logger.info("PDF intent '%s' not yet supported: session=%s", intent_value, session_id)
@@ -799,7 +893,22 @@ def _quiz_status_msg(filename: str, phase: str) -> str:
     )
 
 
-def _tg_quiz_status_msg(filename: str, phase: str) -> str:
+def _tg_quiz_bank_status_msg(filename: str, phase: str) -> str:
+    """Build a Markdown progress message for the Telegram bank-soal extraction pipeline."""
+    pdf_icon     = "✅" if phase in ("extracting", "done") else "🔄"
+    extract_icon = "✅" if phase == "done" else ("🔄" if phase == "extracting" else "⏳")
+    send_icon    = "✅" if phase == "done" else "⏳"
+
+    return (
+        f"⏳ *Proses Ekstraksi Bank Soal Aktif*\n\n"
+        f"📝 *{_make_quiz_title(filename)}*\n\n"
+        f"  • 📄 Membaca PDF: {pdf_icon} {'Selesai' if pdf_icon == '✅' else 'Memproses...'}\n"
+        f"  • 📋 Mengekstrak Soal: {extract_icon} {'Selesai' if extract_icon == '✅' else ('Memproses...' if extract_icon == '🔄' else 'Menunggu')}\n"
+        f"  • 📨 Mengirim ke Telegram: {send_icon} {'Selesai' if send_icon == '✅' else 'Menunggu'}"
+    )
+
+
+
     """Build a Markdown progress message for the Telegram poll quiz pipeline."""
     pdf_icon  = "✅" if phase in ("generating", "done") else "🔄"
     gen_icon  = "✅" if phase == "done" else ("🔄" if phase == "generating" else "⏳")
