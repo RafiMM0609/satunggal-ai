@@ -11,7 +11,7 @@ import shutil
 import tempfile
 
 import telegramify_markdown
-from telegram import Update
+from telegram import Update, Poll
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
@@ -576,6 +576,12 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
     reply = task.result or "✅ Kuis berhasil dibuat!"
     await _safe_reply(message, reply)
 
+    # ── Send Telegram Poll quiz (tg_quiz_agent result) ─────────────────────
+    tg_quiz_questions = task.metadata.get("tg_quiz_questions")
+    if tg_quiz_questions:
+        await _send_tg_quiz_polls(message, context, tg_quiz_questions, task.metadata.get("quiz_title", "Kuis"))
+        return
+
     # ── Send the HTML quiz file ────────────────────────────────────────────
     html_path = task.metadata.get("html_path")
     if html_path and os.path.isfile(html_path):
@@ -614,6 +620,96 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text(
             "⚠️ File HTML tidak ditemukan. Ada kesalahan saat membangun kuis.", quote=True
         )
+
+
+async def _send_tg_quiz_polls(
+    message,
+    context: ContextTypes.DEFAULT_TYPE,
+    questions: list[dict],
+    quiz_title: str,
+) -> None:
+    """
+    Send a list of quiz questions as Telegram Poll messages (Quiz Mode).
+
+    Each question dict must have:
+      - "question":          str  (max 300 chars)
+      - "options":           list[str] of exactly 4 items (max 100 chars each)
+      - "correct_option_id": int  (0–3)
+      - "explanation":       str  (optional, max 200 chars)
+    """
+    import asyncio
+
+    total = len(questions)
+    logger.info(
+        "Sending %d Telegram quiz polls for chat_id=%s",
+        total, message.chat_id,
+    )
+
+    # Send header message
+    header = telegramify_markdown.markdownify(
+        f"🎯 *{quiz_title}*\n\n"
+        f"Kuis Telegram siap\\! Mengirim *{total} soal* sebagai polling interaktif\\.\n"
+        f"Pilih jawaban yang benar untuk setiap soal\\! 🏆"
+    )
+    try:
+        await message.reply_text(header, parse_mode="MarkdownV2", quote=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to send TG quiz header: %s", exc)
+
+    sent = 0
+    failed = 0
+    for idx, q in enumerate(questions, start=1):
+        question_text    = str(q.get("question", "")).strip()
+        options          = [str(o).strip() for o in q.get("options", [])]
+        correct_id       = q.get("correct_option_id", 0)
+        explanation      = str(q.get("explanation", "")).strip()
+
+        # Skip questions with missing or malformed data (defence-in-depth)
+        if not question_text or len(options) != 4 or correct_id not in range(4):
+            logger.warning("Skipping malformed question idx=%d: %r", idx, q)
+            failed += 1
+            continue
+
+        try:
+            await context.bot.send_poll(
+                chat_id=message.chat_id,
+                question=question_text,
+                options=options,
+                type=Poll.QUIZ,
+                correct_option_id=correct_id,
+                explanation=explanation or None,
+                is_anonymous=True,
+                allows_multiple_answers=False,
+            )
+            sent += 1
+        except Exception as exc:
+            logger.warning("Failed to send poll idx=%d: %s", idx, exc)
+            failed += 1
+
+        # Small delay to avoid hitting Telegram rate limits
+        if idx < total:
+            await asyncio.sleep(0.5)
+
+    # Summary message
+    if failed == 0:
+        summary = f"✅ Semua *{sent} soal* berhasil dikirim\\! Selamat mengerjakan kuis\\! 🎉"
+    else:
+        summary = (
+            f"⚠️ *{sent}* soal berhasil dikirim, *{failed}* soal gagal dikirim "
+            f"\\(kemungkinan format tidak sesuai\\)\\."
+        )
+    try:
+        await message.reply_text(
+            telegramify_markdown.markdownify(summary),
+            parse_mode="MarkdownV2",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to send TG quiz summary: %s", exc)
+
+    logger.info(
+        "TG quiz polls done: sent=%d failed=%d chat_id=%s",
+        sent, failed, message.chat_id,
+    )
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -45,6 +45,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - log_viewer         (user wants to see, inspect, or debug the bot's recent application logs)
 - web_automation     (user wants the bot to autonomously browse a website, click buttons, fill forms, take screenshots, read page content, or interact with a web page)
 - quiz_generation    (user wants to convert a PDF into an interactive HTML quiz or a set of MCQ questions from educational/study material)
+- telegram_quiz      (user explicitly wants quiz questions sent as interactive Telegram polls/polls — keywords: "kuis telegram", "kirim polling", "kirim soal poll", "sendPoll", "kuis via telegram", "polling kuis", "quiz telegram")
 - pdf_summarization  (user wants to summarize, ask questions about, or understand the content of a PDF document)
 - doc_audit          (user wants to ask questions about, explore, or get details about a .docx document that was previously uploaded and analyzed in this session)
 - reminder           (user wants to set a timed reminder/alarm, list their reminders, or cancel/delete a reminder)
@@ -134,12 +135,14 @@ Rules:
     "[Preview dokumen: ...]" contains the beginning of the document's actual text content.
     Classify based on BOTH the caption intent AND the document preview:
     - Caption contains "kuis" / "soal" / "quiz" / "pertanyaan" / "latihan" OR preview looks like structured educational/study material (chapters, definitions, numbered items) → quiz_generation
+    - Caption contains "kuis telegram" / "polling kuis" / "kirim poll" / "kirim soal poll" / "quiz telegram" / "soal telegram" → telegram_quiz
     - Caption contains "ringkas" / "rangkum" / "summarize" / "apa isi" / "ceritakan" / "jelaskan" / "apa yang ada" / "kesimpulan" → pdf_summarization
     - Caption is "(tidak ada pesan dari pengguna)" or vague and document type is unclear → needs_clarification asking what they want done with the PDF
     Examples:
       Input has "[Pesan user: buat kuis dari ini]" → {"intent": "quiz_generation", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+      Input has "[Pesan user: buat kuis telegram]" → {"intent": "telegram_quiz", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
       Input has "[Pesan user: ringkas dokumen ini]" → {"intent": "pdf_summarization", "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
-      Input has "[Pesan user: (tidak ada pesan dari pengguna)]" → {"intent": "unknown", "confidence": 0.20, "tools": [], "needs_clarification": true, "clarification_question": "Mau diapakan dokumen ini? Misalnya: buat kuis interaktif, ringkasan, atau ada keperluan lain?"}
+      Input has "[Pesan user: (tidak ada pesan dari pengguna)]" → {"intent": "unknown", "confidence": 0.20, "tools": [], "needs_clarification": true, "clarification_question": "Mau diapakan dokumen ini? Misalnya: buat kuis interaktif, kuis telegram, ringkasan, atau ada keperluan lain?"}
 
 18. When "Riwayat percakapan terakhir" is present in the context, use it to detect follow-up commands:
     - If the most recent [Asisten] response clearly involved web browsing, clicking, form filling, login,
@@ -185,6 +188,7 @@ Example responses:
   {"intent": "general_inquiry",    "confidence": 0.88, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "unknown",            "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?"}
   {"intent": "quiz_generation",    "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "telegram_quiz",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "pdf_summarization",  "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "doc_audit",          "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "reminder",           "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}

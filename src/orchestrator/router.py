@@ -44,6 +44,7 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.SYSTEM_INFO:       "sysinfo_agent",        #← CPU / RAM / storage host info
     IntentCategory.LOG_VIEWER:        "log_viewer_agent",     #← tampilkan log bot untuk debugging
     IntentCategory.QUIZ_GENERATION:   "quiz_agent",           #← konversi PDF → kuis HTML interaktif
+    IntentCategory.TELEGRAM_QUIZ:     "tg_quiz_agent",        #← konversi PDF → kuis polling Telegram (sendPoll)
     IntentCategory.WEB_AUTOMATION:    "web_automation",       #← autonomous browsing & web interaction
     IntentCategory.DOC_AUDIT:         "doc_agent",            #← analisis + Q&A + edit interaktif .docx
     IntentCategory.REMINDER:          "reminder_agent",       #← set / list / cancel timed reminders
