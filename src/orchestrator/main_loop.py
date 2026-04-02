@@ -611,7 +611,7 @@ async def _run_tg_quiz_bank_pipeline(
 
     chunks: list[str] = parser_result["chunks"]
     task.metadata["pdf_chunks"] = chunks
-    task.metadata["quiz_mode"]  = "extract"
+    task.metadata["quiz_mode"] = "extract"
 
     logger.info(
         "TG quiz bank full-parse: session=%s pages=%d words=%d chunks=%d",
