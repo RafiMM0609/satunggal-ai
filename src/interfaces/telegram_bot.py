@@ -26,6 +26,8 @@ from src.handlers import (
     ping,
     reset,
     setapikey,
+    setgithubtoken,
+    setgitlabtoken,
     setllmmodel,
     setmaxtokens,
     setollamamodel,
@@ -85,6 +87,8 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
 
 ⚙️ <b>Admin Commands</b>
   • /deploy — pull kode terbaru & restart otomatis
+  • /setgithubtoken — atur GitHub Personal Access Token
+  • /setgitlabtoken — atur GitLab Personal Access Token
 
 <i>Ketik pesan apa saja untuk mulai!</i>"""
 
@@ -160,6 +164,8 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("setollamakey",   setollamakey))
     app.add_handler(CommandHandler("setollamahost",  setollamahost))
     app.add_handler(CommandHandler("setollamamodel", setollamamodel))
+    app.add_handler(CommandHandler("setgithubtoken", setgithubtoken))
+    app.add_handler(CommandHandler("setgitlabtoken", setgitlabtoken))
 
     # ── Message handlers ───────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))
