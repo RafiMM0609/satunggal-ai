@@ -68,7 +68,8 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
 
 🧩 <b>PDF-to-Quiz Generator</b>
   • Kirim PDF untuk diubah menjadi Website Kuis Interaktif HTML
-  • Progress real-time, feedback instan, dark mode & scoreboard
+  • Kirim PDF + caption <i>"buat kuis telegram"</i> → kuis polling interaktif langsung di chat
+  • Progress real-time, feedback instan, dark mode &amp; scoreboard
 
 📑 <b>Doc Auditor (Quality Auditor)</b>
   • Kirim file <b>.docx</b> untuk analisis mendalam
