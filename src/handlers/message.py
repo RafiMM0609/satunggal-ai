@@ -139,7 +139,7 @@ async def _safe_reply(message, text: str) -> None:
     *before* calling markdownify, leaving sufficient headroom for the
     MarkdownV2 escaping that the library adds (special chars like `.`, `!`,
     `(`, `)`, etc. each become two characters).  Without this, chunks near
-    the 4 096-char boundary can silently exceed Telegram's limit after
+    the 4096-char boundary can silently exceed Telegram's limit after
     formatting, causing a BadRequest and a plain-text fallback that strips
     all structure from the response.
 
@@ -151,7 +151,7 @@ async def _safe_reply(message, text: str) -> None:
         formatted = None
         try:
             formatted = telegramify_markdown.markdownify(chunk)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 – third-party lib; unknown exception types
             logger.warning("markdownify failed (%s); sending chunk as plain text.", exc)
 
         if formatted is not None:
