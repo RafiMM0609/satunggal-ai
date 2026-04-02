@@ -31,7 +31,8 @@ def _chat_session_id(user_id: int, chat_id: int) -> str:
     """
     return f"{user_id}_{chat_id}"
 
-_MAX_MSG_LEN = 4096
+_MAX_MSG_LEN   = 4096   # Telegram hard limit per message
+_SPLIT_RAW_LEN = 3000   # Conservative pre-split limit: markdownify escaping can expand text ~30–50%
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 20 MB upload limit for all file types
 _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
@@ -134,21 +135,37 @@ def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
 async def _safe_reply(message, text: str) -> None:
     """Send *text* with MarkdownV2, auto-splitting if too long.
 
-    Each chunk is converted with telegramify-markdown then sent with MarkdownV2;
-    if Telegram rejects the formatting the same chunk is retried as plain text
-    so the message is never lost.
+    Splits the raw text at a conservative character limit (_SPLIT_RAW_LEN)
+    *before* calling markdownify, leaving sufficient headroom for the
+    MarkdownV2 escaping that the library adds (special chars like `.`, `!`,
+    `(`, `)`, etc. each become two characters).  Without this, chunks near
+    the 4096-char boundary can silently exceed Telegram's limit after
+    formatting, causing a BadRequest and a plain-text fallback that strips
+    all structure from the response.
+
+    Falls back to plain text if formatting fails for any reason, so
+    content is never silently dropped.
     """
-    chunks = _split_text(text)
+    chunks = _split_text(text, max_len=_SPLIT_RAW_LEN)
     for chunk in chunks:
+        formatted = None
         try:
             formatted = telegramify_markdown.markdownify(chunk)
-            await message.reply_text(formatted, parse_mode="MarkdownV2", quote=True)
-        except BadRequest as exc:
-            logger.warning("MarkdownV2 parse failed (%s), retrying as plain text.", exc)
+        except Exception as exc:  # noqa: BLE001 – third-party lib; unknown exception types
+            logger.warning("markdownify failed (%s); sending chunk as plain text.", exc)
+
+        if formatted is not None:
             try:
-                await message.reply_text(chunk, parse_mode=None, quote=True)
-            except BadRequest as exc2:
-                logger.error("Failed to send chunk even as plain text: %s", exc2)
+                await message.reply_text(formatted, parse_mode="MarkdownV2", quote=True)
+                continue
+            except BadRequest as exc:
+                logger.warning("MarkdownV2 parse failed (%s), retrying as plain text.", exc)
+
+        # Plain-text fallback – raw chunk is always ≤ _SPLIT_RAW_LEN chars
+        try:
+            await message.reply_text(chunk, parse_mode=None, quote=True)
+        except BadRequest as exc2:
+            logger.error("Failed to send chunk even as plain text: %s", exc2)
 
 
 
@@ -572,12 +589,12 @@ async def handle_pdf_document(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await message.reply_document(
                     document=f,
                     filename=html_filename,
-                    caption=(
+                    caption=telegramify_markdown.markdownify(
                         "🎉 *Website Kuis Interaktif siap!*\n\n"
                         "Buka file `.html` ini di browser untuk memulai kuis.\n"
                         "Tidak perlu koneksi internet setelah dibuka! ✅"
                     ),
-                    parse_mode="Markdown",
+                    parse_mode="MarkdownV2",
                     quote=True,
                 )
             logger.info("Sent HTML quiz to user=%s path=%s", user.id, html_path)
@@ -612,11 +629,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     logger.info("Photo from user=%s.", user.id)
 
-    photo = message.photo[-1]
     await message.reply_text(
-        f"📷 Foto diterima! (file_id: <code>{photo.file_id}</code>)\n\n"
-        "Analisis gambar akan segera hadir. 🚀",
-        parse_mode="HTML",
+        "📷 Foto diterima!\n\nAnalisis gambar akan segera hadir. 🚀",
         quote=True,
     )
 
