@@ -665,7 +665,7 @@ async def _send_tg_quiz_polls(
         explanation      = str(q.get("explanation", "")).strip()
 
         # Skip questions with missing or malformed data (defence-in-depth)
-        if not question_text or len(options) != 4 or correct_id not in range(4):
+        if not question_text or len(options) != 4 or not (0 <= correct_id <= 3):
             logger.warning("Skipping malformed question idx=%d: %r", idx, q)
             failed += 1
             continue

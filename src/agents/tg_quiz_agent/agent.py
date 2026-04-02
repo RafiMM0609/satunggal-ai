@@ -417,9 +417,9 @@ def _validate_questions(
             )
             continue
 
-        # correct_option_id must be int in range(4)
+        # correct_option_id must be int in range 0-3
         cid = item["correct_option_id"]
-        if not isinstance(cid, int) or cid not in range(4):
+        if not isinstance(cid, int) or not (0 <= cid <= 3):
             errors.append(
                 f"item[{idx}] correct_option_id harus integer 0-3 (ditemukan {cid!r})"
             )
@@ -445,7 +445,10 @@ def _enforce_telegram_limits(q: dict) -> dict:
     # options: max 100 chars each, strip "A. " / "B. " / "C. " / "D. " prefixes
     cleaned_opts = []
     for opt in result.get("options", []):
-        # Strip common prefix patterns like "A. ", "B. ", "(A) ", "1. " etc.
+        # Strip common option-prefix patterns like "A. ", "B. ", "1. ", "(A) " etc.
+        # Pattern breakdown: [A-Da-d1-4] = A/B/C/D in any case or digit 1-4
+        #                    [\.\)] = followed by period or closing parenthesis
+        #                    \s* = optional leading space
         opt = re.sub(r"^[A-Da-d1-4][\.\)]\s*", "", str(opt)).strip()
         if len(opt) > _MAX_OPTION_LEN:
             opt = opt[:_MAX_OPTION_LEN - 1] + "…"
