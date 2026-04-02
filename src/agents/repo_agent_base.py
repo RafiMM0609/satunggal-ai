@@ -31,6 +31,7 @@ from pydantic import BaseModel, ValidationError
 from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
 from src.memory.history import ConversationHistory
+from src.memory.key_store import effective_github_pat, effective_gitlab_pat
 from src.memory.repo_tracker import RepoTracker
 from src.memory.state import AgentTask
 from src.tools.cli_executor import CLIExecutor, CommandResult
@@ -333,7 +334,7 @@ class RepoAgentBase(BaseAgent):
             local_path = self._repos_dir / repo_name
             self._repos_dir.mkdir(parents=True, exist_ok=True)
 
-            _pat     = self._gitlab_pat if _is_gitlab_url(repo_url) else self._github_pat
+            _pat     = effective_gitlab_pat(self._gitlab_pat) if _is_gitlab_url(repo_url) else effective_github_pat(self._github_pat)
             auth_url = _inject_pat_into_url(repo_url, _pat)
 
             if local_path.exists():

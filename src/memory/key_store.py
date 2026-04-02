@@ -27,6 +27,9 @@ _KEY_OLLAMA_KEY      = "ollama_api_key"
 _KEY_OLLAMA_HOST     = "ollama_host"
 _KEY_OLLAMA_MODEL    = "ollama_model_name"
 
+_KEY_GITHUB_PAT      = "github_pat"
+_KEY_GITLAB_PAT      = "gitlab_pat"
+
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_OLLAMA     = "ollama"
 _VALID_PROVIDERS    = {PROVIDER_OPENROUTER, PROVIDER_OLLAMA}
@@ -249,3 +252,59 @@ def effective_ollama_model(env_model: str) -> str:
     """Return the Ollama model name to use, preferring the store over ``env_model``."""
     stored = get_ollama_model()
     return stored if stored else env_model
+
+
+# ── GitHub / GitLab PAT overrides ────────────────────────────────────────────
+
+def get_github_pat() -> Optional[str]:
+    """Return the stored GitHub PAT override, or None if not set."""
+    return _load().get(_KEY_GITHUB_PAT) or None
+
+
+def set_github_pat(pat: str) -> None:
+    """Persist *pat* as the active GitHub Personal Access Token override."""
+    data = _load()
+    data[_KEY_GITHUB_PAT] = pat.strip()
+    _save(data)
+    logger.info("key_store: GitHub PAT updated.")
+
+
+def clear_github_pat() -> None:
+    """Remove the stored GitHub PAT so the .env value is used again."""
+    data = _load()
+    data.pop(_KEY_GITHUB_PAT, None)
+    _save(data)
+    logger.info("key_store: GitHub PAT override cleared.")
+
+
+def effective_github_pat(env_pat: str) -> str:
+    """Return the GitHub PAT to use, preferring the store over ``env_pat``."""
+    stored = get_github_pat()
+    return stored if stored else env_pat
+
+
+def get_gitlab_pat() -> Optional[str]:
+    """Return the stored GitLab PAT override, or None if not set."""
+    return _load().get(_KEY_GITLAB_PAT) or None
+
+
+def set_gitlab_pat(pat: str) -> None:
+    """Persist *pat* as the active GitLab Personal Access Token override."""
+    data = _load()
+    data[_KEY_GITLAB_PAT] = pat.strip()
+    _save(data)
+    logger.info("key_store: GitLab PAT updated.")
+
+
+def clear_gitlab_pat() -> None:
+    """Remove the stored GitLab PAT so the .env value is used again."""
+    data = _load()
+    data.pop(_KEY_GITLAB_PAT, None)
+    _save(data)
+    logger.info("key_store: GitLab PAT override cleared.")
+
+
+def effective_gitlab_pat(env_pat: str) -> str:
+    """Return the GitLab PAT to use, preferring the store over ``env_pat``."""
+    stored = get_gitlab_pat()
+    return stored if stored else env_pat

@@ -12,6 +12,8 @@ from telegram.ext import ContextTypes
 from config.settings import get_settings
 from src.memory.key_store import (
     clear_active_provider,
+    clear_github_pat,
+    clear_gitlab_pat,
     clear_ollama_key,
     clear_ollama_host,
     clear_ollama_model,
@@ -19,6 +21,8 @@ from src.memory.key_store import (
     clear_openrouter_max_tokens,
     clear_openrouter_model,
     get_active_provider,
+    get_github_pat,
+    get_gitlab_pat,
     get_ollama_key,
     get_ollama_host,
     get_ollama_model,
@@ -28,6 +32,8 @@ from src.memory.key_store import (
     PROVIDER_OLLAMA,
     PROVIDER_OPENROUTER,
     set_active_provider,
+    set_github_pat,
+    set_gitlab_pat,
     set_ollama_key,
     set_ollama_host,
     set_ollama_model,
@@ -76,7 +82,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/setllmmodel   — Atur nama model LLM OpenRouter (admin)\n"
         "/setollamakey  — Atur API key Ollama (admin)\n"
         "/setollamahost — Atur host Ollama (admin)\n"
-        "/setollamamodel — Atur nama model Ollama (admin)"
+        "/setollamamodel — Atur nama model Ollama (admin)\n"
+        "/setgithubtoken — Atur GitHub Personal Access Token (admin)\n"
+        "/setgitlabtoken — Atur GitLab Personal Access Token (admin)"
     )
     await update.message.reply_html(help_text)
 
@@ -630,4 +638,130 @@ async def setollamamodel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"✅ Model Ollama berhasil disimpan: <b>{new_model}</b>.\n"
         "Override berlaku untuk semua permintaan berikutnya tanpa perlu restart bot.",
         parse_mode="HTML",
+    )
+
+
+async def setgithubtoken(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setgithubtoken — simpan atau hapus override GitHub Personal Access Token (admin only).
+
+    Usage:
+        /setgithubtoken <TOKEN>  — simpan token baru
+        /setgithubtoken clear    — hapus override, kembali ke token di .env
+        /setgithubtoken status   — lihat apakah override aktif
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setgithubtoken tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur GitHub access token.")
+        return
+
+    args = context.args
+
+    if not args:
+        current = get_github_pat()
+        status = "✅ Override aktif" if current else "ℹ️ Tidak ada override (menggunakan .env)"
+        await update.message.reply_html(
+            f"{status}\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setgithubtoken &lt;TOKEN&gt;</code>  — simpan token baru\n"
+            "<code>/setgithubtoken clear</code>        — hapus override\n"
+            "<code>/setgithubtoken status</code>       — cek status override",
+        )
+        return
+
+    sub = args[0].strip()
+
+    if sub.lower() == "status":
+        current = get_github_pat()
+        if current:
+            masked = current[:4] + "****" if len(current) > 4 else "***"
+            await update.message.reply_text(f"✅ Override aktif: {masked}")
+        else:
+            await update.message.reply_text("ℹ️ Tidak ada override — menggunakan GitHub token dari .env")
+        return
+
+    if sub.lower() == "clear":
+        clear_github_pat()
+        logger.info("User %s menghapus GitHub PAT override.", user.id)
+        await update.message.reply_text("🗑️ Override GitHub access token dihapus. Kembali menggunakan token dari .env.")
+        return
+
+    new_token = sub
+    set_github_pat(new_token)
+    logger.info("User %s memperbarui GitHub PAT override.", user.id)
+
+    masked = new_token[:4] + "****" if len(new_token) > 4 else "***"
+    try:
+        await update.message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+    await update.effective_chat.send_message(
+        f"✅ GitHub access token berhasil disimpan ({masked}).\n"
+        "Override akan digunakan untuk semua operasi git GitHub berikutnya tanpa perlu restart bot."
+    )
+
+
+async def setgitlabtoken(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /setgitlabtoken — simpan atau hapus override GitLab Personal Access Token (admin only).
+
+    Usage:
+        /setgitlabtoken <TOKEN>  — simpan token baru
+        /setgitlabtoken clear    — hapus override, kembali ke token di .env
+        /setgitlabtoken status   — lihat apakah override aktif
+    """
+    settings = get_settings()
+    user = update.effective_user
+
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        logger.warning("User %s mencoba /setgitlabtoken tapi bukan admin.", user.id)
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur GitLab access token.")
+        return
+
+    args = context.args
+
+    if not args:
+        current = get_gitlab_pat()
+        status = "✅ Override aktif" if current else "ℹ️ Tidak ada override (menggunakan .env)"
+        await update.message.reply_html(
+            f"{status}\n\n"
+            "<b>Penggunaan:</b>\n"
+            "<code>/setgitlabtoken &lt;TOKEN&gt;</code>  — simpan token baru\n"
+            "<code>/setgitlabtoken clear</code>         — hapus override\n"
+            "<code>/setgitlabtoken status</code>        — cek status override",
+        )
+        return
+
+    sub = args[0].strip()
+
+    if sub.lower() == "status":
+        current = get_gitlab_pat()
+        if current:
+            masked = current[:4] + "****" if len(current) > 4 else "***"
+            await update.message.reply_text(f"✅ Override aktif: {masked}")
+        else:
+            await update.message.reply_text("ℹ️ Tidak ada override — menggunakan GitLab token dari .env")
+        return
+
+    if sub.lower() == "clear":
+        clear_gitlab_pat()
+        logger.info("User %s menghapus GitLab PAT override.", user.id)
+        await update.message.reply_text("🗑️ Override GitLab access token dihapus. Kembali menggunakan token dari .env.")
+        return
+
+    new_token = sub
+    set_gitlab_pat(new_token)
+    logger.info("User %s memperbarui GitLab PAT override.", user.id)
+
+    masked = new_token[:4] + "****" if len(new_token) > 4 else "***"
+    try:
+        await update.message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+    await update.effective_chat.send_message(
+        f"✅ GitLab access token berhasil disimpan ({masked}).\n"
+        "Override akan digunakan untuk semua operasi git GitLab berikutnya tanpa perlu restart bot."
     )

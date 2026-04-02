@@ -53,6 +53,7 @@ from typing import Optional
 from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
 from src.memory.history import ConversationHistory
+from src.memory.key_store import effective_github_pat, effective_gitlab_pat
 from src.memory.state import AgentTask
 from src.tools.cli_executor import CLIExecutor
 from src.tools.git_utils import (
@@ -386,7 +387,7 @@ class TechnicalWriterAgent(BaseAgent):
         """
         repo_name  = _repo_name_from_url(repo_url)
         repo_path  = self._repos_dir / repo_name
-        _pat       = self._gitlab_pat if _is_gitlab_url(repo_url) else self._github_pat
+        _pat       = effective_gitlab_pat(self._gitlab_pat) if _is_gitlab_url(repo_url) else effective_github_pat(self._github_pat)
         auth_url   = _inject_pat_into_url(repo_url, _pat)
         cli_base   = CLIExecutor(work_dir=self._repos_dir, timeout=120)
 
@@ -447,7 +448,7 @@ class TechnicalWriterAgent(BaseAgent):
 
         # ── Langkah 2: perbarui remote URL dengan kredensial, lalu fetch ─────
         if repo_url:
-            _pat     = self._gitlab_pat if _is_gitlab_url(repo_url) else self._github_pat
+            _pat     = effective_gitlab_pat(self._gitlab_pat) if _is_gitlab_url(repo_url) else effective_github_pat(self._github_pat)
             auth_url = _inject_pat_into_url(repo_url, _pat)
             set_url  = await cli.run(f"git remote set-url origin {auth_url}")
             if not set_url.succeeded:
@@ -524,7 +525,7 @@ class TechnicalWriterAgent(BaseAgent):
                 "TechnicalWriterAgent: gagal hapus DB record (diabaikan): %s", del_exc
             )
 
-        _pat     = self._gitlab_pat if _is_gitlab_url(repo_url) else self._github_pat
+        _pat     = effective_gitlab_pat(self._gitlab_pat) if _is_gitlab_url(repo_url) else effective_github_pat(self._github_pat)
         auth_url = _inject_pat_into_url(repo_url, _pat)
         cli_base = CLIExecutor(work_dir=repo_path.parent, timeout=120)
         clone = await cli_base.run(
