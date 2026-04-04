@@ -113,7 +113,11 @@ def _strip_bot_mention(text: str | None, bot_username: str | None) -> str:
 def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
     """Split *text* into chunks that each fit within Telegram's message length limit.
 
-    Prefers splitting at newline boundaries to avoid cutting mid-sentence.
+    Prefers splitting at semantic boundaries in this order:
+    1. Markdown section headers (## …) – keeps sections intact.
+    2. Double newlines (paragraph breaks).
+    3. Single newlines.
+    4. Hard character limit as last resort.
     """
     if len(text) <= max_len:
         return [text]
@@ -123,12 +127,34 @@ def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
         if len(text) <= max_len:
             chunks.append(text)
             break
-        # Prefer splitting at a newline
+
+        # 1. Try to split just before a markdown section header (H1–H3) within window.
+        #    Keep the last such boundary so the current chunk is as large as possible.
+        matches = list(re.finditer(r"\n(?=#{1,3} )", text[:max_len]))
+        header_match = matches[-1] if matches else None
+        if header_match and header_match.start() > 0:
+            split_pos = header_match.start()
+            chunks.append(text[:split_pos])
+            text = text[split_pos:].lstrip("\n")
+            continue
+
+        # 2. Prefer double newline (paragraph boundary) within window.
+        split_pos = text.rfind("\n\n", 0, max_len)
+        if split_pos > 0:
+            chunks.append(text[:split_pos])
+            text = text[split_pos:].lstrip("\n")
+            continue
+
+        # 3. Fall back to any single newline.
         split_pos = text.rfind("\n", 0, max_len)
-        if split_pos <= 0:
-            split_pos = max_len
-        chunks.append(text[:split_pos])
-        text = text[split_pos:].lstrip("\n")
+        if split_pos > 0:
+            chunks.append(text[:split_pos])
+            text = text[split_pos:].lstrip("\n")
+            continue
+
+        # 4. Hard split at max_len.
+        chunks.append(text[:max_len])
+        text = text[max_len:]
     return chunks
 
 

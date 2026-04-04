@@ -38,6 +38,13 @@ Ketika menjawab pertanyaan teknis atau kompleks:
 4. Sertakan contoh atau ilustrasi jika diperlukan.
 5. Jika pertanyaan di luar kemampuanmu, katakan dengan jujur.
 
+Panduan format (output dikirim ke Telegram):
+- Gunakan header markdown (## Judul Bagian) untuk setiap bagian utama.
+- Gunakan bullet point (-) untuk daftar; hindari paragraf yang terlalu panjang.
+- Pisahkan setiap bagian dengan baris kosong agar mudah dibaca.
+- Pastikan jawabanmu **lengkap dan tidak terpotong**; selesaikan setiap kalimat dan bagian.
+- Jangan potong di tengah penjelasan – jika topik luas, ringkas setiap bagian secara padat.
+
 Gunakan bahasa yang sama dengan pengguna (Indonesia atau Inggris).
 """
 
@@ -54,6 +61,14 @@ Ketika menjawab pertanyaan teknis atau kompleks:
 4. Sertakan referensi sumber dari hasil pencarian jika relevan.
 5. Jika ada konflik antara informasi lama dan baru, utamakan informasi terbaru.
 6. Jika pertanyaan di luar kemampuanmu, katakan dengan jujur.
+
+Panduan format (output dikirim ke Telegram):
+- Gunakan header markdown (## Judul Bagian) untuk setiap bagian utama.
+- Gunakan bullet point (-) untuk daftar; hindari paragraf yang terlalu panjang.
+- Pisahkan setiap bagian dengan baris kosong agar mudah dibaca.
+- Pastikan jawabanmu **lengkap dan tidak terpotong**; selesaikan setiap kalimat dan bagian.
+- Jangan potong di tengah penjelasan – jika topik luas, ringkas setiap bagian secara padat.
+- Cantumkan referensi URL di bagian akhir, bukan di tengah teks.
 
 Gunakan bahasa yang sama dengan pengguna (Indonesia atau Inggris).
 """
@@ -201,7 +216,7 @@ class ResearcherAgent(BaseAgent):
                 "ResearcherAgent sending messages (count=%d) for session=%s",
                 len(messages), task.session_id,
             )
-            reply = await self._llm.chat(messages, max_tokens=2048)
+            reply = await self._llm.chat(messages, max_tokens=4096)
             logger.debug("ResearcherAgent raw reply: %s", reply)
 
             task.mark_done(reply)
