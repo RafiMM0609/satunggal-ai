@@ -130,7 +130,7 @@ def _split_text(text: str, max_len: int = _MAX_MSG_LEN) -> list[str]:
 
         # 1. Try to split just before a markdown section header (H1–H3) within window.
         #    Keep the last such boundary so the current chunk is as large as possible.
-        matches = list(re.finditer(r"\n(?=#{1,3} )", text[:max_len]))
+        matches = list(re.finditer(r"\n(?=#{1,3} )", text[:max_len]))  # newline before H1/H2/H3 header
         header_match = matches[-1] if matches else None
         if header_match and header_match.start() > 0:
             split_pos = header_match.start()

@@ -86,6 +86,19 @@ Aturan ketat:
 - Gunakan bahasa yang sama dengan input pengguna.
 """
 
+_PLAN_SYSTEM_PROMPT = """\
+Kamu adalah perencana riset yang bertugas membuat kerangka penelitian terstruktur.
+Berdasarkan pertanyaan pengguna dan konteks informasi yang tersedia, buat rencana riset \
+berupa daftar bagian/topik yang harus dijawab secara menyeluruh dalam jawaban akhir.
+
+Aturan ketat:
+- Buat 4–7 bagian utama yang mencakup topik secara komprehensif.
+- Setiap bagian diawali dengan angka dan titik (contoh: 1. Judul Bagian).
+- Di bawah setiap bagian, tuliskan 2–3 sub-poin yang harus dibahas, diawali dengan tanda (-).
+- Jangan jawab pertanyaannya sekarang – hanya buat kerangka rencana.
+- Gunakan bahasa yang sama dengan pertanyaan pengguna.
+"""
+
 
 class ResearcherAgent(BaseAgent):
     """Provides detailed, research-style answers for technical questions.
@@ -99,6 +112,8 @@ class ResearcherAgent(BaseAgent):
 
     _MAX_SUB_QUERIES      = 4    # hard cap on parallel Tavily calls per request
     _DECOMPOSE_MAX_TOKENS = 256  # small budget; we only need a few short search strings
+    _PLAN_MAX_TOKENS      = 512  # budget for building the research outline
+    _PLAN_CONTEXT_MAX_CHARS = 3000  # preview fed to planner – keeps planning call cheap
     _MAX_HISTORY_MESSAGES = 8    # keep last N turns in context window
 
     def __init__(
@@ -138,6 +153,37 @@ class ResearcherAgent(BaseAgent):
         except Exception as exc:
             logger.warning("Query decomposition failed (non-fatal): %s", exc)
             return [query]
+
+    async def _plan_research(self, query: str, web_context: str | None) -> str | None:
+        """Generate a structured research outline from the query and available web context.
+
+        Returns a numbered plan string on success, or ``None`` on failure so the
+        caller can proceed without a plan (graceful degradation).
+        """
+        context_snippet = ""
+        if web_context:
+            # Feed only a trimmed preview to keep the planning call cheap.
+            context_snippet = "\n\nKonteks informasi yang tersedia (ringkasan):\n" + web_context[:self._PLAN_CONTEXT_MAX_CHARS]
+
+        messages = [
+            {"role": "system", "content": _PLAN_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "Buat rencana riset untuk pertanyaan berikut:\n\n"
+                    + query
+                    + context_snippet
+                ),
+            },
+        ]
+        try:
+            plan = await self._llm.chat(messages, max_tokens=self._PLAN_MAX_TOKENS)
+            plan = plan.strip()
+            logger.debug("ResearcherAgent research plan:\n%s", plan)
+            return plan if plan else None
+        except Exception as exc:
+            logger.warning("Research planning failed (non-fatal): %s", exc)
+            return None
 
     async def _search_sub_queries(self, sub_queries: list[str]) -> str | None:
         """Run Tavily in parallel for every sub-query and merge the results.
@@ -200,13 +246,28 @@ class ResearcherAgent(BaseAgent):
                 tavily_tr   = task.tool_results.get("tavily_search", {})
                 web_context = tavily_tr.get("context_text") or None
 
-            # ── Step 3: Build system prompt with (combined) context ───────────
+            # ── Step 3: Build research plan (outline) ─────────────────────────
+            research_plan = await self._plan_research(task.user_input, web_context)
+            if research_plan:
+                logger.info(
+                    "ResearcherAgent: research plan built (%d chars) for session=%s",
+                    len(research_plan), task.session_id,
+                )
+
+            # ── Step 4: Build system prompt with context + plan ───────────────
             if web_context:
                 system_content = _SYSTEM_PROMPT_WITH_SEARCH + "\n\n" + web_context
             else:
                 system_content = _SYSTEM_PROMPT
 
-            # ── Step 4: Build message list ────────────────────────────────────
+            if research_plan:
+                system_content += (
+                    "\n\n## Rencana Riset (ikuti urutan dan cakupan ini persis)\n\n"
+                    + research_plan
+                    + "\n\nPastikan setiap bagian dalam rencana di atas dijawab secara lengkap dan berurutan."
+                )
+
+            # ── Step 5: Build message list ────────────────────────────────────
             messages = [{"role": "system", "content": system_content}]
             messages.extend(history_messages[-self._MAX_HISTORY_MESSAGES:])
             if not history_messages or history_messages[-1]["content"] != task.user_input:
@@ -216,13 +277,14 @@ class ResearcherAgent(BaseAgent):
                 "ResearcherAgent sending messages (count=%d) for session=%s",
                 len(messages), task.session_id,
             )
-            reply = await self._llm.chat(messages, max_tokens=4096)
+            reply = await self._llm.chat(messages, max_tokens=8192)
             logger.debug("ResearcherAgent raw reply: %s", reply)
 
             task.mark_done(reply)
             logger.info(
-                "Researcher done for session=%s (web_search=%s, sub_queries=%d)",
+                "Researcher done for session=%s (web_search=%s, sub_queries=%d, plan=%s)",
                 task.session_id, web_context is not None, len(sub_queries),
+                research_plan is not None,
             )
         except Exception as exc:
             logger.exception("ResearcherAgent failed: %s", exc)
