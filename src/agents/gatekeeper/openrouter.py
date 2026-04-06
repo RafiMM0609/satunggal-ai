@@ -32,7 +32,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - order_status
 - technical_support
 - billing
-- data_analysis      (user wants a WBS / Work Breakdown Structure for a project)
+- wbs_planning        (user wants a WBS / Work Breakdown Structure for a project)
 - mandays_planning   (user wants a mandays plan, effort estimation, or resource allocation without a full WBS)
 - image_query
 - research           (user explicitly requests deep research or investigation using live data)
@@ -75,7 +75,7 @@ Rules:
     WITHOUT running any tools or specialist agent. Do NOT invent a clarification_question when confidence ≥ 0.50.
     When needs_clarification is false, set clarification_question to null.
 5. Use "mandays_planning" when the user asks about mandays, effort, person-days, or resource estimation specifically.
-6. Use "data_analysis" when the user explicitly asks for a WBS or project breakdown structure.
+6. Use "wbs_planning" when the user explicitly asks for a WBS or project breakdown structure.
 7. Use "research" ONLY when the user uses explicit investigative/research keywords such as:
    - Indonesian: teliti, riset, selidiki, telusuri, cari tahu secara mendalam, analisis mendalam, kaji, pelajari secara mendalam
    - English: research, investigate, deep dive, thoroughly analyze, look into in depth, study in depth
@@ -190,7 +190,7 @@ Rules:
       If caption says "bank soal" / "ekstrak soal" / "soal yang ada di pdf ini" → telegram_quiz_bank.
 
 Example responses:
-  {"intent": "data_analysis",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "wbs_planning",        "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "mandays_planning",   "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
   {"intent": "research",           "confidence": 0.91, "tools": ["tavily_search"], "needs_clarification": false, "clarification_question": null}
   {"intent": "code_development",   "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}

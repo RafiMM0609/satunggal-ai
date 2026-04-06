@@ -8,7 +8,7 @@ Capabilities:
 3. Cancel reminder – delete a reminder by its number/id.
 
 Scheduling is done with APScheduler (AsyncIOScheduler).  A single process-wide
-scheduler instance is managed in `src.agents.reminder.scheduler`.
+scheduler instance is managed in `src.agents.reminder_agent.scheduler`.
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ class ReminderAgent(BaseAgent):
         reminder = self._store.add(chat_id, message, remind_at)
 
         # Schedule the job
-        from src.agents.reminder.scheduler import schedule_reminder
+        from src.agents.reminder_agent.scheduler import schedule_reminder
         await schedule_reminder(reminder)
 
         # Format display time in WIB (UTC+7)
@@ -179,7 +179,7 @@ class ReminderAgent(BaseAgent):
             return f"⚠️ ID reminder tidak valid: `{cancel_id}`"
 
         # Also remove the scheduler job
-        from src.agents.reminder.scheduler import cancel_scheduled_reminder
+        from src.agents.reminder_agent.scheduler import cancel_scheduled_reminder
         cancel_scheduled_reminder(rid)
 
         deleted = self._store.delete(rid, chat_id)
