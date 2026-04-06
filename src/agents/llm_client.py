@@ -90,11 +90,23 @@ class LLMClient:
 
         logger.debug("LLMClient[openrouter].raw_response_json=%r", data)
 
+        if "error" in data:
+            err = data["error"]
+            logger.error(
+                "LLM[openrouter] returned an API error (no choices): code=%s message=%s",
+                err.get("code") if isinstance(err, dict) else None,
+                err.get("message") if isinstance(err, dict) else err,
+            )
+            return ""
+
         try:
             message = data["choices"][0]["message"]
             content = message.get("content")
         except Exception as exc:
-            logger.exception("Failed to extract content from LLM[openrouter] response: %s", exc)
+            logger.exception(
+                "Failed to extract content from LLM[openrouter] response: %s – full response: %r",
+                exc, data,
+            )
             content = None
             message = {}
 
