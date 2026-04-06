@@ -48,6 +48,7 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.PDF_SUMMARIZATION: "pdf_summarizer",       #← ringkas / QnA isi dokumen PDF
     IntentCategory.WEB_AUTOMATION:    "web_automation",       #← autonomous browsing & web interaction
     IntentCategory.DOC_AUDIT:         "doc_agent",            #← analisis + Q&A + edit interaktif .docx
+    IntentCategory.DIAGRAM_FROM_ANALYSIS: "analysis_diagram", #← buat diagram dari hasil analisa & QnA sesi aktif
     IntentCategory.REMINDER:          "reminder_agent",       #← set / list / cancel timed reminders
 }
 

@@ -106,6 +106,7 @@ def _get_pipeline():
     from src.agents.developer_inspector.agent import DeveloperInspectorAgent
     from src.agents.developer_qna.agent import DeveloperQnAAgent
     from src.agents.doc_agent.agent import DocAgent
+    from src.agents.analysis_diagram.agent import AnalysisDiagramAgent
     from src.agents.gatekeeper.agent import GatekeeperAgent
     from src.agents.llm_client import LLMClient
     from src.agents.log_viewer_agent.agent import LogViewerAgent
@@ -180,6 +181,7 @@ def _get_pipeline():
         "pdf_summarizer":      PDFSummarizerAgent(_llm),
         "web_automation":      WebAutomationAgent(_llm, history=_history),
         "doc_agent":           DocAgent(_history, _llm),
+        "analysis_diagram":    AnalysisDiagramAgent(_llm),
         "reminder_agent":      ReminderAgent(_history, _llm),
         # Legacy aliases – kept so any hardcoded name still resolves
         "doc_auditor":         None,
@@ -999,6 +1001,22 @@ _EDIT_KEYWORDS = frozenset({
     "append", "add", "update", "alter",
 })
 
+# Kata kunci yang menandakan permintaan pembuatan diagram dari hasil analisa / QnA
+_DIAGRAM_KEYWORDS = frozenset({
+    # Indonesian
+    "diagram", "flowchart", "flow", "alur", "visualisasi", "visualisasikan",
+    "gambarkan", "chart", "bagan", "skema", "grafik",
+    # English
+    "flowchart", "flow chart", "visualize", "visualise", "draw", "plot",
+})
+
+_DIAGRAM_CONTEXT_KEYWORDS = frozenset({
+    # Kata-kata yang menunjukkan konteks "dari diskusi/analisa"
+    "diskusi", "analisa", "analisis", "qna", "pembahasan", "hasil",
+    "tadi", "sebelumnya", "kita", "kami", "ini",
+    "discussion", "analysis", "results", "our",
+})
+
 
 def is_edit_intent(user_caption: str) -> bool:
     """
@@ -1014,6 +1032,39 @@ def is_edit_intent(user_caption: str) -> bool:
     )
 
 
+def is_diagram_intent(user_text: str) -> bool:
+    """
+    Deteksi apakah user meminta pembuatan diagram dari hasil analisa/QnA sesi ini.
+
+    Mengembalikan True jika teks mengandung kata kunci diagram dan kata kunci
+    konteks analisa/diskusi.
+    """
+    if not user_text or not user_text.strip():
+        return False
+    text_lower = user_text.lower()
+    words = [w.strip(",.!?;:\"'-()/\\") for w in text_lower.split()]
+    word_set = set(words)
+
+    # Harus ada minimal satu kata kunci diagram
+    has_diagram_kw = bool(word_set & _DIAGRAM_KEYWORDS)
+    if not has_diagram_kw:
+        return False
+
+    # Harus ada kata kunci konteks analisa/diskusi ATAU frasa spesifik
+    has_context_kw = bool(word_set & _DIAGRAM_CONTEXT_KEYWORDS)
+    has_explicit_phrase = any(
+        phrase in text_lower for phrase in (
+            "dari analisa", "dari diskusi", "dari pembahasan", "dari hasil",
+            "dari qna", "dari tanya jawab", "dari percakapan",
+            "flow diagram", "flow chart",
+            "from analysis", "from discussion", "from our",
+            "buat diagram", "buat flow", "buat bagan", "buat chart",
+            "create diagram", "make diagram", "generate diagram", "draw diagram",
+        )
+    )
+    return has_context_kw or has_explicit_phrase
+
+
 async def process_doc_session_message(
     session_id: str,
     user_text: str,
@@ -1022,18 +1073,73 @@ async def process_doc_session_message(
     """
     Pipeline khusus untuk sesi dokumen aktif.
 
-    Membypass gatekeeper dan langsung memanggil DocAgent, sehingga
-    instruksi edit / pertanyaan tidak bisa salah diklasifikasikan sebagai
-    DOCUMENT_CREATION (→ technical_writer → document_generator → WeasyPrint
-    error) oleh gatekeeper.
+    Membypass gatekeeper dan langsung memanggil DocAgent untuk pertanyaan/edit,
+    atau AnalysisDiagramAgent ketika user meminta diagram dari hasil analisa/QnA.
     """
     from src.memory.state import AgentTask
 
-    history, agents, *_ = _get_pipeline()
+    history, agents, _, _, tools = _get_pipeline()
 
     history.add(session_id, "user", user_text)
 
     task = AgentTask(session_id=session_id, user_input=user_text)
+    task.metadata["status_callback"] = status_callback
+
+    # ── Deteksi: apakah user meminta diagram dari analisa? ─────────────────
+    if is_diagram_intent(user_text):
+        task.mark_routed("diagram_from_analysis")
+        task.mark_processing("analysis_diagram")
+
+        diagram_agent = agents.get("analysis_diagram")
+        if diagram_agent is None:
+            task.mark_failed("analysis_diagram agent tidak terdaftar.")
+            task.result = "❌ Analysis Diagram agent tidak tersedia."
+            history.add(session_id, "assistant", task.result)
+            return task
+
+        try:
+            task = await diagram_agent.run(task)
+        except Exception as exc:
+            logger.exception(
+                "process_doc_session_message: analysis_diagram.run failed session=%s: %s",
+                session_id, exc,
+            )
+            task.mark_failed(str(exc))
+            task.result = "❌ Terjadi kesalahan saat membuat diagram. Silakan coba lagi."
+
+        # Jalankan pending tools (diagram_renderer + doc_generator) jika ada
+        for tool_name in list(task.pending_tools):
+            tool = tools.get(tool_name)
+            if tool is None:
+                logger.warning(
+                    "process_doc_session_message: tool '%s' not in registry; skipping.",
+                    tool_name,
+                )
+                continue
+            try:
+                tool_output = await tool.run(task)
+                task.tool_results[tool_name] = tool_output
+                if "document_path" in tool_output:
+                    task.metadata["document_path"] = tool_output["document_path"]
+                logger.info(
+                    "Doc session diagram tool '%s' done for session=%s keys=%s",
+                    tool_name, session_id, list(tool_output.keys()),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "process_doc_session_message: tool '%s' raised: %s", tool_name, exc
+                )
+                task.tool_results[tool_name] = {"error": str(exc)}
+
+        task.pending_tools.clear()
+
+        if not task.result:
+            task.result = "✅ Diagram berhasil dibuat."
+
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    # ── Default: route ke DocAgent ─────────────────────────────────────────
     task.mark_routed("doc_audit")
     task.mark_processing("doc_agent")
 
@@ -1043,8 +1149,6 @@ async def process_doc_session_message(
         task.result = "❌ Doc agent tidak tersedia."
         history.add(session_id, "assistant", task.result)
         return task
-
-    task.metadata["status_callback"] = status_callback
 
     try:
         task = await doc_agent.run(task)
