@@ -59,6 +59,11 @@ CRITIC_TOP_P       = 0.85
 
 MAX_GREP_LINES = 80
 
+# Maximum characters sent as evidence to the LLM in a single request.
+# Keeps the total prompt within a safe context window (~60 k tokens ≈ 240 k chars,
+# but we cap conservatively to leave room for the system prompt and the response).
+MAX_EVIDENCE_CHARS = 60_000
+
 # ── System prompt ──────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
@@ -286,7 +291,7 @@ class DeveloperInspectorAgent(RepoAgentBase):
         logger.info("Inspector: running critic verification pass")
         critic_user = _CRITIC_USER_TEMPLATE.format(
             report=report,
-            evidence=evidence_text[:60_000],
+            evidence=evidence_text[:MAX_EVIDENCE_CHARS],
         )
         try:
             verified = await self._llm.chat(
@@ -315,6 +320,19 @@ class DeveloperInspectorAgent(RepoAgentBase):
         Phase 2 – Critic pass: verify every finding against raw evidence.
         """
         evidence_text = self._build_evidence_text(evidence)
+
+        _TRUNCATION_NOTICE = (
+            f"\n\n... [evidence truncated at {MAX_EVIDENCE_CHARS} characters due to LLM context limit]"
+        )
+        if len(evidence_text) > MAX_EVIDENCE_CHARS:
+            logger.warning(
+                "Inspector: evidence text too large (%d chars), truncating to %d chars",
+                len(evidence_text), MAX_EVIDENCE_CHARS,
+            )
+            evidence_text = (
+                evidence_text[:MAX_EVIDENCE_CHARS - len(_TRUNCATION_NOTICE)]
+                + _TRUNCATION_NOTICE
+            )
 
         for title, content in evidence.items():
             logger.debug("Inspector evidence '%s': %d chars", title, len(content))
