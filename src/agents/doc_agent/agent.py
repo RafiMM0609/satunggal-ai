@@ -783,6 +783,11 @@ class DocAgent(BaseAgent):
         try:
             answer = await self._llm.chat(messages, max_tokens=3000, temperature=0.5)
             task.mark_done(answer)
+            # Catat Q&A ke log untuk keperluan pembuatan diagram
+            try:
+                self._doc_index.add_qna(session_id, question=user_query, answer=answer)
+            except Exception as qna_exc:
+                logger.debug("DocAgent: failed to log QnA session=%s: %s", session_id, qna_exc)
         except Exception as exc:
             logger.exception("DocAgent QA LLM failed session=%s: %s", session_id, exc)
             task.result = "Maaf, terjadi kesalahan saat menjawab pertanyaan. Silakan coba lagi."

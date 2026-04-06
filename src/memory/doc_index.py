@@ -23,6 +23,15 @@ Schema tabel `doc_meta`:
     total_sections INTEGER
     total_words  INTEGER
     indexed_at   TEXT
+
+Schema tabel `qna_log`:
+    id           INTEGER PRIMARY KEY
+    session_id   TEXT NOT NULL
+    file_id      TEXT NOT NULL       – identifier file terkait
+    turn_index   INTEGER NOT NULL    – nomor urut pertanyaan dalam sesi
+    question     TEXT NOT NULL       – pertanyaan dari pengguna
+    answer       TEXT NOT NULL       – jawaban dari agent
+    created_at   TEXT                – ISO timestamp saat disimpan
 """
 
 from __future__ import annotations
@@ -105,6 +114,19 @@ def _ensure_tables() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_pending_edits_session
                 ON doc_pending_edits(session_id, file_id, edit_order);
+
+            CREATE TABLE IF NOT EXISTS qna_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   TEXT NOT NULL,
+                file_id      TEXT NOT NULL,
+                turn_index   INTEGER NOT NULL,
+                question     TEXT NOT NULL,
+                answer       TEXT NOT NULL,
+                created_at   TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_qna_log_session
+                ON qna_log(session_id, file_id, turn_index);
         """)
 
         # ── Schema migrations (safe for existing databases) ───────────────
@@ -135,6 +157,26 @@ def _ensure_tables() -> None:
                     ON doc_pending_edits(session_id, file_id, edit_order);
             """)
             logger.info("DocIndex migration: created doc_pending_edits table")
+
+        # ── Migration: qna_log table ───────────────────────────────────────
+        existing_qna = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='qna_log'"
+        ).fetchone()
+        if existing_qna is None:
+            conn.executescript("""
+                CREATE TABLE qna_log (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id   TEXT NOT NULL,
+                    file_id      TEXT NOT NULL,
+                    turn_index   INTEGER NOT NULL,
+                    question     TEXT NOT NULL,
+                    answer       TEXT NOT NULL,
+                    created_at   TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_qna_log_session
+                    ON qna_log(session_id, file_id, turn_index);
+            """)
+            logger.info("DocIndex migration: created qna_log table")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -342,6 +384,77 @@ class DocIndex:
             )
         logger.info("DocIndex: cleared pending edits for session=%s", session_id)
 
+    # ── QnA Log ───────────────────────────────────────────────────────────────
+
+    def add_qna(
+        self,
+        session_id: str,
+        question: str,
+        answer: str,
+        file_id: Optional[str] = None,
+    ) -> None:
+        """
+        Catat satu pasangan Q&A ke tabel qna_log.
+
+        Args:
+            session_id: ID sesi pengguna.
+            question:   Pertanyaan dari pengguna.
+            answer:     Jawaban dari agent.
+            file_id:    Identifier file; jika None, ambil file_id terbaru.
+        """
+        if file_id is None:
+            file_id = self.get_latest_file_id(session_id) or "unknown"
+
+        now = _now_iso()
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(turn_index), 0) FROM qna_log "
+                "WHERE session_id=? AND file_id=?",
+                (session_id, file_id),
+            ).fetchone()
+            next_turn = (row[0] or 0) + 1
+
+            conn.execute(
+                """
+                INSERT INTO qna_log
+                    (session_id, file_id, turn_index, question, answer, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, file_id, next_turn, question, answer, now),
+            )
+        logger.debug(
+            "DocIndex: qna_log turn=%d session=%s file_id=%r",
+            next_turn, session_id, file_id,
+        )
+
+    def get_qna_log(
+        self,
+        session_id: str,
+        file_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Ambil semua pasangan Q&A untuk sesi ini, diurutkan berdasarkan turn_index.
+
+        Returns:
+            List of dicts: [{"turn_index": int, "question": str, "answer": str, "created_at": str}]
+        """
+        if file_id is None:
+            file_id = self.get_latest_file_id(session_id)
+        if file_id is None:
+            return []
+
+        with _get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT turn_index, question, answer, created_at
+                FROM qna_log
+                WHERE session_id=? AND file_id=?
+                ORDER BY turn_index
+                """,
+                (session_id, file_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def save_summary(
         self,
         session_id: str,
@@ -467,6 +580,9 @@ class DocIndex:
             )
             conn.execute(
                 "DELETE FROM doc_pending_edits WHERE session_id=?", (session_id,)
+            )
+            conn.execute(
+                "DELETE FROM qna_log WHERE session_id=?", (session_id,)
             )
         logger.info("DocIndex: cleared all data for session=%s", session_id)
 

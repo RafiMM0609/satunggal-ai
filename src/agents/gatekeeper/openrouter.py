@@ -49,6 +49,7 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - telegram_quiz_bank (user uploads a PDF that ALREADY CONTAINS a collection of questions/exam problems and wants them EXTRACTED (not generated) as Telegram polls — keywords: "bank soal", "kumpulan soal", "soal ujian", "soal latihan", "ekstrak soal", "import soal", "ambil soal dari pdf", "soal sudah ada", "pdf soal", "bank kuis")
 - pdf_summarization  (user wants to summarize, ask questions about, or understand the content of a PDF document)
 - doc_audit          (user wants to ask questions about, explore, or get details about a .docx document that was previously uploaded and analyzed in this session)
+- diagram_from_analysis (user wants to create a flow diagram or visual summary from the analysis and Q&A done in the current active document session — keywords: "buat diagram", "flow diagram", "gambarkan alur", "buat flowchart", "visualisasikan", "buat diagram dari diskusi", "generate diagram", "buat diagram dari analisa", "diagram dari hasil qna", "create diagram", "draw diagram", "diagram from analysis")
 - reminder           (user wants to set a timed reminder/alarm, list their reminders, or cancel/delete a reminder)
 - unknown
 
@@ -189,25 +190,39 @@ Rules:
       If caption says "buat soal" / "generate soal" → quiz_generation or telegram_quiz.
       If caption says "bank soal" / "ekstrak soal" / "soal yang ada di pdf ini" → telegram_quiz_bank.
 
+22. Use "diagram_from_analysis" when the user wants to create a flow diagram, flowchart, or visual
+    summary BASED ON the analysis and Q&A done in the current active document session:
+    - Indonesian: buat diagram, buat flow diagram, gambarkan alur, buat flowchart, visualisasikan,
+      buat diagram dari diskusi, buat diagram dari analisa, diagram dari hasil qna, diagram dari tadi,
+      buat diagram alur, buat chart, buat visualisasi, gambarkanlah, flow chart dari dokumen ini,
+      diagram dari hasil analisa kita, buat diagram dari pembahasan kita
+    - English: create diagram, make flow diagram, draw diagram, generate diagram, visualize the flow,
+      create flowchart, diagram from our analysis, diagram from discussion, flow diagram from the document,
+      diagram from qna, make a chart of the analysis
+    - Key differentiator: user is in an active document session and wants a DIAGRAM OUTPUT, not more text answers.
+      If user says "buat diagram dari diskusi kita" / "gambarkan alur dari analisa" → diagram_from_analysis.
+      If user says "jelaskan" / "apa maksud" → doc_audit.
+
 Example responses:
-  {"intent": "wbs_planning",        "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "mandays_planning",   "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "research",           "confidence": 0.91, "tools": ["tavily_search"], "needs_clarification": false, "clarification_question": null}
-  {"intent": "code_development",   "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "code_inspection",    "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "code_understanding", "confidence": 0.94, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "document_creation",  "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "system_info",        "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "log_viewer",         "confidence": 0.98, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "web_automation",     "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "general_inquiry",    "confidence": 0.88, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "unknown",            "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?"}
-  {"intent": "quiz_generation",    "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "telegram_quiz",      "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "telegram_quiz_bank", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "pdf_summarization",  "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "doc_audit",          "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "reminder",           "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "wbs_planning",           "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "mandays_planning",       "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "research",               "confidence": 0.91, "tools": ["tavily_search"], "needs_clarification": false, "clarification_question": null}
+  {"intent": "code_development",       "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "code_inspection",        "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "code_understanding",     "confidence": 0.94, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "document_creation",      "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "system_info",            "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "log_viewer",             "confidence": 0.98, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "web_automation",         "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "general_inquiry",        "confidence": 0.88, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "unknown",                "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?"}
+  {"intent": "quiz_generation",        "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "telegram_quiz",          "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "telegram_quiz_bank",     "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "pdf_summarization",      "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "doc_audit",              "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "diagram_from_analysis",  "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "reminder",               "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
 """
 
 
