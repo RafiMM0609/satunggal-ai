@@ -1007,7 +1007,7 @@ _DIAGRAM_KEYWORDS = frozenset({
     "diagram", "flowchart", "flow", "alur", "visualisasi", "visualisasikan",
     "gambarkan", "chart", "bagan", "skema", "grafik",
     # English
-    "flowchart", "flow chart", "visualize", "visualise", "draw", "plot",
+    "visualize", "visualise", "draw", "plot",
 })
 
 _DIAGRAM_CONTEXT_KEYWORDS = frozenset({

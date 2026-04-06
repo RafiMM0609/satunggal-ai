@@ -455,17 +455,6 @@ class DocIndex:
             ).fetchall()
         return [dict(r) for r in rows]
 
-        """Hapus semua pending edits untuk sesi ini setelah berhasil diterapkan."""
-        file_id = self.get_latest_file_id(session_id)
-        if file_id is None:
-            return
-        with _get_conn() as conn:
-            conn.execute(
-                "DELETE FROM doc_pending_edits WHERE session_id=? AND file_id=?",
-                (session_id, file_id),
-            )
-        logger.info("DocIndex: cleared pending edits for session=%s", session_id)
-
     def save_summary(
         self,
         session_id: str,
