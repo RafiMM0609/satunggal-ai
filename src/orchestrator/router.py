@@ -35,7 +35,7 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.IMAGE_QUERY:       "responder",
     IntentCategory.RESEARCH:          "researcher",       #← only intent with live Tavily access
     IntentCategory.CONTENT_CREATION:  "content_creator",
-    IntentCategory.DATA_ANALYSIS:     "wbs_agent",
+    IntentCategory.WBS_PLANNING:      "wbs_agent",
     IntentCategory.MANDAYS_PLANNING:  "mandays_agent",
     IntentCategory.CODE_DEVELOPMENT:   "developer",           #← clone / AI-edit / sandbox
     IntentCategory.CODE_INSPECTION:    "developer_inspector",  #← read-only inspect + root cause
@@ -45,6 +45,7 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.LOG_VIEWER:        "log_viewer_agent",     #← tampilkan log bot untuk debugging
     IntentCategory.QUIZ_GENERATION:   "quiz_agent",           #← konversi PDF → kuis HTML interaktif
     IntentCategory.TELEGRAM_QUIZ:     "tg_quiz_agent",        #← konversi PDF → kuis polling Telegram (sendPoll)
+    IntentCategory.PDF_SUMMARIZATION: "pdf_summarizer",       #← ringkas / QnA isi dokumen PDF
     IntentCategory.WEB_AUTOMATION:    "web_automation",       #← autonomous browsing & web interaction
     IntentCategory.DOC_AUDIT:         "doc_agent",            #← analisis + Q&A + edit interaktif .docx
     IntentCategory.REMINDER:          "reminder_agent",       #← set / list / cancel timed reminders

@@ -6,7 +6,7 @@ stored in-memory (no external job store needed since reminders are persisted in
 SQLite by ReminderStore and rescheduled on startup).
 
 Usage:
-    from src.agents.reminder.scheduler import (
+    from src.agents.reminder_agent.scheduler import (
         start_scheduler,
         stop_scheduler,
         schedule_reminder,
