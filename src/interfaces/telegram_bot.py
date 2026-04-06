@@ -92,7 +92,7 @@ _STARTUP_MESSAGE = """🟢 <b>AdvanceAI — Bot Online</b>
 async def _send_startup_notification(app: Application) -> None:
     """Kirim notifikasi startup ke admin saat bot pertama kali berjalan."""
     # ── Start reminder scheduler and reschedule pending reminders ─────────
-    from src.agents.reminder.scheduler import (
+    from src.agents.reminder_agent.scheduler import (
         set_bot,
         start_scheduler,
         reschedule_pending_on_startup,
@@ -123,7 +123,7 @@ async def _send_startup_notification(app: Application) -> None:
 
 async def _shutdown_scheduler(app: Application) -> None:
     """Stop APScheduler when the bot shuts down."""
-    from src.agents.reminder.scheduler import stop_scheduler
+    from src.agents.reminder_agent.scheduler import stop_scheduler
     stop_scheduler()
 
 

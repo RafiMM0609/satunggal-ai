@@ -110,8 +110,9 @@ def _get_pipeline():
     from src.agents.llm_client import LLMClient
     from src.agents.log_viewer_agent.agent import LogViewerAgent
     from src.agents.mandays_agent.agent import MandaysAgent
+    from src.agents.pdf_summarizer.agent import PDFSummarizerAgent
     from src.agents.quiz_agent.agent import QuizAgent
-    from src.agents.reminder.agent import ReminderAgent
+    from src.agents.reminder_agent.agent import ReminderAgent
     from src.agents.researcher.agent import ResearcherAgent
     from src.agents.responder.agent import ResponderAgent
     from src.agents.sysinfo_agent.agent import SysInfoAgent
@@ -174,6 +175,7 @@ def _get_pipeline():
         "sysinfo_agent":       SysInfoAgent(_history, _llm),
         "log_viewer_agent":    LogViewerAgent(_history, _llm),
         "quiz_agent":          QuizAgent(_llm),
+        "pdf_summarizer":      PDFSummarizerAgent(_llm),
         "web_automation":      WebAutomationAgent(_llm, history=_history),
         "doc_agent":           DocAgent(_history, _llm),
         "reminder_agent":      ReminderAgent(_history, _llm),
@@ -499,6 +501,67 @@ async def _run_pdf_quiz_pipeline(
     return task
 
 
+async def _run_pdf_summarizer_pipeline(
+    task: "AgentTask",
+    agents: dict,
+    tools: dict,
+    session_id: str,
+    original_filename: str,
+    status_callback: "StatusCallback",
+    history,
+) -> "AgentTask":
+    """
+    Inner pipeline: PDF → Summary / Q&A.
+    Called by process_pdf after gatekeeper confirms pdf_summarization intent.
+    Runs pdf_parser (full document), then PDFSummarizerAgent.
+    """
+    await _notify(status_callback, f"⏳ Membaca *{original_filename}*...")
+
+    pdf_tool = tools.get("pdf_parser")
+    if pdf_tool is None:
+        task.mark_failed("pdf_parser tool tidak terdaftar.")
+        task.result = "❌ Sistem tidak dapat memproses PDF saat ini."
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    parser_result = await pdf_tool.run(task)
+    if "error" in parser_result:
+        task.mark_failed(parser_result["error"])
+        task.result = f"❌ Gagal membaca PDF: {parser_result['error']}"
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    chunks: list[str] = parser_result["chunks"]
+    task.metadata["pdf_chunks"] = chunks
+
+    logger.info(
+        "PDF full-parse (summarizer): session=%s pages=%d words=%d chunks=%d",
+        session_id,
+        parser_result.get("total_pages", 0),
+        parser_result.get("total_words", 0),
+        len(chunks),
+    )
+
+    await _notify(status_callback, f"⏳ Merangkum *{original_filename}*...")
+
+    summarizer = agents.get("pdf_summarizer")
+    if summarizer is None:
+        task.mark_failed("pdf_summarizer agent tidak terdaftar.")
+        task.result = "❌ PDF summarizer agent tidak tersedia."
+        history.add(session_id, "assistant", task.result)
+        return task
+
+    task.mark_processing("pdf_summarizer")
+    task = await summarizer.run(task)
+
+    # Free parsed chunks from memory
+    task.metadata.pop("pdf_chunks", None)
+
+    history.add(session_id, "assistant", task.result or "")
+    logger.info("_run_pdf_summarizer_pipeline done | session=%s", session_id)
+    return task
+
+
 async def process_pdf(
     session_id: str,
     pdf_path: str,
@@ -616,11 +679,17 @@ async def process_pdf(
             task, agents, tools, session_id, original_filename, status_callback, history,
         )
 
+    if intent_value == "pdf_summarization":
+        return await _run_pdf_summarizer_pipeline(
+            task, agents, tools, session_id, original_filename, status_callback, history,
+        )
+
     # Unsupported intent – friendly explanation
     task.result = (
         f"ℹ️ Saya menerima PDF *{original_filename}* dan mendeteksi permintaan: *{intent_value}*.\n\n"
-        f"Saat ini PDF hanya mendukung pembuatan *kuis interaktif*.\n"
-        f"Kirim ulang PDF dengan pesan _\"buat kuis dari dokumen ini\"_ untuk memulai. 🎯"
+        f"Saat ini PDF mendukung:\n"
+        f"• 📝 *Kuis Interaktif* — kirim PDF dengan pesan _\"buat kuis dari dokumen ini\"_\n"
+        f"• 📄 *Ringkasan / Q&A* — kirim PDF dengan pesan _\"ringkas dokumen ini\"_ atau ajukan pertanyaan 🎯"
     )
     logger.info("PDF intent '%s' not yet supported: session=%s", intent_value, session_id)
     history.add(session_id, "assistant", task.result)

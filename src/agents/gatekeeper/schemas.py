@@ -16,7 +16,7 @@ class IntentCategory(str, Enum):
     ORDER_STATUS      = "order_status"
     TECHNICAL_SUPPORT = "technical_support"
     BILLING           = "billing"
-    DATA_ANALYSIS      = "data_analysis"
+    WBS_PLANNING       = "wbs_planning"
     MANDAYS_PLANNING   = "mandays_planning"
     IMAGE_QUERY        = "image_query"
     RESEARCH           = "research"

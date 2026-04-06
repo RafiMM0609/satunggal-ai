@@ -1,5 +1,5 @@
 """
-WBSAgent – handles data_analysis intent (WBS Gantt-chart generation).
+WBSAgent – handles wbs_planning intent (WBS Gantt-chart generation).
 
 Flow:
   1. Call LLM with WBS system prompt → receive structured JSON.
