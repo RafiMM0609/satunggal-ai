@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 
 from config.settings import Settings
 from src.agents.gatekeeper.schemas import IntentCategory
@@ -248,6 +249,12 @@ class GatekeeperLLMClient:
         user_text: str,
         history: "list[dict] | None" = None,
     ) -> LLMIntentResponse:
+        # Inject current date/time (WIB, UTC+7) so the LLM is never anchored to
+        # its training-data cutoff when answering time-sensitive questions.
+        wib = timezone(timedelta(hours=7))
+        now_str = datetime.now(tz=wib).strftime("%A, %d %B %Y %H:%M WIB")
+        system_content_base = _SYSTEM_PROMPT + f"\n\nWaktu saat ini: {now_str}"
+
         # Inject recent conversation history into system prompt so the LLM can
         # correctly classify follow-up commands (e.g. "berikan screenshot" after
         # a previous web_automation turn).
@@ -260,12 +267,12 @@ class GatekeeperLLMClient:
                 content = msg.get("content", "")[:300]
                 lines.append(f"[{role}]: {content}")
             system_content = (
-                _SYSTEM_PROMPT
+                system_content_base
                 + "\n\nRiwayat percakapan terakhir:\n"
                 + "\n".join(lines)
             )
         else:
-            system_content = _SYSTEM_PROMPT
+            system_content = system_content_base
 
         messages = [
             {"role": "system", "content": system_content},
