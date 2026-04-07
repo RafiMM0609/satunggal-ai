@@ -25,6 +25,13 @@ tree-sitter-javascript>=0.23.0
 tree-sitter-typescript>=0.23.0
 patch>=1.16
 
+# ── Optional: Semantic code search (developer agents) ─────────────────────────
+# Uncomment the two lines below to enable semantic RAG ranking for
+# developer_qna and developer_inspector. Requires ~80 MB model download on
+# first use. Falls back to TF-IDF automatically when not installed.
+# sentence-transformers>=2.2.0  # Sentence embeddings (all-MiniLM-L6-v2)
+# faiss-cpu>=1.7.0              # ANN search for semantic similarity
+
 # ── System monitoring (SysInfo Agent) ─────────────────────────────────────────
 psutil>=6.0.0
 

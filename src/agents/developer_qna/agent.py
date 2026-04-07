@@ -59,6 +59,14 @@ QNA_TEMPERATURE = 0.15
 QNA_TOP_P       = 0.90
 QNA_MAX_TOKENS  = 16384   # increased from global default to allow richer answers
 
+# ── Map-Reduce constants (Item 2) ─────────────────────────────────────────────
+# When the combined RAG evidence exceeds this threshold, activate Map-Reduce.
+# Each file is analysed individually (map), then answers are synthesised (reduce).
+_MAP_REDUCE_THRESHOLD  = 8_000   # chars; total RAG text above this triggers map-reduce
+_MAP_MAX_FILE_CHARS    = 4_000   # chars sent to LLM per file in the map phase
+_MAP_MAX_TOKENS        = 300     # max output tokens for each file-level answer
+_REDUCE_MAX_TOKENS     = 1_024   # max tokens for the reduce synthesis pass
+
 # ── Q/A Intent display labels ──────────────────────────────────────────────────
 
 _QA_INTENT_LABELS: dict[QAIntent, str] = {
@@ -194,6 +202,23 @@ _EXPLANATION_Q_RE = re.compile(
     r"|how\s*(?:does|it\s*work)",
     re.IGNORECASE,
 )
+
+# ── Map-Reduce prompts (Item 2) ───────────────────────────────────────────────
+
+_MAP_FILE_SYSTEM = """\
+Kamu adalah analis kode. Berdasarkan SATU file berikut, jawab pertanyaan pengguna:
+- Tuliskan 1-3 temuan spesifik dan relevan (nama fungsi, nomor baris, nilai).
+- Jika file tidak relevan sama sekali terhadap pertanyaan, tulis hanya: TIDAK RELEVAN
+Balas singkat dan padat — maksimal 4 kalimat.
+"""
+
+_REDUCE_SYSTEM = """\
+Kamu adalah analis kode. Berikut adalah temuan per-file dari beberapa file di repositori.
+Sintesekan semua temuan yang relevan menjadi jawaban komprehensif untuk pertanyaan pengguna.
+Buang temuan yang ditandai TIDAK RELEVAN.
+Sertakan sumber file + baris untuk setiap klaim.
+Gunakan label: 🟢 [CONFIRMED] / 🟡 [LIKELY] / 🔴 [UNVERIFIED].
+"""
 
 
 def _resolve_branch_from_reply(user_input: str, detected_branch: str) -> str | None:
@@ -388,6 +413,118 @@ class DeveloperQnAAgent(RepoAgentBase):
         history=None,
     ) -> None:
         super().__init__(llm=llm, history=history)
+
+    # ── Map-Reduce for large RAG evidence (Item 2) ─────────────────────────────
+
+    async def _map_file_to_answer(
+        self,
+        rel_path: str,
+        content: str,
+        question: str,
+    ) -> str:
+        """
+        Map phase: ask the LLM about a *single file* in isolation.
+
+        Returns a short (≤4 sentence) summary of the file's relevance to
+        *question*, or the sentinel string "TIDAK RELEVAN" if the file is
+        unrelated. This keeps each individual prompt well within the LLM's
+        context window.
+        """
+        user_msg = (
+            f"**Pertanyaan:** {question}\n\n"
+            f"**File:** `{rel_path}`\n"
+            f"```\n{content[:_MAP_MAX_FILE_CHARS]}\n```"
+        )
+        try:
+            answer = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _MAP_FILE_SYSTEM},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=0.10,
+                top_p=0.90,
+                max_tokens=_MAP_MAX_TOKENS,
+            )
+            return f"**{rel_path}:** {answer.strip()}"
+        except Exception as exc:
+            logger.warning("QnA map_file_answer failed for %s: %s", rel_path, exc)
+            return f"**{rel_path}:** (analisis gagal)"
+
+    async def _map_reduce_rag(
+        self,
+        repo_path: "Path",
+        question: str,
+    ) -> str:
+        """
+        Map-Reduce over all top-N RAG files.
+
+        Map phase   – each file is analysed in parallel by the LLM (small prompt).
+        Filter step – discard "TIDAK RELEVAN" results.
+        Reduce phase – synthesise the remaining per-file answers into one answer.
+
+        Returns a synthesised evidence string, or empty string on failure so the
+        caller can fall back to the standard concatenated-RAG approach.
+        """
+        file_list = await self._read_relevant_files_list(repo_path, question)
+        if not file_list:
+            return ""
+
+        logger.info(
+            "QnA: map-reduce over %d RAG files for question %r",
+            len(file_list), question[:80],
+        )
+
+        # Map phase – all files in parallel.
+        map_results = await asyncio.gather(
+            *[
+                self._map_file_to_answer(rel_path, content, question)
+                for rel_path, content in file_list
+            ],
+            return_exceptions=True,
+        )
+
+        # Filter: keep only informative results.
+        relevant_answers: list[str] = []
+        for r in map_results:
+            if isinstance(r, Exception):
+                logger.warning("QnA map-reduce gather error: %s", r)
+                continue
+            ans = str(r)
+            if "TIDAK RELEVAN" not in ans.upper():
+                relevant_answers.append(ans)
+
+        if not relevant_answers:
+            logger.info("QnA map-reduce: all files marked TIDAK RELEVAN")
+            return ""
+
+        # If only a few results, no need for a separate reduce LLM call —
+        # just join them and let the main QA LLM synthesise.
+        combined = "\n\n".join(relevant_answers)
+        if len(relevant_answers) <= 3:
+            return combined
+
+        # Reduce phase – synthesise into a single coherent evidence block.
+        try:
+            reduce_user = (
+                f"**Pertanyaan pengguna:** {question}\n\n"
+                f"**Temuan per-file:**\n\n{combined}"
+            )
+            synthesis = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _REDUCE_SYSTEM},
+                    {"role": "user",   "content": reduce_user},
+                ],
+                temperature=0.10,
+                top_p=0.90,
+                max_tokens=_REDUCE_MAX_TOKENS,
+            )
+            if synthesis.strip():
+                return synthesis.strip()
+        except Exception as exc:
+            logger.warning("QnA map-reduce reduce phase failed: %s", exc)
+
+        # Fallback: return raw combined map results.
+        return combined
 
     # ── Intent classification (regex + LLM fallback) ───────────────────────────
 
@@ -951,10 +1088,26 @@ class DeveloperQnAAgent(RepoAgentBase):
                     if tree.strip():
                         evidence["🗂️ Struktur Direktori"] = tree
             else:
-                # Secondary: RAG-relevant files
+                # Secondary: RAG-relevant files.
+                # If the combined RAG text is large, use Map-Reduce (Item 2) to
+                # avoid flooding the context window with unfiltered file dumps.
                 rag_text = _safe_str(rag_files, "(RAG unavailable)")
                 if rag_text.strip() and "unavailable" not in rag_text and "error" not in rag_text.lower():
-                    evidence["📂 File Relevan (RAG)"] = rag_text
+                    if len(rag_text) > _MAP_REDUCE_THRESHOLD:
+                        logger.info(
+                            "QnA: RAG text is %d chars (> %d) — activating Map-Reduce",
+                            len(rag_text), _MAP_REDUCE_THRESHOLD,
+                        )
+                        mr_text = await self._map_reduce_rag(
+                            repo_path, req.problem or task.user_input
+                        )
+                        if mr_text.strip():
+                            evidence["📂 File Relevan (Map-Reduce)"] = mr_text
+                        else:
+                            # Map-reduce returned nothing useful; fall back to direct RAG.
+                            evidence["📂 File Relevan (RAG)"] = rag_text
+                    else:
+                        evidence["📂 File Relevan (RAG)"] = rag_text
 
                 # Tertiary: directory tree for structural context
                 tree = _safe_str(dir_tree, "")
@@ -970,6 +1123,26 @@ class DeveloperQnAAgent(RepoAgentBase):
             logger.info("QnA: extraction done in %.2fs", t_extract - t_start)
 
             evidence_text = self._build_evidence_text(evidence)
+
+            # ── Item 7: Explicit "Data Not Enough" signal ─────────────────
+            # When evidence is truncated more than 20% of a safe limit, add an
+            # instruction so the LLM can explicitly flag missing information
+            # instead of hallucinating.
+            _STANDARD_LIMIT = 30_000  # chars that fit safely without truncation
+            evidence_was_truncated = len(evidence_text) > _STANDARD_LIMIT
+            data_not_enough_instruction = ""
+            if evidence_was_truncated:
+                data_not_enough_instruction = (
+                    "\n\n**⚠️ INSTRUKSI TAMBAHAN (evidence mungkin tidak lengkap):**\n"
+                    "Jika data yang diberikan tidak cukup untuk menjawab dengan keyakinan tinggi,\n"
+                    "tulis di akhir jawaban:\n"
+                    "> **[DATA TIDAK CUKUP]** – diperlukan: `<nama file atau informasi tambahan>`\n"
+                    "Jangan mengarang detail yang tidak ada dalam evidence.\n"
+                )
+                logger.info(
+                    "QnA: evidence is %d chars (> %d limit) — adding 'data not enough' instruction",
+                    len(evidence_text), _STANDARD_LIMIT,
+                )
 
             if is_explanation_q:
                 # Cap evidence size so the LLM focuses on explaining, not copying.
@@ -999,7 +1172,8 @@ class DeveloperQnAAgent(RepoAgentBase):
                 user_msg = (
                     f"{explanation_preamble}"
                     f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
-                    f"**Panduan verbositas:** {verbosity_note}\n\n"
+                    f"**Panduan verbositas:** {verbosity_note}\n"
+                    f"{data_not_enough_instruction}\n"
                     f"---\n\n"
                     f"**Data dari repositori (REFERENSI SAJA — jangan salin ulang):**\n\n{evidence_text}"
                 )
@@ -1011,7 +1185,8 @@ class DeveloperQnAAgent(RepoAgentBase):
                 )
                 user_msg = (
                     f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
-                    f"**Panduan verbositas:** {verbosity_note}\n\n"
+                    f"**Panduan verbositas:** {verbosity_note}\n"
+                    f"{data_not_enough_instruction}\n"
                     f"---\n\n"
                     f"**Data dari repositori:**\n\n{evidence_text}"
                 )
