@@ -82,6 +82,17 @@ _DATA_NEEDED_RE = re.compile(
 # Maximum extra files to read in the adaptive deepening retry pass.
 _MAX_ADAPTIVE_FILES = 5
 
+# ── Evidence section compression constants (Item 8) ──────────────────────────
+# When the total assembled evidence string exceeds _EVIDENCE_COMPRESS_TRIGGER,
+# each section is split into chunks of _SECTION_CHUNK_SIZE chars and each chunk
+# is summarised by the LLM (map phase, all concurrent). The chunk summaries are
+# then joined into a single section summary (reduce phase). This prevents context-
+# window overflow while guaranteeing that every section's key details are present
+# in the final prompt — unlike hard truncation which silently drops tail content.
+_EVIDENCE_COMPRESS_TRIGGER = 80_000   # total chars; compression activated above this
+_SECTION_CHUNK_SIZE        = 8_000    # max chars per chunk in the map phase
+_SECTION_COMPRESS_TOKENS   = 768      # max output tokens per chunk summary
+
 # ── Q/A Intent display labels ──────────────────────────────────────────────────
 
 _QA_INTENT_LABELS: dict[QAIntent, str] = {
@@ -233,6 +244,19 @@ Sintesekan semua temuan yang relevan menjadi jawaban komprehensif untuk pertanya
 Buang temuan yang ditandai TIDAK RELEVAN.
 Sertakan sumber file + baris untuk setiap klaim.
 Gunakan label: 🟢 [CONFIRMED] / 🟡 [LIKELY] / 🔴 [UNVERIFIED].
+"""
+
+# ── LLM prompt: evidence section chunk compression (Item 8) ──────────────────
+_SECTION_COMPRESS_SYSTEM = """\
+Kamu adalah ringkaser teknis untuk evidence kode. Berdasarkan bagian evidence berikut,
+buat ringkasan padat yang mempertahankan semua detail teknis penting:
+- Nama file dan nomor baris (mis. src/auth.py:42)
+- Nama fungsi, class, dan method
+- Nilai konstanta, environment variable, dan konfigurasi penting
+- Pesan error/exception spesifik
+- Route HTTP, endpoint URL, dan method (GET/POST/PUT/DELETE)
+Fokus pada informasi yang relevan dengan pertanyaan pengguna.
+Balas dengan bullet points informatif. Jangan tambahkan penjelasan meta.
 """
 
 
@@ -540,6 +564,122 @@ class DeveloperQnAAgent(RepoAgentBase):
 
         # Fallback: return raw combined map results.
         return combined
+
+    # ── Evidence map-reduce compression (Item 8) ───────────────────────────────
+
+    async def _compress_section_for_qna(
+        self,
+        title: str,
+        content: str,
+        question: str,
+    ) -> str:
+        """
+        Compress one evidence section via chunked map-reduce.
+
+        Map phase   – split *content* into _SECTION_CHUNK_SIZE char chunks and
+                      summarise each chunk in parallel via LLM.
+        Reduce phase – join the chunk summaries into a single section summary.
+
+        Sections that fit within one chunk are returned unchanged.
+        Falls back to returning the first chunk if all LLM calls fail.
+        """
+        if len(content) <= _SECTION_CHUNK_SIZE:
+            return content
+
+        chunks = [
+            content[i : i + _SECTION_CHUNK_SIZE]
+            for i in range(0, len(content), _SECTION_CHUNK_SIZE)
+        ]
+        logger.debug(
+            "QnA compress '%s': %d chars → %d chunks",
+            title, len(content), len(chunks),
+        )
+
+        async def _summarize_chunk(idx: int, chunk: str) -> str:
+            user_msg = (
+                f"**Pertanyaan:** {question[:200]}\n\n"
+                f"**Bagian evidence (chunk {idx + 1}/{len(chunks)}) — {title}:**\n"
+                f"```\n{chunk}\n```"
+            )
+            try:
+                result = await self._llm.chat(
+                    messages=[
+                        {"role": "system", "content": _SECTION_COMPRESS_SYSTEM},
+                        {"role": "user",   "content": user_msg},
+                    ],
+                    temperature=0.05,
+                    top_p=0.90,
+                    max_tokens=_SECTION_COMPRESS_TOKENS,
+                )
+                return result.strip() if result.strip() else ""
+            except Exception as exc:
+                logger.warning(
+                    "QnA compress chunk %d/%d for '%s' failed: %s",
+                    idx + 1, len(chunks), title, exc,
+                )
+                return ""
+
+        chunk_results = await asyncio.gather(
+            *[_summarize_chunk(i, chunk) for i, chunk in enumerate(chunks)],
+            return_exceptions=True,
+        )
+
+        summaries: list[str] = []
+        for i, r in enumerate(chunk_results):
+            if isinstance(r, Exception):
+                logger.warning(
+                    "QnA compress gather error for '%s' chunk %d: %s", title, i, r
+                )
+            elif r:
+                summaries.append(r)
+
+        if not summaries:
+            # Fallback: first chunk verbatim so the section is not entirely lost.
+            return content[:_SECTION_CHUNK_SIZE] + "\n... [ringkasan gagal — dipotong]"
+
+        combined = "\n\n".join(summaries)
+        logger.debug(
+            "QnA: compressed section '%s': %d → %d chars (%d chunks)",
+            title, len(content), len(combined), len(chunks),
+        )
+        return f"[RINGKASAN — {len(chunks)} bagian]\n{combined}"
+
+    async def _compress_evidence_for_qna(
+        self,
+        evidence: dict[str, str],
+        question: str,
+    ) -> dict[str, str]:
+        """
+        Compress all evidence sections concurrently via per-section map-reduce.
+
+        Each section whose content exceeds _SECTION_CHUNK_SIZE chars is split into
+        chunks and summarised by _compress_section_for_qna(). Sections that fit in
+        one chunk are passed through unchanged.
+
+        All sections are processed in parallel (asyncio.gather) to minimise latency.
+        """
+        keys = list(evidence.keys())
+        logger.info(
+            "QnA: compressing %d evidence section(s) for question %r",
+            len(keys), question[:80],
+        )
+        results = await asyncio.gather(
+            *[
+                self._compress_section_for_qna(k, evidence[k], question)
+                for k in keys
+            ],
+            return_exceptions=True,
+        )
+        compressed: dict[str, str] = {}
+        for k, r in zip(keys, results):
+            if isinstance(r, Exception):
+                logger.warning(
+                    "QnA: compress_evidence_for_qna error for '%s': %s", k, r
+                )
+                compressed[k] = evidence[k]   # keep original on failure
+            else:
+                compressed[k] = str(r)
+        return compressed
 
     # ── Intent classification (regex + LLM fallback) ───────────────────────────
 
@@ -1180,8 +1320,29 @@ class DeveloperQnAAgent(RepoAgentBase):
 
             evidence_text = self._build_evidence_text(evidence)
 
+            # ── Item 8: Evidence map-reduce compression ────────────────────
+            # When total evidence exceeds the safe limit, compress every section
+            # individually via LLM (map phase, all sections run in parallel), then
+            # rebuild the evidence string from the compressed dict (reduce phase).
+            # This keeps every section represented in the final prompt while
+            # staying well within the model's context window — no silent data loss.
+            if len(evidence_text) > _EVIDENCE_COMPRESS_TRIGGER:
+                logger.info(
+                    "QnA: evidence %d chars (> %d) — starting per-section map-reduce compression",
+                    len(evidence_text), _EVIDENCE_COMPRESS_TRIGGER,
+                )
+                t_compress_start = time.monotonic()
+                evidence = await self._compress_evidence_for_qna(
+                    evidence, req.problem or task.user_input
+                )
+                evidence_text = self._build_evidence_text(evidence)
+                logger.info(
+                    "QnA: evidence after compression: %d chars (%.2fs)",
+                    len(evidence_text), time.monotonic() - t_compress_start,
+                )
+
             # ── Item 7: Explicit "Data Not Enough" signal ─────────────────
-            # When evidence is truncated more than 20% of a safe limit, add an
+            # If evidence is still large even after compression, add an
             # instruction so the LLM can explicitly flag missing information
             # instead of hallucinating.
             _STANDARD_LIMIT = 30_000  # chars that fit safely without truncation
