@@ -433,7 +433,7 @@ class CodeEditorTool:
 
     async def _parse_code_patches(self, raw_json: str) -> list[CodePatch]:
         """
-        Parse LLM output into a list of CodePatch objects using a 3-tier
+        Parse LLM output into a list of CodePatch objects using a 4-tier
         validation strategy with an automatic LLM-retry fallback.
 
         Tier 1 – Strict  : json.loads + Pydantic model_validate on every item.

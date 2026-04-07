@@ -47,6 +47,9 @@ REVIEWER_TEMPERATURE = 0.15
 REVIEWER_TOP_P       = 0.90
 REVIEWER_MAX_TOKENS  = 16384
 
+# Maximum characters to read per individual config file in the key-file scan.
+MAX_FILE_PREVIEW_CHARS = 3_000
+
 # ── System prompt ──────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
@@ -264,7 +267,7 @@ class CodeReviewerAgent(RepoAgentBase):
                 continue
             try:
                 text = abs_path.read_text(errors="replace")
-                chunk = f"### {name}\n```\n{text[:3000]}\n```\n"
+                chunk = f"### {name}\n```\n{text[:MAX_FILE_PREVIEW_CHARS]}\n```\n"
                 if total + len(chunk) > MAX_BYTES:
                     break
                 sections.append(chunk)

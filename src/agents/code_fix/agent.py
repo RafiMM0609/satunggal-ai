@@ -78,12 +78,18 @@ Format output WAJIB (JSON array):
 ]
 
 Aturan:
-- Maksimal 5 task terpenting.
+- Maksimal 5 task terpenting (lihat MAX_FIX_TASKS).
 - Setiap task harus SPESIFIK: sebutkan nama file atau fungsi jika tersedia.
 - Hanya task yang CONFIRMED atau LIKELY dari laporan inspeksi.
 - Balas HANYA dengan JSON array yang valid.
 """
 
+
+# Maximum characters of inspection report sent to the LLM fix-plan extractor.
+_MAX_INSPECTION_CHARS_FOR_PLAN = 8_000
+
+# Maximum number of fix tasks to apply in one CodeFix run (must match prompt above).
+MAX_FIX_TASKS = 5
 
 # ── Branch confirmation state ──────────────────────────────────────────────────
 
@@ -344,7 +350,7 @@ class CodeFixAgent(BaseAgent):
             response = await self._llm.chat(
                 messages=[
                     {"role": "system", "content": _FIX_PLAN_SYSTEM},
-                    {"role": "user",   "content": inspection_report[:8000]},
+                    {"role": "user",   "content": inspection_report[:_MAX_INSPECTION_CHARS_FOR_PLAN]},
                 ],
                 temperature=0.0,
                 top_p=1.0,
@@ -357,7 +363,7 @@ class CodeFixAgent(BaseAgent):
                 clean = re.sub(r"\n?```$", "", clean.strip())
             data = json.loads(clean)
             if isinstance(data, list):
-                return [str(t) for t in data if isinstance(t, str)][:5]
+                return [str(t) for t in data if isinstance(t, str)][:MAX_FIX_TASKS]
         except Exception as exc:
             logger.warning("CodeFixAgent._extract_fix_tasks: failed (%s)", exc)
 
