@@ -173,20 +173,20 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
         QAIntent.SPECIFIC_SYMBOL,
         [
             # Match explicit path patterns like /upload, /api/v1/users (slash required)
-            r"(?:jelaskan|jabarkan|explain|apa.itu|what.is|describe|tentang|cari)\s+/[a-zA-Z]",
+            r"(?:jelaskan|jelasin|jabarkan|explain|apa.itu|what.is|describe|tentang|cari)\s+/[a-zA-Z]",
             # Match "jelaskan fungsi X", "apa itu class Y", "jabarkan method Z"
-            r"(?:jelaskan|jabarkan|explain|describe|cari)\s+(?:fungsi|function|class|method|api|endpoint)\s+\w",
+            r"(?:jelaskan|jelasin|jabarkan|explain|describe|cari)\s+(?:fungsi|function|class|method|api|endpoint)\s+\w",
             # Match standalone /path questions (not inside a URL)
             r"(?:endpoint|api|route)\s+[/]\S+",
             r"[/][a-zA-Z][a-zA-Z0-9_/\-]+\s+(?:itu|adalah|digunakan|bekerja|fungsi)",
             # Match "jelaskan CamelCase or snake_case identifier"
-            r"(?:jelaskan|jabarkan|explain|describe|cari)\s+[A-Z][a-zA-Z0-9]+",
-            r"(?:jelaskan|jabarkan|explain|describe|cari)\s+[a-z][a-z0-9]*(?:_[a-z0-9]+)+",
+            r"(?:jelaskan|jelasin|jabarkan|explain|describe|cari)\s+[A-Z][a-zA-Z0-9]+",
+            r"(?:jelaskan|jelasin|jabarkan|explain|describe|cari)\s+[a-z][a-z0-9]*(?:_[a-z0-9]+)+",
             # Business logic / implementation detail follow-up patterns (commonly referential)
             r"logika\s*bisnis",
             r"business\s*logic",
             r"alur\s*bisnis",
-            r"(?:detailkan|jelaskan|jabarkan)\s+(?:logika|alur|implementasi|flow|cara\s*kerja)",
+            r"(?:detailkan|jelaskan|jelasin|jabarkan)\s+(?:logika|alur|implementasi|flow|cara\s*kerja)",
             r"(?:logika|alur|implementasi|cara\s*kerja)\s+(?:dari\s+)?(?:api|endpoint|handler|controller)",
             r"(?:bisa\s+)?(?:detailkan|elaborasi|expand)\s+(?:logika|alur|flow|implementasi)",
             r"(?:lebih\s+)?detail\s+(?:logika|alur|flow|implementasi)",
@@ -195,6 +195,12 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"bagaimana\s*(?:cara\s*)?(?:api|endpoint|route)\s+(?:ini\s+)?bekerja",
             r"ingin\s+tahu\s+(?:cara|bagaimana)",
             r"(?:cara|how)\s+kerja\s+(?:api|endpoint|handler)",
+            # ── Directory-scoped requests ─────────────────────────────────────
+            # "jelasin ... pada ./src/agents/developer"
+            # "jelaskan pengolahan request yang ada pada ./src/..."
+            r"(?:pada|di|dalam|in|at)\s+\.?/[a-zA-Z]",
+            r"yang\s+ada\s+(?:pada|di|dalam)\s+\.?/[a-zA-Z]",
+            r"(?:jelaskan|jelasin|jabarkan|explain|describe|coba\s+(?:dong|deh|lah|yuk|sih|ya)?\s*jelas\w*)\s+[^./\n]{0,60}\.?/[a-zA-Z]",
             # ── File content requests ─────────────────────────────────────────
             # "jelaskan isi file main.py", "tampilkan config.yaml", "lihat router.go"
             r"(?:jelaskan|jelasin|jabarkan|explain|describe|tampilkan|tunjukkan|berikan"
@@ -205,7 +211,7 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"\bisi\s+(?:dari\s+)?(?:file\s+)?\S+\.(?:py|go|js|ts|jsx|tsx|java|php|rb|rs|kt"
             r"|cs|yaml|yml|json|toml|env|sh|md|txt|cfg|ini|sql|html|css|scss)\b",
             # "jelaskan isi file main" (filename without extension)
-            r"(?:jelaskan|jabarkan|explain|describe|tampilkan|tunjukkan|berikan)\s+(?:isi\s+)?(?:dari\s+)?file\s+\S+",
+            r"(?:jelaskan|jelasin|jabarkan|explain|describe|tampilkan|tunjukkan|berikan)\s+(?:isi\s+)?(?:dari\s+)?file\s+\S+",
             # ── Existence questions about specific features / handlers ────────
             # "adakah handle upload file", "apakah ada fungsi untuk login"
             # Negative lookahead prevents matching bug/error/masalah reports
@@ -249,8 +255,18 @@ def classify_intent(user_input: str) -> QAIntent:
     # Jika user meminta penjelasan dan menyertakan path spesifik (mis. "/upload"),
     # anggap ini permintaan `SPECIFIC_SYMBOL` dan beri prioritas sebelum pattern
     # Q/A umum seperti "ada api apa".
-    if re.search(r"(?:jelaskan|jabarkan|explain|apa.itu|what.is|describe|cari)", text) and re.search(r"(?:^|\s)/[a-z0-9_\-/]+", text):
+    # Handles both " /path" (space before slash) and "./path" (dot-slash prefix).
+    _explain_trigger = r"(?:jelaskan|jelasin|jabarkan|explain|apa.itu|what.is|describe|cari)"
+    _path_present    = r"(?:(?:^|\s)\.?/[a-z0-9_\-/]+)"
+    if re.search(_explain_trigger, text) and re.search(_path_present, text):
         logger.debug("QA classify: specific symbol detected (path present) -> SPECIFIC_SYMBOL")
+        return QAIntent.SPECIFIC_SYMBOL
+
+    # Directory-scoped requests without explicit explain trigger:
+    # "pengolahan request yang ada pada ./src/agents/developer"
+    # "yang ada di ./src/...", "pada ./src/..."
+    if re.search(r"(?:pada|di|dalam|in|at)\s+\.?/[a-z0-9_\-/]+", text):
+        logger.debug("QA classify: directory-scoped request (pada/di ./path) → SPECIFIC_SYMBOL")
         return QAIntent.SPECIFIC_SYMBOL
 
     # Jika user menyebutkan API path dengan path-parameter (/:param) — ciri khas
@@ -295,10 +311,12 @@ def classify_intent(user_input: str) -> QAIntent:
     # Fallback: detect "jabarkan/jelaskan/cari <CamelCase|snake_case>" using the
     # ORIGINAL (non-lowercased) input — catches identifiers like HandleDownload,
     # get_user_data that can't be detected in lowercase text reliably.
-    # Also handles informal Indonesian "jelasin", "tolong jelasin", "coba jelasin".
+    # Also handles informal Indonesian "jelasin", "tolong jelasin", "coba jelasin",
+    # and "coba dong jelasin" (with a known particle word like "dong/deh/lah").
     if re.search(
         r"(?:jelaskan|jelasin|jabarkan|explain|describe|cari|apa.itu|tentang"
-        r"|coba\s+jelas\w*|tolong\s+jelas\w*)\s+"
+        r"|coba\s+(?:dong|deh|lah|yuk|sih|ya)?\s*jelas\w*"
+        r"|tolong\s+(?:dong|deh|lah|ya)?\s*jelas\w*)\s+"
         r"(?:[A-Z][a-zA-Z0-9]{2,}|[a-z][a-z0-9]+(?:_[a-z0-9]+)+)\b",
         user_input,  # original case
     ):
@@ -322,12 +340,16 @@ def extract_specific_target(user_input: str) -> str:
       "cari fungsi HandleDownload" → "HandleDownload"
       "/download/:appuuid/:uuid" → "/download/:appuuid/:uuid"
       "controllers.DownloadFile" → "controllers.DownloadFile"
+      "jelasin ... pada ./src/agents/developer" → "/src/agents/developer"
     """
     # Broad trigger-word pattern — includes informal Indonesian variants
-    # (jelasin, coba jelasin, tolong jelaskan, etc.) and imperative/existence verbs.
+    # (jelasin, coba jelasin, coba dong jelasin, tolong jelaskan, etc.)
+    # and imperative/existence verbs.
     _TRIGGER = (
         r"(?:jelaskan|jelasin|jabarkan|explain|apa.itu|what.is|describe"
-        r"|tentang|cari|coba\s+jelas\w*|tolong\s+jelas\w*"
+        r"|tentang|cari"
+        r"|coba\s+(?:dong|deh|lah|yuk|sih|ya)?\s*jelas\w*"
+        r"|tolong\s+(?:dong|deh|lah|ya)?\s*jelas\w*"
         r"|adakah|apakah.ada|ada.tidak"
         r"|berikan|tampilkan|tunjukkan|kasih|lihat.isi|apa.isi)"
     )
@@ -369,6 +391,14 @@ def extract_specific_target(user_input: str) -> str:
     )
     if file_match:
         return file_match.group(1)
+
+    # Directory target expressed as "./path/to/dir" or "/path/to/dir".
+    # Must be extracted BEFORE the general /path extractor so that we preserve
+    # the full path (e.g. "./src/agents/developer" → "/src/agents/developer").
+    # Handles both "./dir" and "/dir" forms; always normalises to leading "/".
+    dotslash_match = re.search(r"\./([a-zA-Z][a-zA-Z0-9_/\-]*)", text_no_url)
+    if dotslash_match:
+        return "/" + dotslash_match.group(1)
 
     # API path: /upload, /api/v1/:param — strip URL schemes first
     path_match = re.search(r"(/[a-zA-Z][a-zA-Z0-9_/\-:*]*)", text_no_url)
@@ -1079,6 +1109,212 @@ async def _search_keyword_in_file(
     )
 
 
+# ── Config / data file fallback search ───────────────────────────────────────
+
+# File extensions for configuration / data files searched as fallback.
+_CONFIG_EXTS = {
+    ".json", ".yaml", ".yml", ".toml", ".env", ".xml",
+    ".ini", ".cfg", ".conf", ".properties",
+}
+
+# Source + config extensions that are meaningful when reading a whole directory.
+_DIR_SOURCE_EXTS = {
+    ".py", ".go", ".js", ".ts", ".jsx", ".tsx", ".java", ".php",
+    ".rb", ".rs", ".kt", ".cs", ".yaml", ".yml", ".json", ".toml",
+    ".env", ".sh", ".md",
+}
+
+# Signals returned by extractors that indicate no useful evidence was found.
+_EMPTY_EVIDENCE_SIGNALS = (
+    "(simbol",
+    "(path ",
+    "(target tidak",
+    "tidak ditemukan",
+    "not found",
+    "(file `",
+)
+
+
+def _evidence_is_empty(text: str) -> bool:
+    """Return True when *text* only contains an 'evidence not found' sentinel."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return any(stripped.startswith(s) for s in _EMPTY_EVIDENCE_SIGNALS)
+
+
+# ── Directory target helpers ───────────────────────────────────────────────────
+
+def _is_directory_target(repo_path: Path, target: str) -> bool:
+    """Return True if *target* (possibly prefixed with '/' or './') resolves to
+    an existing directory inside *repo_path*."""
+    normalized = target.lstrip(".").strip("/")
+    return bool(normalized) and (repo_path / normalized).is_dir()
+
+
+async def _scan_directory_files(
+    repo_path: Path,
+    dir_path: str,
+    user_input: str = "",
+    *,
+    max_files: int = 12,
+) -> str:
+    """
+    Read all source files inside *dir_path* (relative to *repo_path*) and
+    return their contents formatted as evidence for the LLM.
+
+    Called when the user explicitly targets a directory such as
+    "./src/agents/developer" — instead of guessing which single file is
+    relevant, we read ALL meaningful files in the directory.
+
+    Returns a markdown-formatted string, or a sentinel if no files found.
+    """
+    normalized = dir_path.lstrip(".").strip("/")
+    target_dir = repo_path / normalized
+
+    if not target_dir.is_dir():
+        return f"(direktori `{normalized}` tidak ditemukan di repositori)"
+
+    sections: list[str] = []
+    for fpath in sorted(target_dir.rglob("*")):
+        if fpath.is_dir():
+            continue
+        if fpath.suffix.lower() not in _DIR_SOURCE_EXTS:
+            continue
+        rel_parts = fpath.relative_to(repo_path).parts
+        if _should_skip(rel_parts):
+            continue
+        rel = fpath.relative_to(repo_path).as_posix()
+        content = _read_snippet(fpath)
+        ext = fpath.suffix.lstrip(".")
+        sections.append(f"### 📄 `{rel}`\n```{ext}\n{content}\n```")
+        if len(sections) >= max_files:
+            break
+
+    if not sections:
+        return f"(tidak ada file sumber yang ditemukan di direktori `{normalized}`)"
+
+    logger.info(
+        "_scan_directory_files: read %d file(s) from directory %r",
+        len(sections), normalized,
+    )
+    return (
+        f"## 📁 Isi Direktori: `{normalized}`\n\n"
+        + "\n\n".join(sections)
+    )
+
+
+async def _search_config_files_for_keyword(
+    repo_path: Path,
+    keyword: str,
+    user_input: str = "",
+    *,
+    max_files: int = 6,
+    context_lines: int = 8,
+) -> str:
+    """
+    Search for *keyword* in configuration and data files (.json, .yaml, .yml,
+    .toml, .env, .xml, etc.) that are normally skipped by source-code extractors.
+
+    Used as a fallback when `extract_specific_symbol()` returns no evidence from
+    source code.  This lets agents answer questions about Postman collections,
+    OpenAPI specs, Docker Compose, CI pipeline YAML, and similar artifacts.
+
+    Returns a markdown-formatted evidence string, or an informative sentinel if
+    nothing was found.
+    """
+    if not keyword:
+        return "(tidak ada keyword untuk dicari di file konfigurasi)"
+
+    kw_lower = keyword.lower()
+    kw_compact = kw_lower.replace(" ", "").replace("_", "").replace("-", "")
+
+    # Also derive additional keywords from user_input
+    extra_kws: list[str] = []
+    if user_input:
+        extra_kws = _extract_search_keywords(user_input, exclude_token=keyword)[:5]
+
+    findings: list[str] = []
+
+    for fpath in sorted(repo_path.rglob("*")):
+        if fpath.is_dir() or fpath.suffix.lower() not in _CONFIG_EXTS:
+            continue
+        if _should_skip(fpath.relative_to(repo_path).parts):
+            continue
+
+        try:
+            text = fpath.read_text(errors="replace")
+        except OSError:
+            continue
+
+        file_lines = text.splitlines()
+        hit_indices: set[int] = set()
+        matched_kw = ""
+
+        # Check primary keyword first, then extras
+        for kw in [kw_lower] + extra_kws:
+            kw_norm = kw.lower()
+            kw_c = kw_norm.replace(" ", "").replace("_", "").replace("-", "")
+            for i, line in enumerate(file_lines):
+                line_lower = line.lower()
+                if kw_norm in line_lower or (kw_c and kw_c != kw_norm and kw_c in line_lower):
+                    hit_indices.add(i)
+            if hit_indices:
+                matched_kw = kw
+                break
+
+        if not hit_indices:
+            continue
+
+        rel = fpath.relative_to(repo_path).as_posix()
+        ext = fpath.suffix.lstrip(".")
+
+        # Expand hits with context and merge overlapping ranges
+        ranges: list[tuple[int, int]] = []
+        for idx in sorted(hit_indices)[:20]:  # cap hits per file
+            start = max(0, idx - context_lines)
+            end = min(len(file_lines), idx + context_lines + 1)
+            ranges.append((start, end))
+
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(ranges):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+
+        snippet_parts: list[str] = []
+        for start, end in merged[:5]:  # cap output blocks per file
+            block = []
+            for j in range(start, end):
+                marker = "→" if j in hit_indices else " "
+                block.append(f"  {marker} L{j + 1}: {file_lines[j].rstrip()}")
+            snippet_parts.append("\n".join(block))
+
+        body = "\n\n---\n\n".join(f"```{ext}\n{p}\n```" for p in snippet_parts)
+        findings.append(
+            f"**`{rel}`** — keyword: `{matched_kw}` ({len(hit_indices)} hit):\n{body}"
+        )
+
+        if len(findings) >= max_files:
+            break
+
+    if not findings:
+        return (
+            f"(tidak ditemukan referensi `{keyword}` di file konfigurasi/data "
+            f"(.json, .yaml, .toml, dll.) di repositori ini)"
+        )
+
+    logger.info(
+        "_search_config_files_for_keyword: found %d config file(s) for keyword=%r",
+        len(findings), keyword,
+    )
+    return (
+        f"## 📋 Konfigurasi & Data Files — `{keyword}`\n\n"
+        + "\n\n".join(findings)
+    )
+
+
 # ── Extractor: Specific Symbol ────────────────────────────────────────────────
 
 async def extract_specific_symbol(
@@ -1105,12 +1341,38 @@ async def extract_specific_symbol(
     Untuk filename target (e.g. "main.py"): cari file di repo, lalu grep untuk
     keyword yang disebutkan dalam user_input (e.g. "elastic apm") di dalam file
     tersebut, mengembalikan baris-baris yang relevan dengan konteks.
+
+    Untuk directory target (e.g. "./src/agents/developer"): baca SEMUA file
+    sumber di dalam direktori tersebut dan kembalikan isinya sebagai evidence.
+
+    Fallback: jika source-code search tidak menemukan hasil, secara otomatis
+    cari di file konfigurasi/data (.json, .yaml, .toml, dll.) agar pertanyaan
+    tentang Postman collection, OpenAPI spec, CI/CD config, dsb. tetap terjawab.
     """
     if not target:
         return "(target tidak ditentukan)"
 
     if target.startswith("/"):
-        return await _trace_api_route(repo_path, target)
+        # Check if the path is a directory inside the repo BEFORE treating it
+        # as an API route — e.g. "./src/agents/developer" → read directory files.
+        if _is_directory_target(repo_path, target):
+            logger.info(
+                "extract_specific_symbol: directory target detected → %r", target
+            )
+            return await _scan_directory_files(repo_path, target, user_input)
+
+        result = await _trace_api_route(repo_path, target)
+        # If route tracing found nothing in source code, also search config files
+        if _evidence_is_empty(result):
+            logger.info(
+                "extract_specific_symbol: route %r not found in source — "
+                "falling back to config file search",
+                target,
+            )
+            return await _extract_symbol_with_config_fallback(
+                repo_path, target.lstrip("/"), user_input, result
+            )
+        return result
 
     # Filename target: e.g. "main.py", "api/config.py", "worker.go"
     # Must be checked BEFORE the qualified-name splitter so that "main.py" is
@@ -1154,20 +1416,74 @@ async def extract_specific_symbol(
             # what was found and what was missing)
             if not parts_out:
                 parts_out = [r for r in (route_result, sym_result) if r]
-            return (
+            combined = (
                 "\n\n".join(parts_out)
                 if parts_out
                 else f"(tidak ditemukan: route `{api_path}` maupun simbol `{target}`)"
             )
+            # Fallback: if nothing found in source, search config files too
+            if _evidence_is_empty(combined):
+                logger.info(
+                    "extract_specific_symbol: dual-trace found nothing — "
+                    "falling back to config file search for %r",
+                    target,
+                )
+                return await _extract_symbol_with_config_fallback(
+                    repo_path, func_name, user_input, combined
+                )
+            return combined
 
-        return await _find_symbol_definition(
+        src_result = await _find_symbol_definition(
             repo_path, func_name, package_hint=package_hint
         )
+        if _evidence_is_empty(src_result):
+            logger.info(
+                "extract_specific_symbol: qualified symbol %r not found in source — "
+                "falling back to config file search",
+                target,
+            )
+            return await _extract_symbol_with_config_fallback(
+                repo_path, func_name, user_input, src_result
+            )
+        return src_result
 
-    return await _find_symbol_definition(repo_path, target)
+    src_result = await _find_symbol_definition(repo_path, target)
+    if _evidence_is_empty(src_result):
+        logger.info(
+            "extract_specific_symbol: symbol %r not found in source — "
+            "falling back to config file search",
+            target,
+        )
+        return await _extract_symbol_with_config_fallback(
+            repo_path, target, user_input, src_result
+        )
+    return src_result
 
 
-# ── API route tracing helpers ─────────────────────────────────────────────────
+async def _extract_symbol_with_config_fallback(
+    repo_path: Path,
+    target: str,
+    user_input: str,
+    source_result: str,
+) -> str:
+    """
+    When source-code extraction for *target* returns insufficient evidence,
+    fall back to searching configuration and data files (.json, .yaml, etc.).
+
+    The original *source_result* is prepended (if non-empty) so the LLM still
+    sees any partial source-code context alongside the config-file findings.
+    """
+    config_result = await _search_config_files_for_keyword(
+        repo_path, target, user_input
+    )
+    parts: list[str] = []
+    if source_result and not any(source_result.startswith(s) for s in _EMPTY_EVIDENCE_SIGNALS):
+        parts.append(source_result)
+    if config_result and not config_result.startswith("(tidak ditemukan"):
+        parts.append(config_result)
+    return "\n\n".join(parts) if parts else source_result
+
+
 
 _ROUTE_FILE_NAMES = {
     "routes.go", "router.go", "routing.go", "main.go",
@@ -1176,7 +1492,6 @@ _ROUTE_FILE_NAMES = {
     "api.php", "web.php", "routes.rb",
 }
 
-_SOURCE_EXTS_ALL = {".py", ".js", ".ts", ".go", ".java", ".rb", ".php", ".cs", ".rs"}
 
 
 def _build_path_search_terms(api_path: str) -> list[str]:

@@ -41,7 +41,7 @@ import re
 import time
 from pathlib import Path
 
-from src.agents.repo_agent_base import RepoAgentBase, RepoExtractionRequest
+from src.agents.repo_agent_base import RepoAgentBase, RepoExtractionRequest, MAX_FILE_BYTES
 from src.agents.llm_client import LLMClient
 from src.memory.state import AgentTask
 from src.tools.repo_qa import (
@@ -49,6 +49,8 @@ from src.tools.repo_qa import (
     classify_intent,
     extract_specific_target,
     run_qa_extraction,
+    _search_config_files_for_keyword,
+    _evidence_is_empty,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,19 @@ _MAP_REDUCE_THRESHOLD  = 8_000   # chars; total RAG text above this triggers map
 _MAP_MAX_FILE_CHARS    = 4_000   # chars sent to LLM per file in the map phase
 _MAP_MAX_TOKENS        = 300     # max output tokens for each file-level answer
 _REDUCE_MAX_TOKENS     = 1_024   # max tokens for the reduce synthesis pass
+
+# ── Adaptive deepening: [DATA TIDAK CUKUP] detector ──────────────────────────
+# When the LLM response contains this signal, the agent will automatically
+# gather additional file content and re-run the LLM with the enriched evidence.
+_DATA_NEEDED_RE = re.compile(
+    r"\[(?:DATA TIDAK CUKUP|PERLU DATA TAMBAHAN)[^\]]*\]"
+    r"|\bDATA TIDAK CUKUP\b"
+    r"|PERLU VERIFIKASI TAMBAHAN\s*[:\-]?\s*([\w/\.]+)",
+    re.IGNORECASE,
+)
+
+# Maximum extra files to read in the adaptive deepening retry pass.
+_MAX_ADAPTIVE_FILES = 5
 
 # ── Q/A Intent display labels ──────────────────────────────────────────────────
 
@@ -1081,6 +1096,47 @@ class DeveloperQnAAgent(RepoAgentBase):
             # For explanation-style SPECIFIC_SYMBOL: also skip dir-tree to reduce noise.
             # For other intents: include both RAG and dir-tree as usual.
             if intent == QAIntent.SPECIFIC_SYMBOL:
+                # ── Adaptive deepening for SPECIFIC_SYMBOL ─────────────────
+                # When the symbol tracer returns insufficient evidence (nothing
+                # found in source code), activate a fallback that:
+                #   1. Searches config/data files (.json, .yaml, etc.)
+                #   2. Falls back to TF-IDF RAG on ALL files including configs
+                # This ensures questions about Postman collections, OpenAPI specs,
+                # CI/CD YAML, Dockerfile, etc. are answered correctly.
+                symbol_evidence_values = list(evidence.values()) if evidence else []
+                symbol_evidence_text = "\n".join(symbol_evidence_values)
+                symbol_has_content = (
+                    bool(symbol_evidence_text.strip())
+                    and not _evidence_is_empty(symbol_evidence_text)
+                    and "Extraction Error" not in evidence
+                )
+
+                if not symbol_has_content:
+                    logger.info(
+                        "QnA: SPECIFIC_SYMBOL evidence is insufficient for target=%r — "
+                        "activating config-file + RAG fallback",
+                        symbol_target,
+                    )
+                    # Search config / data files for the target keyword
+                    config_fallback = await _search_config_files_for_keyword(
+                        repo_path,
+                        symbol_target or (req.problem or task.user_input)[:60],
+                        req.problem or task.user_input,
+                    )
+                    if config_fallback and not config_fallback.startswith("(tidak ditemukan"):
+                        evidence["📋 File Konfigurasi & Data"] = config_fallback
+                        logger.info("QnA: config-file fallback added %d chars", len(config_fallback))
+
+                    # Also include TF-IDF RAG as a broader safety net
+                    rag_fallback = _safe_str(rag_files, "")
+                    if (
+                        rag_fallback.strip()
+                        and "unavailable" not in rag_fallback
+                        and "error" not in rag_fallback.lower()
+                    ):
+                        evidence["📂 File Relevan (RAG Fallback)"] = rag_fallback
+                        logger.info("QnA: RAG fallback added for SPECIFIC_SYMBOL")
+
                 if not is_explanation_q:
                     # Keep dir tree so LLM knows file structure (useful for locating
                     # which directory the handler/controller lives in)
@@ -1207,6 +1263,113 @@ class DeveloperQnAAgent(RepoAgentBase):
                     "silent model error. intent=%s session=%s problem=%r",
                     intent.value, task.session_id, req.problem,
                 )
+
+            # ── Adaptive deepening retry (Item 7-extended) ────────────────
+            # If the LLM response signals [DATA TIDAK CUKUP], read any extra
+            # files it mentions and re-run the LLM with the enriched evidence.
+            # This is the same mechanism as inspector's iteration 3, now also
+            # applied to the Q&A agent for pointed questions.
+            if _DATA_NEEDED_RE.search(qa_response):
+                extra_paths: list[str] = re.findall(
+                    r"\[(?:PERLU DATA TAMBAHAN|DATA TIDAK CUKUP)[:\s]*([^\]]+)\]",
+                    qa_response,
+                    re.IGNORECASE,
+                )
+                extra_paths = [p.strip() for p in extra_paths if p.strip()][:_MAX_ADAPTIVE_FILES]
+
+                if extra_paths:
+                    logger.info(
+                        "QnA: [DATA TIDAK CUKUP] detected — reading %d extra file(s): %s",
+                        len(extra_paths), extra_paths,
+                    )
+                    added_content: list[str] = []
+                    for rel_path in extra_paths:
+                        abs_path = repo_path / rel_path
+                        if abs_path.exists() and abs_path.is_file():
+                            try:
+                                text = abs_path.read_text(errors="replace")[:MAX_FILE_BYTES]
+                                ext = abs_path.suffix.lstrip(".")
+                                added_content.append(
+                                    f"### 📄 `{rel_path}` (tambahan berdasarkan sinyal DATA TIDAK CUKUP)\n"
+                                    f"```{ext}\n{text}\n```"
+                                )
+                            except OSError as exc:
+                                logger.debug("QnA adaptive retry: cannot read %s: %s", rel_path, exc)
+                        else:
+                            logger.debug("QnA adaptive retry: file not found: %s", rel_path)
+
+                    if added_content:
+                        enriched_evidence = evidence.copy()
+                        enriched_evidence["📎 File Tambahan (Adaptive Deepening)"] = "\n\n".join(added_content)
+                        enriched_text = self._build_evidence_text(enriched_evidence)
+
+                        logger.info(
+                            "QnA: re-running LLM with enriched evidence (%d chars)",
+                            len(enriched_text),
+                        )
+                        retry_user_msg = user_msg + (
+                            f"\n\n---\n\n"
+                            f"**⚠️ TAMBAHAN: File yang diminta sebelumnya telah dibaca.**\n"
+                            f"Gunakan data di bawah untuk melengkapi jawaban:\n\n"
+                            f"{enriched_evidence.get('📎 File Tambahan (Adaptive Deepening)', '')}"
+                        )
+                        try:
+                            retry_response = await self._llm.chat(
+                                messages=[
+                                    {"role": "system", "content": _QA_SYSTEM_PROMPT},
+                                    {"role": "user",   "content": retry_user_msg},
+                                ],
+                                temperature=QNA_TEMPERATURE,
+                                top_p=QNA_TOP_P,
+                                max_tokens=QNA_MAX_TOKENS,
+                            )
+                            if retry_response.strip():
+                                qa_response = retry_response
+                                logger.info("QnA: adaptive deepening retry succeeded")
+                        except Exception as retry_exc:
+                            logger.warning(
+                                "QnA: adaptive deepening retry failed (%s); "
+                                "keeping original response",
+                                retry_exc,
+                            )
+                else:
+                    # No explicit file paths mentioned but [DATA TIDAK CUKUP] detected.
+                    # Search config files using the original question keywords as a
+                    # best-effort enrichment.
+                    logger.info(
+                        "QnA: [DATA TIDAK CUKUP] detected without explicit paths — "
+                        "searching config files as best-effort enrichment"
+                    )
+                    config_enrichment = await _search_config_files_for_keyword(
+                        repo_path,
+                        symbol_target or (req.problem or task.user_input)[:60],
+                        req.problem or task.user_input,
+                    )
+                    if config_enrichment and not config_enrichment.startswith("(tidak ditemukan"):
+                        retry_user_msg = user_msg + (
+                            f"\n\n---\n\n"
+                            f"**⚠️ TAMBAHAN: File konfigurasi/data yang relevan:**\n\n"
+                            f"{config_enrichment}"
+                        )
+                        try:
+                            retry_response = await self._llm.chat(
+                                messages=[
+                                    {"role": "system", "content": _QA_SYSTEM_PROMPT},
+                                    {"role": "user",   "content": retry_user_msg},
+                                ],
+                                temperature=QNA_TEMPERATURE,
+                                top_p=QNA_TOP_P,
+                                max_tokens=QNA_MAX_TOKENS,
+                            )
+                            if retry_response.strip():
+                                qa_response = retry_response
+                                logger.info("QnA: config-file enrichment retry succeeded")
+                        except Exception as retry_exc:
+                            logger.warning(
+                                "QnA: config-file enrichment retry failed (%s); "
+                                "keeping original response",
+                                retry_exc,
+                            )
 
             t_total = time.monotonic() - t_start
             logger.info("QnA: done in %.2fs total", t_total)
