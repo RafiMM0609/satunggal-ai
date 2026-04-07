@@ -41,7 +41,7 @@ import re
 import time
 from pathlib import Path
 
-from src.agents.repo_agent_base import RepoAgentBase, RepoExtractionRequest
+from src.agents.repo_agent_base import RepoAgentBase, RepoExtractionRequest, MAX_FILE_BYTES
 from src.agents.llm_client import LLMClient
 from src.memory.state import AgentTask
 from src.tools.repo_qa import (
@@ -1287,7 +1287,6 @@ class DeveloperQnAAgent(RepoAgentBase):
                         abs_path = repo_path / rel_path
                         if abs_path.exists() and abs_path.is_file():
                             try:
-                                from src.agents.repo_agent_base import MAX_FILE_BYTES
                                 text = abs_path.read_text(errors="replace")[:MAX_FILE_BYTES]
                                 ext = abs_path.suffix.lstrip(".")
                                 added_content.append(

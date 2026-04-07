@@ -1149,10 +1149,11 @@ async def _search_config_files_for_keyword(
 
         # Check primary keyword first, then extras
         for kw in [kw_lower] + extra_kws:
-            kw_c = kw.lower().replace(" ", "").replace("_", "").replace("-", "")
+            kw_norm = kw.lower()
+            kw_c = kw_norm.replace(" ", "").replace("_", "").replace("-", "")
             for i, line in enumerate(file_lines):
                 line_lower = line.lower()
-                if kw.lower() in line_lower or (kw_c and kw_c != kw.lower() and kw_c in line_lower):
+                if kw_norm in line_lower or (kw_c and kw_c != kw_norm and kw_c in line_lower):
                     hit_indices.add(i)
             if hit_indices:
                 matched_kw = kw
