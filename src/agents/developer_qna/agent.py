@@ -475,14 +475,12 @@ class DeveloperQnAAgent(RepoAgentBase):
         )
 
         # Map phase – all files in parallel.
-        map_results: list[str] = list(
-            await asyncio.gather(
-                *[
-                    self._map_file_to_answer(rel_path, content, question)
-                    for rel_path, content in file_list
-                ],
-                return_exceptions=True,
-            )
+        map_results = await asyncio.gather(
+            *[
+                self._map_file_to_answer(rel_path, content, question)
+                for rel_path, content in file_list
+            ],
+            return_exceptions=True,
         )
 
         # Filter: keep only informative results.

@@ -20,9 +20,10 @@ Provides two main public functions:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
-import pickle
 import re
+import stat
 from pathlib import Path
 from typing import Optional
 
@@ -396,7 +397,7 @@ def _semantic_cache_path(repo_path: Path) -> Path:
     """Return the path to the FAISS index cache file for *repo_path*."""
     commit_hash = _get_repo_commit_hash(repo_path)
     repo_key    = hashlib.md5(str(repo_path.resolve()).encode()).hexdigest()[:8]
-    return _FAISS_CACHE_DIR / f"{repo_key}_{commit_hash[:12]}.pkl"
+    return _FAISS_CACHE_DIR / f"{repo_key}_{commit_hash[:12]}.faiss"
 
 
 def _build_semantic_index(
@@ -419,14 +420,18 @@ def _build_semantic_index(
     except ImportError:
         return None
 
-    cache_path = _semantic_cache_path(repo_path)
-    if cache_path.exists():
+    cache_path      = _semantic_cache_path(repo_path)
+    meta_cache_path = cache_path.with_suffix(".json")
+
+    # Try to load from cache using FAISS native format (avoids pickle).
+    if cache_path.exists() and meta_cache_path.exists():
         try:
-            with cache_path.open("rb") as fh:
-                cached = pickle.load(fh)
-            if cached.get("candidates") == candidates:
+            with meta_cache_path.open("r") as fh:
+                meta = json.load(fh)
+            if meta.get("candidates") == candidates:
+                index = faiss.read_index(str(cache_path))
                 logger.debug("code_search: loaded FAISS index from cache %s", cache_path)
-                return cached["index"]
+                return index
         except Exception as exc:
             logger.debug("code_search: FAISS cache load failed (%s); rebuilding", exc)
 
@@ -448,12 +453,16 @@ def _build_semantic_index(
 
     _FAISS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        with cache_path.open("wb") as fh:
-            pickle.dump({"candidates": candidates, "index": index, "model": "all-MiniLM-L6-v2"}, fh)
+        faiss.write_index(index, str(cache_path))
+        # Restrict permissions: owner read/write only (mode 0o600).
+        cache_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        with meta_cache_path.open("w") as fh:
+            json.dump({"candidates": candidates, "model": "all-MiniLM-L6-v2"}, fh)
+        meta_cache_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
         # Clean up stale caches for the same repo (different commit hashes).
         repo_key = cache_path.stem.split("_")[0]
-        for old in _FAISS_CACHE_DIR.glob(f"{repo_key}_*.pkl"):
-            if old != cache_path:
+        for old in _FAISS_CACHE_DIR.glob(f"{repo_key}_*"):
+            if old not in (cache_path, meta_cache_path):
                 try:
                     old.unlink()
                 except OSError:

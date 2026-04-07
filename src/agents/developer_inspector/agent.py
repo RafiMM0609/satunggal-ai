@@ -614,7 +614,10 @@ class DeveloperInspectorAgent(RepoAgentBase):
             evidence["Hipotesis Awal"] = hypothesis_data["hypothesis"]
 
         report = await self._run_inspection_llm(user_input, problem, evidence)
-        llm_calls_used += 1  # _run_inspection_llm does 2 LLM calls internally
+        # Counts as 1 investigation phase. _run_inspection_llm internally uses
+        # 2 LLM sub-calls (initial report + critic verification pass), but MAX_LLM_CALLS
+        # tracks investigation phases, not individual sub-calls.
+        llm_calls_used += 1
 
         # ── Iteration 3: Handle [DATA TIDAK CUKUP] signal (Item 7) ────────
         if llm_calls_used < MAX_LLM_CALLS and _DATA_NEEDED_RE.search(report):
@@ -639,7 +642,7 @@ class DeveloperInspectorAgent(RepoAgentBase):
                     )
                     # Run a final targeted LLM pass with the augmented evidence.
                     report = await self._run_inspection_llm(user_input, problem, evidence)
-                    llm_calls_used += 1
+                    llm_calls_used += 1  # iteration 3 = phase 3
 
         logger.info(
             "Inspector: progressive inspection complete — %d LLM call(s) used (max=%d)",
