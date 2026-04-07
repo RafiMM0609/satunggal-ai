@@ -24,6 +24,8 @@ class IntentCategory(str, Enum):
     CODE_DEVELOPMENT    = "code_development"    # clone / edit / sandbox a repo
     CODE_INSPECTION    = "code_inspection"      # inspeksi repo, temukan akar masalah, beri rekomendasi (read-only)
     CODE_UNDERSTANDING = "code_understanding"   # tanya-jawab tentang isi repo: API, tech stack, model, dependency, dll.
+    CODE_REVIEW        = "code_review"          # review kualitas kode: style, security, best practices (read-only)
+    CODE_FIX           = "code_fix"             # temukan masalah lalu otomatis perbaiki (pipeline inspector → developer)
     DOCUMENT_CREATION  = "document_creation"    # buat dokumen teknis PDF/Word dari repo atau topik
     SYSTEM_INFO        = "system_info"        # tanya info CPU, RAM, storage server
     LOG_VIEWER         = "log_viewer"         # lihat log bot untuk debugging

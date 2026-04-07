@@ -101,6 +101,8 @@ def _get_pipeline():
     if _gatekeeper is not None:
         return _history, _agents, _router, _gatekeeper, _tools
 
+    from src.agents.code_fix.agent import CodeFixAgent
+    from src.agents.code_reviewer.agent import CodeReviewerAgent
     from src.agents.content_creator.agent import ContentCreatorAgent
     from src.agents.developer.agent import DeveloperAgent
     from src.agents.developer_inspector.agent import DeveloperInspectorAgent
@@ -173,6 +175,8 @@ def _get_pipeline():
         "developer":            DeveloperAgent(_llm),
         "developer_inspector": DeveloperInspectorAgent(llm=_llm, history=_history),
         "developer_qna":        DeveloperQnAAgent(llm=_llm, history=_history),
+        "code_reviewer":        CodeReviewerAgent(llm=_llm, history=_history),
+        "code_fix":             CodeFixAgent(llm=_llm),
         "technical_writer":    TechnicalWriterAgent(_history, _llm),
         "sysinfo_agent":       SysInfoAgent(_history, _llm),
         "log_viewer_agent":    LogViewerAgent(_history, _llm),
@@ -261,11 +265,17 @@ async def process_message(
         raise
     task.mark_routed(intent_result.intent.value)
     logger.info(
-        "Intent: session=%s intent=%s confidence=%.2f tools=%s needs_clarification=%s",
+        "Intent: session=%s intent=%s confidence=%.2f tools=%s needs_clarification=%s sub_intent=%s",
         session_id, intent_result.intent.value, intent_result.confidence,
         intent_result.tools, intent_result.needs_clarification,
+        intent_result.metadata.get("sub_intent"),
     )
     tracker.complete_current()
+
+    # 3b. Propagate gatekeeper sub_intent to task.metadata so specialist agents
+    #     (e.g. DeveloperQnAAgent) can skip their own internal classification step.
+    if intent_result.metadata.get("sub_intent"):
+        task.metadata["sub_intent"] = intent_result.metadata["sub_intent"]
 
     # 3b. Self-Correction: if the gatekeeper is unsure, ask the user back
     #     instead of forwarding to a specialist agent that might misfire.

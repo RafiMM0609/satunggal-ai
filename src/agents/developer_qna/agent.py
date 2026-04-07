@@ -73,6 +73,23 @@ _QA_INTENT_LABELS: dict[QAIntent, str] = {
     QAIntent.FULL_INSPECTION: "💬 General Q/A",
 }
 
+# ── Sub-intent mapping from gatekeeper metadata ────────────────────────────────
+# Maps the string sub_intent set by the gatekeeper to the QAIntent enum.
+# When the gatekeeper has already classified the sub-topic, we skip the
+# internal regex + LLM classify_intent() call and use this mapping directly.
+
+_SUB_INTENT_MAP: dict[str, QAIntent] = {
+    "api_endpoints":   QAIntent.API_ENDPOINTS,
+    "tech_stack":      QAIntent.TECH_STACK,
+    "data_models":     QAIntent.DATA_MODELS,
+    "dependencies":    QAIntent.DEPENDENCIES,
+    "ci_cd":           QAIntent.CI_CD,
+    "security":        QAIntent.SECURITY,
+    "main_flow":       QAIntent.MAIN_FLOW,
+    "specific_symbol": QAIntent.SPECIFIC_SYMBOL,
+    "full_inspection": QAIntent.FULL_INSPECTION,
+}
+
 # ── LLM-based intent fallback prompt ──────────────────────────────────────────
 # Used only when regex classify_intent() returns FULL_INSPECTION (catch-all),
 # to accurately classify genuinely ambiguous natural-language questions.
@@ -1078,7 +1095,17 @@ class DeveloperQnAAgent(RepoAgentBase):
                 # Not a recognizable confirmation – fall through to normal parse.
 
             # ── Step 1: Classify Q/A sub-intent (regex + LLM fallback) ────
-            intent = await self._classify_intent(task.user_input)
+            # Optimization: if the gatekeeper already resolved sub_intent,
+            # skip the internal classify step and use the gatekeeper result.
+            gatekeeper_sub_intent = task.metadata.get("sub_intent")
+            if gatekeeper_sub_intent and gatekeeper_sub_intent in _SUB_INTENT_MAP:
+                intent = _SUB_INTENT_MAP[gatekeeper_sub_intent]
+                logger.info(
+                    "QnA: using gatekeeper sub_intent=%s → QAIntent=%s",
+                    gatekeeper_sub_intent, intent.value,
+                )
+            else:
+                intent = await self._classify_intent(task.user_input)
             logger.info("QnA: classified intent=%s", intent.value)
 
             # ── Step 2: Extract structured request via LLM ─────────────────
