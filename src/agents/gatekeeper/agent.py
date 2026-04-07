@@ -74,6 +74,10 @@ class GatekeeperAgent:
                     "Misalnya: membuat dokumen, mencari informasi, menganalisis data, atau kebutuhan lainnya?"
                 )
 
+        metadata: dict = {}
+        if llm_response.sub_intent:
+            metadata["sub_intent"] = llm_response.sub_intent
+
         result = IntentResult(
             session_id=session_id,
             raw_text=normalised,
@@ -83,6 +87,7 @@ class GatekeeperAgent:
             model_used=llm_response.model_used,
             needs_clarification=needs_clarification,
             clarification_question=clarification_question,
+            metadata=metadata,
         )
         logger.info(
             "Gatekeeper → intent=%s confidence=%.2f",

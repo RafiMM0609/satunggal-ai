@@ -41,13 +41,15 @@ Classify the user's PRIMARY intent into EXACTLY ONE of:
 - code_development   (user wants to clone a repo, edit/fix code using AI CLI, or run code in a Docker sandbox)
 - code_inspection    (user wants to INSPECT a repo, find bugs/issues/root causes, review code quality — read-only, NO code changes)
 - code_understanding (user wants to UNDERSTAND or EXPLORE a repo: what APIs exist, what tech stack is used, what are the data models, dependencies, CI/CD setup, main flow, or what a specific function/class does)
+- code_review        (user wants a CODE QUALITY review: style, best practices, security audit, performance anti-patterns, technical debt — read-only, NOT fixing bugs)
+- code_fix           (user wants to AUTO-DETECT problems AND AUTO-FIX them in one go — combined inspect+edit pipeline)
 - document_creation  (user wants to generate a technical document, PDF, or Word file — from a GitHub repo, topic, or data such as WBS/mandays output)
 - system_info        (user asks about server/host resource status: CPU usage, RAM, memory, storage, disk space, hardware info of this machine)
 - log_viewer         (user wants to see, inspect, or debug the bot's recent application logs)
 - web_automation     (user wants the bot to autonomously browse a website, click buttons, fill forms, take screenshots, read page content, or interact with a web page)
 - quiz_generation    (user wants to convert a PDF into an interactive HTML quiz or a set of MCQ questions from educational/study material)
 - telegram_quiz      (user explicitly wants quiz questions sent as interactive Telegram polls/polls — keywords: "kuis telegram", "kirim polling", "kirim soal poll", "sendPoll", "kuis via telegram", "polling kuis", "quiz telegram")
-- telegram_quiz_bank (user uploads a PDF that ALREADY CONTAINS a collection of questions/exam problems and wants them EXTRACTED (not generated) as Telegram polls — keywords: "bank soal", "kumpulan soal", "soal ujian", "soal latihan", "ekstrak soal", "import soal", "ambil soal dari pdf", "soal sudah ada", "pdf soal", "bank kuis")
+- telegram_quiz_bank (user uploads a PDF that ALREADY CONTAINS a pre-existing collection of exam/quiz questions and wants them EXTRACTED (not generated) as Telegram polls — keywords: "bank soal", "kumpulan soal", "soal ujian", "soal latihan", "ekstrak soal", "import soal", "ambil soal dari pdf", "soal sudah ada", "pdf soal", "bank kuis"; KEY: user wants to EXTRACT existing questions, NOT generate new ones from study material)
 - pdf_summarization  (user wants to summarize, ask questions about, or understand the content of a PDF document)
 - doc_audit          (user wants to ask questions about, explore, or get details about a .docx document that was previously uploaded and analyzed in this session)
 - diagram_from_analysis (user wants to create a flow diagram or visual summary from the analysis and Q&A done in the current active document session — keywords: "buat diagram", "flow diagram", "gambarkan alur", "buat flowchart", "visualisasikan", "buat diagram dari diskusi", "generate diagram", "buat diagram dari analisa", "diagram dari hasil qna", "create diagram", "draw diagram", "diagram from analysis")
@@ -59,7 +61,7 @@ Pre-agent tools the orchestrator can execute before the specialist agent:
 
 Rules:
 1. Reply with a JSON object ONLY – no markdown, no explanation.
-2. Schema: {"intent": "<category>", "confidence": <float 0.0–1.0>, "tools": [<tool_name>, ...], "needs_clarification": <bool>, "clarification_question": "<question or null>"}
+2. Schema: {"intent": "<category>", "confidence": <float 0.0–1.0>, "tools": [<tool_name>, ...], "needs_clarification": <bool>, "clarification_question": "<question or null>", "sub_intent": "<sub-intent or null>"}
 3. "tools" must be a list; only include "tavily_search" when intent is "research".
 4. Use "unknown" when the intent is genuinely unclear.
 4a. Self-Correction – when you set intent to "unknown" OR confidence < 0.50, you MUST also set:
@@ -90,6 +92,11 @@ Rules:
 10. Use "code_development" when the user mentions cloning a repo/GitHub URL, fixing/editing code with AI CLI (Copilot, Claude), running code in Docker/sandbox, or listing cloned repos:
     - Indonesian: clone repo, kloning, perbaiki kode di repo, jalankan di sandbox, daftar repo, edit kode, tambah fitur ke repo
     - English: clone repo, fix code in repo, run in docker sandbox, list cloned repos, edit this repo, add feature to repo
+    - Positive examples (MUST be code_development):
+      "perbaiki bug di file main.py repo github.com/foo/bar"
+      "tambahkan fitur login ke repo github.com/foo/bar"
+      "clone repo ini dan edit config-nya"
+      "fix the null pointer error in this repo"
 11. Use "code_inspection" when the user wants to INSPECT, REVIEW, or DIAGNOSE code/repo without making changes:
     - Indonesian: inspeksi repo, periksa kode, cari bug, temukan masalah, audit kode, review kode, analisa bug, cari penyebab error,
       diagnosis masalah, lacak bug, inspektor, investigasi kode, apa yang salah di repo, kenapa error, selidiki bug
@@ -97,6 +104,11 @@ Rules:
       why is it failing, code review, root cause analysis, check the code, look at the repo for issues
     - Key differentiator: user wants FINDINGS about PROBLEMS and RECOMMENDATIONS to fix them.
       If user says "perbaiki" / "fix" → code_development. If user says "cari bug" / "apa yang salah" / "kenapa error" → code_inspection.
+    - Positive examples (MUST be code_inspection):
+      "cari penyebab error di repo github.com/foo/bar"
+      "apa yang salah di kode ini? repo: github.com/foo/bar"
+      "temukan bug di repo ini dan berikan rekomendasinya"
+      "kenapa aplikasi saya crash? tolong inspeksi repo ini"
 12. Use "code_understanding" when the user wants to LEARN or EXPLORE what is INSIDE a repo — not to find bugs:
     - Indonesian: ada api apa, tech stack apa, model data apa, dependency apa, alur utama bagaimana, fungsi X itu apa,
       class apa saja, endpoint apa, teknologi apa yang dipakai, library apa, struktur repo, jelaskan repo ini,
@@ -107,7 +119,67 @@ Rules:
     - Key differentiator: user wants to UNDERSTAND the content/structure of the repo, not diagnose a problem.
       If user asks "ada API apa?" / "tech stack apa?" / "jelaskan fungsi X" → code_understanding.
       If user asks "kenapa error?" / "ada bug apa?" → code_inspection.
-13. Use "document_creation" when the user asks to generate, create, or compile a technical document in PDF or Word format:
+    - Positive examples (MUST be code_understanding):
+      "ada API apa saja di repo github.com/foo/bar?"
+      "tech stack apa yang dipakai di repo ini?"
+      "jelaskan alur utama aplikasi di repo github.com/foo/bar"
+      "fungsi authenticate() itu ngapain di repo ini?"
+    - When intent is code_understanding, ALSO set "sub_intent" to the most specific value:
+      "api_endpoints"   → user asks about HTTP routes, REST API, endpoint list
+      "tech_stack"      → user asks about technologies, frameworks, languages, libraries
+      "data_models"     → user asks about database schema, ORM models, data structures
+      "dependencies"    → user asks about packages, requirements, modules
+      "ci_cd"           → user asks about deployment, Docker, CI/CD pipeline
+      "security"        → user asks about auth, authorization, JWT, security
+      "main_flow"       → user asks about architecture, business logic, system flow
+      "specific_symbol" → user asks about a specific file, function, class, or method
+      "full_inspection" → general Q&A that does not fit the above categories
+      Set "sub_intent": null for all other intents.
+12a. CRITICAL – Three-way developer intent disambiguation (read before classifying ANY repo-related message):
+    ┌──────────────────┬─────────────────────────────────────────────────┐
+    │ Intent           │ Keyword signals                                 │
+    ├──────────────────┼─────────────────────────────────────────────────┤
+    │ code_development │ perbaiki, tambah, edit, ubah, update, fix,      │
+    │                  │ implement, deploy, push, kode ulang              │
+    ├──────────────────┼─────────────────────────────────────────────────┤
+    │ code_inspection  │ cari bug, kenapa error, apa yang salah, temukan │
+    │                  │ masalah, root cause, diagnosa, inspeksi, audit   │
+    ├──────────────────┼─────────────────────────────────────────────────┤
+    │ code_understanding│ ada apa, apa itu, jelaskan, tech stack, API apa,│
+    │                  │ bagaimana cara kerja, model data, dependency     │
+    ├──────────────────┼─────────────────────────────────────────────────┤
+    │ code_review      │ review kualitas, best practice, apakah sudah    │
+    │                  │ sesuai standar, security audit, code smell       │
+    ├──────────────────┼─────────────────────────────────────────────────┤
+    │ code_fix         │ temukan DAN perbaiki, cari lalu fix, auto-fix,  │
+    │                  │ otomatis perbaiki semua bug, diagnosa lalu edit  │
+    └──────────────────┴─────────────────────────────────────────────────┘
+    Negative examples to avoid misclassification:
+    ✗ "ada apa di repo ini?"            → NEVER code_inspection → ALWAYS code_understanding
+    ✗ "kenapa error?"                   → NEVER code_development → ALWAYS code_inspection
+    ✗ "perbaiki error ini"              → NEVER code_inspection → ALWAYS code_development
+    ✗ "apakah kode ini sudah bagus?"    → NEVER code_inspection → ALWAYS code_review
+    ✗ "temukan dan fix semua bug"       → NEVER code_inspection alone → ALWAYS code_fix
+13. Use "code_review" when the user wants a quality-focused review of code without executing or changing it:
+    - Indonesian: review kualitas kode, cek best practice, apakah kode ini sudah bagus, audit security,
+      cari code smell, cek konvensi penulisan, evaluasi arsitektur, apakah sudah sesuai standar,
+      technical debt, periksa keamanan kode, cek performa kode, review style kode
+    - English: review code quality, check best practices, is this code good, security audit, code smell,
+      check coding conventions, evaluate architecture, is this up to standard, technical debt,
+      check code security, performance review, style review
+    - Key differentiator: user wants an OPINION on CODE QUALITY (style, security, patterns), NOT finding runtime bugs.
+      If user says "cari bug" / "kenapa error" → code_inspection.
+      If user says "apakah kode ini bagus?" / "review kualitasnya" → code_review.
+14. Use "code_fix" when the user explicitly wants the system to BOTH identify problems AND automatically fix them:
+    - Indonesian: temukan dan perbaiki, cari dan fix, auto-fix semua bug, otomatis perbaiki masalah,
+      diagnosa lalu perbaiki, detect dan fix, cari masalah langsung perbaiki juga
+    - English: find and fix, detect and fix, auto-fix all bugs, automatically repair issues,
+      diagnose then fix, scan and fix, find problems and fix them automatically
+    - Key differentiator: user explicitly combines FINDING (inspect) + FIXING (develop) in one request.
+      If user asks only to "cari bug" → code_inspection.
+      If user asks only to "perbaiki bug" → code_development.
+      If user asks to "cari dan langsung perbaiki" → code_fix.
+15. Use "document_creation" when the user asks to generate, create, or compile a technical document in PDF or Word format:
     - Indonesian: buat dokumen, buat dokumen teknis, generate PDF, buat PDF, buat Word, buat laporan teknis, dokumentasikan, buatkan dokumentasi, buat doc
     - English: generate document, create technical doc, make a PDF, create Word document, document this repo, write technical documentation
     - Even if a repo URL is mentioned, if the primary intent is to produce a document (not to fix/edit code), use "document_creation"
@@ -143,11 +215,11 @@ Rules:
     - Caption contains "ringkas" / "rangkum" / "summarize" / "apa isi" / "ceritakan" / "jelaskan" / "apa yang ada" / "kesimpulan" → pdf_summarization
     - Caption is "(tidak ada pesan dari pengguna)" or vague and document type is unclear → needs_clarification asking what they want done with the PDF
     Examples:
-      Input has "[Pesan user: buat kuis dari ini]" → {"intent": "quiz_generation", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-      Input has "[Pesan user: buat kuis telegram]" → {"intent": "telegram_quiz", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-      Input has "[Pesan user: bank soal ini ekstrak jadi kuis telegram]" → {"intent": "telegram_quiz_bank", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-      Input has "[Pesan user: ringkas dokumen ini]" → {"intent": "pdf_summarization", "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
-      Input has "[Pesan user: (tidak ada pesan dari pengguna)]" → {"intent": "unknown", "confidence": 0.20, "tools": [], "needs_clarification": true, "clarification_question": "Mau diapakan dokumen ini? Misalnya: buat kuis interaktif, kuis telegram, ringkasan, atau ada keperluan lain?"}
+      Input has "[Pesan user: buat kuis dari ini]" → {"intent": "quiz_generation", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+      Input has "[Pesan user: buat kuis telegram]" → {"intent": "telegram_quiz", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+      Input has "[Pesan user: bank soal ini ekstrak jadi kuis telegram]" → {"intent": "telegram_quiz_bank", "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+      Input has "[Pesan user: ringkas dokumen ini]" → {"intent": "pdf_summarization", "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+      Input has "[Pesan user: (tidak ada pesan dari pengguna)]" → {"intent": "unknown", "confidence": 0.20, "tools": [], "needs_clarification": true, "clarification_question": "Mau diapakan dokumen ini? Misalnya: buat kuis interaktif, kuis telegram, ringkasan, atau ada keperluan lain?", "sub_intent": null}
 
 18. When "Riwayat percakapan terakhir" is present in the context, use it to detect follow-up commands:
     - If the most recent [Asisten] response clearly involved web browsing, clicking, form filling, login,
@@ -187,9 +259,10 @@ Rules:
       jadikan polling soal-soal ini, kirim soal dari pdf ini, ambilkan soal dari sini
     - English: question bank, exam questions, extract questions, import questions, get questions from pdf,
       questions already in pdf, bank of questions, existing questions
-    - Key differentiator: user wants to EXTRACT pre-existing questions, NOT generate new ones.
-      If caption says "buat soal" / "generate soal" → quiz_generation or telegram_quiz.
-      If caption says "bank soal" / "ekstrak soal" / "soal yang ada di pdf ini" → telegram_quiz_bank.
+    - Key differentiator: user wants to EXTRACT pre-existing questions, NOT generate new ones from study text.
+      If caption says "buat soal" / "generate soal" / "buat kuis dari materi ini" → quiz_generation or telegram_quiz.
+      If caption says "bank soal" / "ekstrak soal" / "soal yang ada di pdf ini" / preview shows A/B/C/D options → telegram_quiz_bank.
+      NEVER classify as telegram_quiz_bank when the PDF contains study material (chapters, definitions) and user says "buat soal/kuis".
 
 22. Use "diagram_from_analysis" when the user wants to create a flow diagram, flowchart, or visual
     summary BASED ON the analysis and Q&A done in the current active document session:
@@ -205,25 +278,28 @@ Rules:
       If user says "jelaskan" / "apa maksud" → doc_audit.
 
 Example responses:
-  {"intent": "wbs_planning",           "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "mandays_planning",       "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "research",               "confidence": 0.91, "tools": ["tavily_search"], "needs_clarification": false, "clarification_question": null}
-  {"intent": "code_development",       "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "code_inspection",        "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "code_understanding",     "confidence": 0.94, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "document_creation",      "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "system_info",            "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "log_viewer",             "confidence": 0.98, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "web_automation",         "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "general_inquiry",        "confidence": 0.88, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "unknown",                "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?"}
-  {"intent": "quiz_generation",        "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "telegram_quiz",          "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "telegram_quiz_bank",     "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "pdf_summarization",      "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "doc_audit",              "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "diagram_from_analysis",  "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null}
-  {"intent": "reminder",               "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null}
+  {"intent": "wbs_planning",           "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "mandays_planning",       "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "research",               "confidence": 0.91, "tools": ["tavily_search"], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "code_development",       "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "code_inspection",        "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "code_understanding",     "confidence": 0.94, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": "api_endpoints"}
+  {"intent": "code_understanding",     "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": "tech_stack"}
+  {"intent": "code_review",            "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "code_fix",               "confidence": 0.94, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "document_creation",      "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "system_info",            "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "log_viewer",             "confidence": 0.98, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "web_automation",         "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "general_inquiry",        "confidence": 0.88, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "unknown",                "confidence": 0.30, "tools": [], "needs_clarification": true,  "clarification_question": "Boleh saya tahu lebih detail tentang apa yang ingin Anda lakukan? Apakah Anda ingin membuat dokumen, mencari informasi, atau ada kebutuhan teknis lainnya?", "sub_intent": null}
+  {"intent": "quiz_generation",        "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "telegram_quiz",          "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "telegram_quiz_bank",     "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "pdf_summarization",      "confidence": 0.93, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "doc_audit",              "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "diagram_from_analysis",  "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
+  {"intent": "reminder",               "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}
 """
 
 
@@ -235,6 +311,7 @@ class LLMIntentResponse:
     tools:                  tuple[str, ...] = ()
     needs_clarification:    bool            = False
     clarification_question: str | None      = None
+    sub_intent:             str | None      = None
 
 
 class GatekeeperLLMClient:
@@ -287,7 +364,7 @@ class GatekeeperLLMClient:
             "GatekeeperLLMClient.classify_intent → provider=%s model=%s",
             provider, model_used,
         )
-        raw = await self._llm.chat(messages, max_tokens=128, json_mode=True)
+        raw = await self._llm.chat(messages, max_tokens=256, json_mode=True)
         return self._parse(raw, model_used=model_used)
 
     async def aclose(self) -> None:
@@ -319,6 +396,9 @@ class GatekeeperLLMClient:
             tools = tuple(t for t in raw_tools if isinstance(t, str))
             needs_clarification    = bool(parsed.get("needs_clarification", False))
             clarification_question = parsed.get("clarification_question") or None
+            sub_intent             = parsed.get("sub_intent") or None
+            if isinstance(sub_intent, str):
+                sub_intent = sub_intent.strip() or None
         except (json.JSONDecodeError, ValueError, KeyError) as exc:
             logger.warning("Failed to parse LLM response (%s): %r", exc, raw_content)
             intent                 = IntentCategory.UNKNOWN
@@ -326,6 +406,7 @@ class GatekeeperLLMClient:
             tools                  = ()
             needs_clarification    = True
             clarification_question = None
+            sub_intent             = None
 
         return LLMIntentResponse(
             intent=intent,
@@ -334,6 +415,7 @@ class GatekeeperLLMClient:
             tools=tools,
             needs_clarification=needs_clarification,
             clarification_question=clarification_question,
+            sub_intent=sub_intent,
         )
 
 
