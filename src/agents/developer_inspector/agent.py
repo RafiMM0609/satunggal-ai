@@ -67,7 +67,7 @@ MAX_EVIDENCE_CHARS = 60_000
 
 # ── Progressive Deepening constants (Items 5, 6) ──────────────────────────────
 # Maximum LLM calls for a single inspection (token budget).
-MAX_LLM_CALLS = 3
+MAX_INVESTIGATION_PHASES = 3
 
 # If evidence is truncated by more than this fraction, add the "Data Not Enough"
 # instruction so the LLM can explicitly flag what's missing (Item 7).
@@ -199,7 +199,7 @@ Perbarui status [CONFIRMED/LIKELY/UNVERIFIED] dan tambahkan/perbaiki kutipan buk
 
 # ── Progressive Deepening: phase-1 hypothesis prompt (Item 5) ─────────────────
 
-_HYPOTHESIS_SYSTEM_PROMPT = """\
+_HYPOTHESIS_SYSTEM_PROMPT = f"""\
 Kamu adalah inspektor kode yang melakukan investigasi bertahap.
 Berdasarkan data awal berikut (directory tree + git log + grep), berikan:
 1. Hipotesis awal singkat tentang penyebab masalah (1-2 kalimat).
@@ -207,14 +207,14 @@ Berdasarkan data awal berikut (directory tree + git log + grep), berikan:
 3. Keyword tambahan untuk grep lanjutan jika dibutuhkan.
 
 Balas HANYA dengan JSON valid (tidak ada teks lain):
-{
+{{
   "hypothesis": "<hipotesis dalam 1-2 kalimat>",
   "suspected_files": ["<repo/relative/path/file1.py>", "<path/file2.go>"],
   "additional_keywords": ["<keyword>"]
-}
+}}
 
-Maksimal %d file dalam suspected_files. Jika data sudah cukup, gunakan daftar kosong [].
-""" % _MAX_SUSPECTED_FILES
+Maksimal {_MAX_SUSPECTED_FILES} file dalam suspected_files. Jika data sudah cukup, gunakan daftar kosong [].
+"""
 
 # Regex to detect the "Data Not Enough" signal emitted by the LLM (Item 7).
 _DATA_NEEDED_RE = re.compile(
@@ -556,10 +556,10 @@ class DeveloperInspectorAgent(RepoAgentBase):
 
         The loop stops when:
           a) LLM report has no [DATA TIDAK CUKUP] signals, or
-          b) MAX_LLM_CALLS is reached, or
+          b) MAX_INVESTIGATION_PHASES is reached, or
           c) No new files are identified.
         """
-        llm_calls_used = 0
+        phases_used = 0
 
         # ── Iteration 1: Lightweight evidence → hypothesis ─────────────────
         dir_tree, git_log, grep_result, grep_errors = await asyncio.gather(
@@ -581,7 +581,7 @@ class DeveloperInspectorAgent(RepoAgentBase):
         }
 
         hypothesis_data = await self._get_investigation_hypothesis(problem, phase1_evidence)
-        llm_calls_used += 1
+        phases_used += 1
 
         # ── Iteration 2: Full evidence + suspected files ───────────────────
         git_diff, key_files, error_logs, relevant_files = await asyncio.gather(
@@ -615,12 +615,12 @@ class DeveloperInspectorAgent(RepoAgentBase):
 
         report = await self._run_inspection_llm(user_input, problem, evidence)
         # Counts as 1 investigation phase. _run_inspection_llm internally uses
-        # 2 LLM sub-calls (initial report + critic verification pass), but MAX_LLM_CALLS
+        # 2 LLM sub-calls (initial report + critic verification pass), but MAX_INVESTIGATION_PHASES
         # tracks investigation phases, not individual sub-calls.
-        llm_calls_used += 1
+        phases_used += 1
 
         # ── Iteration 3: Handle [DATA TIDAK CUKUP] signal (Item 7) ────────
-        if llm_calls_used < MAX_LLM_CALLS and _DATA_NEEDED_RE.search(report):
+        if phases_used < MAX_INVESTIGATION_PHASES and _DATA_NEEDED_RE.search(report):
             logger.info(
                 "Inspector: [DATA TIDAK CUKUP] detected in report — running iteration 3"
             )
@@ -642,11 +642,11 @@ class DeveloperInspectorAgent(RepoAgentBase):
                     )
                     # Run a final targeted LLM pass with the augmented evidence.
                     report = await self._run_inspection_llm(user_input, problem, evidence)
-                    llm_calls_used += 1  # iteration 3 = phase 3
+                    phases_used += 1  # iteration 3 = phase 3
 
         logger.info(
             "Inspector: progressive inspection complete — %d LLM call(s) used (max=%d)",
-            llm_calls_used, MAX_LLM_CALLS,
+            phases_used, MAX_INVESTIGATION_PHASES,
         )
         return report
 
@@ -666,7 +666,7 @@ class DeveloperInspectorAgent(RepoAgentBase):
           1. Forms a hypothesis from lightweight evidence (dir_tree + git_log).
           2. Opens only the files the hypothesis identifies as suspicious.
           3. Re-runs if the LLM signals [DATA TIDAK CUKUP] (Item 7).
-          4. Enforces a MAX_LLM_CALLS budget (Item 6).
+          4. Enforces a MAX_INVESTIGATION_PHASES budget (Item 6).
         """
         try:
             logger.info(
@@ -688,7 +688,7 @@ class DeveloperInspectorAgent(RepoAgentBase):
             branch_header = f"🌿 **Branch:** `{req.branch}`\n\n" if req.branch else ""
             perf_footer = (
                 f"\n\n---\n"
-                f"⏱️ *Inspeksi selesai dalam {t_total:.1f}s (progressive deepening, max {MAX_LLM_CALLS} iterasi)*"
+                f"⏱️ *Inspeksi selesai dalam {t_total:.1f}s (progressive deepening, max {MAX_INVESTIGATION_PHASES} iterasi)*"
             )
             task.mark_done(branch_header + report + perf_footer)
 

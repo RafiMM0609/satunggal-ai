@@ -1172,8 +1172,8 @@ class DeveloperQnAAgent(RepoAgentBase):
                 user_msg = (
                     f"{explanation_preamble}"
                     f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
-                    f"**Panduan verbositas:** {verbosity_note}"
-                    f"{data_not_enough_instruction}\n\n"
+                    f"**Panduan verbositas:** {verbosity_note}\n"
+                    f"{data_not_enough_instruction}\n"
                     f"---\n\n"
                     f"**Data dari repositori (REFERENSI SAJA — jangan salin ulang):**\n\n{evidence_text}"
                 )
@@ -1185,8 +1185,8 @@ class DeveloperQnAAgent(RepoAgentBase):
                 )
                 user_msg = (
                     f"**Pertanyaan pengguna:**\n{task.user_input}\n\n"
-                    f"**Panduan verbositas:** {verbosity_note}"
-                    f"{data_not_enough_instruction}\n\n"
+                    f"**Panduan verbositas:** {verbosity_note}\n"
+                    f"{data_not_enough_instruction}\n"
                     f"---\n\n"
                     f"**Data dari repositori:**\n\n{evidence_text}"
                 )

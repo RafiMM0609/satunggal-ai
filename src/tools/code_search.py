@@ -390,13 +390,13 @@ def _get_repo_commit_hash(repo_path: Path) -> str:
             return ref_path.read_text().strip()
         return ref  # detached HEAD – the hash is the content
     except Exception:
-        return hashlib.md5(str(repo_path).encode()).hexdigest()
+        return hashlib.sha256(str(repo_path.resolve()).encode()).hexdigest()
 
 
 def _semantic_cache_path(repo_path: Path) -> Path:
     """Return the path to the FAISS index cache file for *repo_path*."""
     commit_hash = _get_repo_commit_hash(repo_path)
-    repo_key    = hashlib.md5(str(repo_path.resolve()).encode()).hexdigest()[:8]
+    repo_key    = hashlib.sha256(str(repo_path.resolve()).encode()).hexdigest()[:12]
     return _FAISS_CACHE_DIR / f"{repo_key}_{commit_hash[:12]}.faiss"
 
 
@@ -406,12 +406,14 @@ def _build_semantic_index(
     repo_path: Path,
 ) -> object | None:
     """
-    Build a FAISS flat-L2 index over sentence-transformer embeddings of each
-    candidate file's description (path tokens + extracted symbols).
+    Build a FAISS flat inner-product index over sentence-transformer embeddings
+    of each candidate file's description (path tokens + extracted symbols).
 
     Returns the FAISS index (or None if sentence-transformers / faiss are not
-    installed).  The result is pickled to *_FAISS_CACHE_DIR* so subsequent
-    calls for the same repo commit are instant.
+    installed).  The index is persisted to *_FAISS_CACHE_DIR* using FAISS native
+    serialization (faiss.write_index / faiss.read_index) with a JSON sidecar for
+    metadata, so subsequent calls for the same repo commit are instant without
+    any pickle deserialization risk.
     """
     try:
         from sentence_transformers import SentenceTransformer  # type: ignore
