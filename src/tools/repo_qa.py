@@ -1079,6 +1079,137 @@ async def _search_keyword_in_file(
     )
 
 
+# ── Config / data file fallback search ───────────────────────────────────────
+
+# Signals returned by extractors that indicate no useful evidence was found.
+_EMPTY_EVIDENCE_SIGNALS = (
+    "(simbol",
+    "(path ",
+    "(target tidak",
+    "tidak ditemukan",
+    "not found",
+    "(file `",
+)
+
+
+def _evidence_is_empty(text: str) -> bool:
+    """Return True when *text* only contains an 'evidence not found' sentinel."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return any(stripped.startswith(s) for s in _EMPTY_EVIDENCE_SIGNALS)
+
+
+async def _search_config_files_for_keyword(
+    repo_path: Path,
+    keyword: str,
+    user_input: str = "",
+    *,
+    max_files: int = 6,
+    context_lines: int = 8,
+) -> str:
+    """
+    Search for *keyword* in configuration and data files (.json, .yaml, .yml,
+    .toml, .env, .xml, etc.) that are normally skipped by source-code extractors.
+
+    Used as a fallback when `extract_specific_symbol()` returns no evidence from
+    source code.  This lets agents answer questions about Postman collections,
+    OpenAPI specs, Docker Compose, CI pipeline YAML, and similar artifacts.
+
+    Returns a markdown-formatted evidence string, or an informative sentinel if
+    nothing was found.
+    """
+    if not keyword:
+        return "(tidak ada keyword untuk dicari di file konfigurasi)"
+
+    kw_lower = keyword.lower()
+    kw_compact = kw_lower.replace(" ", "").replace("_", "").replace("-", "")
+
+    # Also derive additional keywords from user_input
+    extra_kws: list[str] = []
+    if user_input:
+        extra_kws = _extract_search_keywords(user_input, exclude_token=keyword)[:5]
+
+    findings: list[str] = []
+
+    for fpath in sorted(repo_path.rglob("*")):
+        if fpath.is_dir() or fpath.suffix.lower() not in _CONFIG_EXTS:
+            continue
+        if _should_skip(fpath.relative_to(repo_path).parts):
+            continue
+
+        try:
+            text = fpath.read_text(errors="replace")
+        except OSError:
+            continue
+
+        file_lines = text.splitlines()
+        hit_indices: set[int] = set()
+        matched_kw = ""
+
+        # Check primary keyword first, then extras
+        for kw in [kw_lower] + extra_kws:
+            kw_c = kw.lower().replace(" ", "").replace("_", "").replace("-", "")
+            for i, line in enumerate(file_lines):
+                line_lower = line.lower()
+                if kw.lower() in line_lower or (kw_c and kw_c != kw.lower() and kw_c in line_lower):
+                    hit_indices.add(i)
+            if hit_indices:
+                matched_kw = kw
+                break
+
+        if not hit_indices:
+            continue
+
+        rel = fpath.relative_to(repo_path).as_posix()
+        ext = fpath.suffix.lstrip(".")
+
+        # Expand hits with context and merge overlapping ranges
+        ranges: list[tuple[int, int]] = []
+        for idx in sorted(hit_indices)[:20]:  # cap hits per file
+            start = max(0, idx - context_lines)
+            end = min(len(file_lines), idx + context_lines + 1)
+            ranges.append((start, end))
+
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(ranges):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+
+        snippet_parts: list[str] = []
+        for start, end in merged[:5]:  # cap output blocks per file
+            block = []
+            for j in range(start, end):
+                marker = "→" if j in hit_indices else " "
+                block.append(f"  {marker} L{j + 1}: {file_lines[j].rstrip()}")
+            snippet_parts.append("\n".join(block))
+
+        body = "\n\n---\n\n".join(f"```{ext}\n{p}\n```" for p in snippet_parts)
+        findings.append(
+            f"**`{rel}`** — keyword: `{matched_kw}` ({len(hit_indices)} hit):\n{body}"
+        )
+
+        if len(findings) >= max_files:
+            break
+
+    if not findings:
+        return (
+            f"(tidak ditemukan referensi `{keyword}` di file konfigurasi/data "
+            f"(.json, .yaml, .toml, dll.) di repositori ini)"
+        )
+
+    logger.info(
+        "_search_config_files_for_keyword: found %d config file(s) for keyword=%r",
+        len(findings), keyword,
+    )
+    return (
+        f"## 📋 Konfigurasi & Data Files — `{keyword}`\n\n"
+        + "\n\n".join(findings)
+    )
+
+
 # ── Extractor: Specific Symbol ────────────────────────────────────────────────
 
 async def extract_specific_symbol(
@@ -1105,12 +1236,27 @@ async def extract_specific_symbol(
     Untuk filename target (e.g. "main.py"): cari file di repo, lalu grep untuk
     keyword yang disebutkan dalam user_input (e.g. "elastic apm") di dalam file
     tersebut, mengembalikan baris-baris yang relevan dengan konteks.
+
+    Fallback: jika source-code search tidak menemukan hasil, secara otomatis
+    cari di file konfigurasi/data (.json, .yaml, .toml, dll.) agar pertanyaan
+    tentang Postman collection, OpenAPI spec, CI/CD config, dsb. tetap terjawab.
     """
     if not target:
         return "(target tidak ditentukan)"
 
     if target.startswith("/"):
-        return await _trace_api_route(repo_path, target)
+        result = await _trace_api_route(repo_path, target)
+        # If route tracing found nothing in source code, also search config files
+        if _evidence_is_empty(result):
+            logger.info(
+                "extract_specific_symbol: route %r not found in source — "
+                "falling back to config file search",
+                target,
+            )
+            return await _extract_symbol_with_config_fallback(
+                repo_path, target.lstrip("/"), user_input, result
+            )
+        return result
 
     # Filename target: e.g. "main.py", "api/config.py", "worker.go"
     # Must be checked BEFORE the qualified-name splitter so that "main.py" is
@@ -1154,20 +1300,74 @@ async def extract_specific_symbol(
             # what was found and what was missing)
             if not parts_out:
                 parts_out = [r for r in (route_result, sym_result) if r]
-            return (
+            combined = (
                 "\n\n".join(parts_out)
                 if parts_out
                 else f"(tidak ditemukan: route `{api_path}` maupun simbol `{target}`)"
             )
+            # Fallback: if nothing found in source, search config files too
+            if _evidence_is_empty(combined):
+                logger.info(
+                    "extract_specific_symbol: dual-trace found nothing — "
+                    "falling back to config file search for %r",
+                    target,
+                )
+                return await _extract_symbol_with_config_fallback(
+                    repo_path, func_name, user_input, combined
+                )
+            return combined
 
-        return await _find_symbol_definition(
+        src_result = await _find_symbol_definition(
             repo_path, func_name, package_hint=package_hint
         )
+        if _evidence_is_empty(src_result):
+            logger.info(
+                "extract_specific_symbol: qualified symbol %r not found in source — "
+                "falling back to config file search",
+                target,
+            )
+            return await _extract_symbol_with_config_fallback(
+                repo_path, func_name, user_input, src_result
+            )
+        return src_result
 
-    return await _find_symbol_definition(repo_path, target)
+    src_result = await _find_symbol_definition(repo_path, target)
+    if _evidence_is_empty(src_result):
+        logger.info(
+            "extract_specific_symbol: symbol %r not found in source — "
+            "falling back to config file search",
+            target,
+        )
+        return await _extract_symbol_with_config_fallback(
+            repo_path, target, user_input, src_result
+        )
+    return src_result
 
 
-# ── API route tracing helpers ─────────────────────────────────────────────────
+async def _extract_symbol_with_config_fallback(
+    repo_path: Path,
+    target: str,
+    user_input: str,
+    source_result: str,
+) -> str:
+    """
+    When source-code extraction for *target* returns insufficient evidence,
+    fall back to searching configuration and data files (.json, .yaml, etc.).
+
+    The original *source_result* is prepended (if non-empty) so the LLM still
+    sees any partial source-code context alongside the config-file findings.
+    """
+    config_result = await _search_config_files_for_keyword(
+        repo_path, target, user_input
+    )
+    parts: list[str] = []
+    if source_result and not any(source_result.startswith(s) for s in _EMPTY_EVIDENCE_SIGNALS):
+        parts.append(source_result)
+    if config_result and not config_result.startswith("(tidak ditemukan"):
+        parts.append(config_result)
+    return "\n\n".join(parts) if parts else source_result
+
+
 
 _ROUTE_FILE_NAMES = {
     "routes.go", "router.go", "routing.go", "main.go",
@@ -1176,7 +1376,6 @@ _ROUTE_FILE_NAMES = {
     "api.php", "web.php", "routes.rb",
 }
 
-_SOURCE_EXTS_ALL = {".py", ".js", ".ts", ".go", ".java", ".rb", ".php", ".cs", ".rs"}
 
 
 def _build_path_search_terms(api_path: str) -> list[str]:

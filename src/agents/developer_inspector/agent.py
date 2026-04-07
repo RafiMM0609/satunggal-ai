@@ -74,7 +74,7 @@ MAX_INVESTIGATION_PHASES = 3
 _TRUNCATION_WARN_FRACTION = 0.20   # 20 %
 
 # Maximum files that the hypothesis LLM may request in phase 1.
-_MAX_SUSPECTED_FILES = 5
+_MAX_SUSPECTED_FILES = 8
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
@@ -297,6 +297,8 @@ class DeveloperInspectorAgent(RepoAgentBase):
             f"--include='*.go' --include='*.java' --include='*.rb' "
             f"--include='*.php' --include='*.cs' --include='*.rs' "
             f"--include='*.vue' --include='*.tsx' --include='*.jsx' "
+            f"--include='*.json' --include='*.yaml' --include='*.yml' "
+            f"--include='*.toml' --include='*.xml' --include='*.env' "
             f"-E '{pattern}' . 2>/dev/null | head -{MAX_GREP_LINES}",
             cwd=repo_path,
         )
