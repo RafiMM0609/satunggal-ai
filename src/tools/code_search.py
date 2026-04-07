@@ -19,7 +19,9 @@ Provides two main public functions:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import pickle
 import re
 from pathlib import Path
 from typing import Optional
@@ -30,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 # Minimum TF-IDF cosine similarity for a file to be considered relevant.
 MIN_SCORE = 0.05
+
+# Minimum semantic cosine similarity for a file to be in the "relevant" tier
+# when sentence-transformers are available.
+MIN_SEMANTIC_SCORE = 0.20
+
+# Disk cache directory for FAISS indexes (one per repo commit hash).
+_FAISS_CACHE_DIR = Path.home() / ".cache" / "satunggal" / "faiss"
 
 # Extensions processed per language.
 _PY_EXTS    = {".py"}
@@ -363,3 +372,159 @@ def rank_files_by_relevance(
         len(ranked), len(low_scoring), task[:60],
     )
     return ranked + low_scoring
+
+
+# ── Semantic ranking via sentence-transformers + FAISS (Item 4) ───────────────
+# This section is fully optional.  If sentence-transformers or faiss are not
+# installed the functions below return None / fall back to the TF-IDF ranker.
+
+
+def _get_repo_commit_hash(repo_path: Path) -> str:
+    """Return the current HEAD commit hash for cache-key purposes."""
+    try:
+        head_file = repo_path / ".git" / "HEAD"
+        ref = head_file.read_text().strip()
+        if ref.startswith("ref: "):
+            ref_path = repo_path / ".git" / ref[5:]
+            return ref_path.read_text().strip()
+        return ref  # detached HEAD – the hash is the content
+    except Exception:
+        return hashlib.md5(str(repo_path).encode()).hexdigest()
+
+
+def _semantic_cache_path(repo_path: Path) -> Path:
+    """Return the path to the FAISS index cache file for *repo_path*."""
+    commit_hash = _get_repo_commit_hash(repo_path)
+    repo_key    = hashlib.md5(str(repo_path.resolve()).encode()).hexdigest()[:8]
+    return _FAISS_CACHE_DIR / f"{repo_key}_{commit_hash[:12]}.pkl"
+
+
+def _build_semantic_index(
+    candidates: list[str],
+    symbol_index: dict[str, list[str]],
+    repo_path: Path,
+) -> object | None:
+    """
+    Build a FAISS flat-L2 index over sentence-transformer embeddings of each
+    candidate file's description (path tokens + extracted symbols).
+
+    Returns the FAISS index (or None if sentence-transformers / faiss are not
+    installed).  The result is pickled to *_FAISS_CACHE_DIR* so subsequent
+    calls for the same repo commit are instant.
+    """
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        import faiss                                            # type: ignore
+        import numpy as np                                      # type: ignore
+    except ImportError:
+        return None
+
+    cache_path = _semantic_cache_path(repo_path)
+    if cache_path.exists():
+        try:
+            with cache_path.open("rb") as fh:
+                cached = pickle.load(fh)
+            if cached.get("candidates") == candidates:
+                logger.debug("code_search: loaded FAISS index from cache %s", cache_path)
+                return cached["index"]
+        except Exception as exc:
+            logger.debug("code_search: FAISS cache load failed (%s); rebuilding", exc)
+
+    logger.info("code_search: building sentence-transformer FAISS index for %s", repo_path)
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    docs: list[str] = []
+    for path in candidates:
+        path_tokens = re.sub(r"[/._\-]", " ", path)
+        symbols     = " ".join(symbol_index.get(path, []))
+        docs.append(f"{path_tokens} {symbols}")
+
+    embeddings = model.encode(docs, convert_to_numpy=True, show_progress_bar=False)
+    embeddings = embeddings.astype("float32")
+    faiss.normalize_L2(embeddings)
+
+    index = faiss.IndexFlatIP(embeddings.shape[1])  # inner-product ≈ cosine after norm
+    index.add(embeddings)
+
+    _FAISS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with cache_path.open("wb") as fh:
+            pickle.dump({"candidates": candidates, "index": index, "model": "all-MiniLM-L6-v2"}, fh)
+        # Clean up stale caches for the same repo (different commit hashes).
+        repo_key = cache_path.stem.split("_")[0]
+        for old in _FAISS_CACHE_DIR.glob(f"{repo_key}_*.pkl"):
+            if old != cache_path:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+    except Exception as exc:
+        logger.debug("code_search: FAISS cache write failed (%s); continuing without cache", exc)
+
+    return index
+
+
+def rank_files_by_relevance_semantic(
+    candidates: list[str],
+    symbol_index: dict[str, list[str]],
+    task: str,
+    repo_path: Path,
+    *,
+    min_score: float = MIN_SEMANTIC_SCORE,
+) -> list[str] | None:
+    """
+    Rank *candidates* using sentence-transformer embeddings + FAISS ANN search.
+
+    Returns a re-ordered list (most semantically similar first) or **None** if
+    sentence-transformers / faiss are not installed, so the caller can fall back
+    to the TF-IDF ranker.
+
+    Benefits over TF-IDF:
+    - Captures synonyms: "error handler" ↔ "exception_handler", "on_failure"
+    - Understands intent: "cara handle error" finds files with `try/except`, `catch`
+    - Embeddings are cached per commit hash → rebuild only when code changes
+    """
+    if not candidates:
+        return candidates
+
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        import faiss                                            # type: ignore
+        import numpy as np                                      # type: ignore
+    except ImportError:
+        return None
+
+    index = _build_semantic_index(candidates, symbol_index, repo_path)
+    if index is None:
+        return None
+
+    try:
+        model      = SentenceTransformer("all-MiniLM-L6-v2")
+        task_emb   = model.encode([task], convert_to_numpy=True, show_progress_bar=False)
+        task_emb   = task_emb.astype("float32")
+        faiss.normalize_L2(task_emb)
+
+        k          = min(len(candidates), 50)
+        scores_arr, indices = index.search(task_emb, k)
+        scores_flat = scores_arr[0]
+        indices_flat = indices[0]
+
+        # Build sorted list: above threshold first, rest in original order.
+        above = [
+            candidates[i]
+            for s, i in sorted(zip(scores_flat, indices_flat), reverse=True)
+            if s >= min_score and 0 <= i < len(candidates)
+        ]
+        above_set = set(above)
+        below     = [c for c in candidates if c not in above_set]
+
+        logger.info(
+            "code_search: semantic ranked %d relevant / %d below-threshold for task %r",
+            len(above), len(below), task[:60],
+        )
+        return above + below
+
+    except Exception as exc:
+        logger.warning("code_search: semantic ranking search failed (%s); falling back", exc)
+        return None
+

@@ -19,6 +19,7 @@ Subclass HARUS mengimplementasikan `run(task)`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -58,10 +59,46 @@ _SKIP_DIRS = {
     "env", "dist", "build", ".next", ".nuxt", "coverage",
 }
 
+# ── Context compression constants ─────────────────────────────────────────────
+# A section whose text exceeds this length gets compressed via LLM before
+# the sections are assembled into a single evidence string.
+EVIDENCE_COMPRESS_THRESHOLD = 3_000   # chars; sections shorter than this skip compression
+EVIDENCE_COMPRESS_MAX_TOKENS = 512    # max tokens for the compression LLM response
+
+# Rolling-summary threshold: once history for a session reaches this many
+# messages, create a compressed summary and use it instead of raw history.
+HISTORY_SUMMARY_THRESHOLD = 10   # messages
+# Minimum new messages since last summary before regenerating the summary.
+HISTORY_SUMMARY_REGEN_DELTA = 4
+
 # ── Session repo context ──────────────────────────────────────────────────────
 # Stores the last successfully-used {repo_url, branch} per session_id,
 # so follow-up questions can inherit context without re-stating the repo/branch.
 _REPO_SESSION_CONTEXT: dict[str, dict] = {}
+
+# ── LLM prompt: conversation rolling summary ──────────────────────────────────
+_SUMMARY_SYSTEM_PROMPT = """\
+Kamu adalah ringkaser percakapan teknis. Ringkas percakapan berikut menjadi
+3-5 poin konteks kunci yang relevan untuk pertanyaan lanjutan, mencakup:
+- URL repositori dan branch yang sedang dibahas
+- Masalah atau pertanyaan utama yang sedang diselidiki
+- Temuan penting yang sudah dikonfirmasi (file, baris, fungsi kunci)
+- Status terakhir: apa yang sudah dijawab dan apa yang belum
+
+Balas HANYA dalam bentuk bullet points yang singkat dan padat.
+"""
+
+# ── LLM prompt: evidence section compression ──────────────────────────────────
+_COMPRESS_SYSTEM_PROMPT = """\
+Kamu adalah ringkaser teknis untuk evidence kode. Ringkas teks berikut menjadi
+poin-poin kunci yang padat. WAJIB pertahankan semua detail berikut jika ada:
+- Nama file dan nomor baris (mis. src/auth.py:42)
+- Nama fungsi, class, dan method
+- Nilai konstanta, environment variable, dan konfigurasi penting
+- Pesan error/exception spesifik
+- Route HTTP, endpoint URL, dan method (GET/POST/PUT/DELETE)
+Balas dengan poin-poin bullet yang informatif. Jangan tambahkan penjelasan meta.
+"""
 
 # ── Shared LLM extraction prompt ──────────────────────────────────────────────
 
@@ -251,13 +288,21 @@ class RepoAgentBase(BaseAgent):
 
     async def _read_relevant_files(self, repo_path: Path, problem: str) -> str:
         """
-        RAG step: index the repo with AST/TF-IDF ranking and read the top-N
-        source files most relevant to the reported problem/question.
+        RAG step: index the repo with AST + semantic (if available) or TF-IDF
+        ranking and read the top-N source files most relevant to *problem*.
+
+        Ranking priority:
+          1. Semantic (sentence-transformers + FAISS) – if installed.
+          2. TF-IDF cosine similarity (scikit-learn) – always available.
 
         Falls back gracefully if code_search dependencies are not available.
         """
         try:
-            from src.tools.code_search import build_ast_index, rank_files_by_relevance
+            from src.tools.code_search import (
+                build_ast_index,
+                rank_files_by_relevance,
+                rank_files_by_relevance_semantic,
+            )
         except ImportError:
             logger.warning("%s: code_search not available; skipping RAG step", self.name)
             return "(code_search unavailable)"
@@ -274,7 +319,16 @@ class RepoAgentBase(BaseAgent):
             if not candidates:
                 return "(no indexable source files found)"
 
-            ranked  = rank_files_by_relevance(candidates, symbol_index, problem)
+            # Try semantic ranking first (Item 4); fall back to TF-IDF.
+            ranked = rank_files_by_relevance_semantic(
+                candidates, symbol_index, problem, repo_path
+            )
+            if ranked is None:
+                ranked = rank_files_by_relevance(candidates, symbol_index, problem)
+                logger.debug("%s: using TF-IDF ranking (semantic unavailable)", self.name)
+            else:
+                logger.debug("%s: using semantic ranking (sentence-transformers)", self.name)
+
             top_n   = ranked[:MAX_RELEVANT_FILES]
             elapsed = time.monotonic() - t0
             logger.info(
@@ -425,28 +479,48 @@ class RepoAgentBase(BaseAgent):
         Call LLM to parse repo_url, problem, keywords, and branch from user input.
 
         When session_id is provided:
-          - Includes recent conversation history in the prompt so the LLM can
-            pick up repo URL / branch from prior turns.
+          - For short sessions (< HISTORY_SUMMARY_THRESHOLD messages): includes the
+            last 6 messages verbatim.
+          - For long sessions: uses a compressed rolling summary + the 3 most recent
+            messages, preventing context drift and reducing token waste.
           - Falls back to the last saved session context when the LLM returns
             empty repo_url or branch (common in follow-up questions).
 
         Falls back to a minimal request if JSON parsing fails.
         """
-        # Build optional history section for the prompt
+        # Build optional history section for the prompt.
+        # For long sessions, use rolling summary + last 3 messages (Item 3).
         history_section = ""
         if session_id and self._history:
             recent_messages = self._history.get_as_llm_messages(session_id)
-            # Include up to last 6 messages (3 user+assistant pairs) for context
-            history_turns = recent_messages[-6:] if len(recent_messages) > 1 else []
-            if history_turns:
-                history_lines = "\n".join(
-                    f"[{m['role']}]: {m['content'][:600]}"
-                    for m in history_turns
-                )
-                history_section = (
-                    f"Percakapan sebelumnya (untuk konteks):\n"
-                    f"{history_lines}\n\n"
-                )
+            if len(recent_messages) > 1:
+                if len(recent_messages) >= HISTORY_SUMMARY_THRESHOLD:
+                    # Long session: compressed summary + last 3 verbatim turns.
+                    conv_summary = await self._get_conversation_summary(session_id)
+                    last_turns   = recent_messages[-3:]
+                    last_lines   = "\n".join(
+                        f"[{m['role']}]: {m['content'][:600]}" for m in last_turns
+                    )
+                    if conv_summary:
+                        history_section = (
+                            f"Ringkasan percakapan sebelumnya:\n{conv_summary}\n\n"
+                            f"Pesan terbaru:\n{last_lines}\n\n"
+                        )
+                    else:
+                        history_section = (
+                            f"Percakapan sebelumnya (untuk konteks):\n{last_lines}\n\n"
+                        )
+                else:
+                    # Short session: keep last 6 messages verbatim.
+                    history_turns = recent_messages[-6:]
+                    history_lines = "\n".join(
+                        f"[{m['role']}]: {m['content'][:600]}"
+                        for m in history_turns
+                    )
+                    history_section = (
+                        f"Percakapan sebelumnya (untuk konteks):\n"
+                        f"{history_lines}\n\n"
+                    )
 
         prompt   = _EXTRACT_PROMPT.format(
             user_input=user_input,
@@ -518,3 +592,197 @@ class RepoAgentBase(BaseAgent):
             for title, content in evidence.items()
             if content.strip()
         )
+
+    # ── Hierarchical evidence compression (Item 1) ─────────────────────────────
+
+    async def _compress_evidence_section(
+        self,
+        title: str,
+        content: str,
+        *,
+        threshold: int = EVIDENCE_COMPRESS_THRESHOLD,
+        max_tokens: int = EVIDENCE_COMPRESS_MAX_TOKENS,
+    ) -> str:
+        """
+        Compress a single evidence section via LLM if it exceeds *threshold* chars.
+
+        Preserves critical technical details (file:line references, function names,
+        error messages) while reducing token count. Falls back to a hard truncation
+        if the LLM call fails.
+        """
+        if len(content) <= threshold:
+            return content
+
+        # Cap input to avoid sending huge prompts to the compression LLM
+        input_text = content[:6_000]
+        prompt = (
+            f"Ringkas bagian evidence berikut. Pertahankan semua referensi file:baris, "
+            f"nama fungsi/class, pesan error, dan route HTTP.\n\n"
+            f"=== {title} ===\n{input_text}"
+        )
+        try:
+            compressed = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _COMPRESS_SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
+                ],
+                temperature=0.05,
+                top_p=0.90,
+                max_tokens=max_tokens,
+            )
+            if compressed.strip():
+                logger.debug(
+                    "%s: compressed evidence '%s': %d → %d chars",
+                    self.name, title, len(content), len(compressed),
+                )
+                return f"[RINGKASAN]\n{compressed.strip()}"
+        except Exception as exc:
+            logger.warning(
+                "%s: evidence compression failed for '%s': %s", self.name, title, exc
+            )
+
+        # Fallback: hard truncation with notice
+        return content[:threshold] + f"\n... [dipotong pada {threshold} karakter]"
+
+    async def _compress_evidence_dict(
+        self,
+        evidence: dict[str, str],
+        *,
+        threshold: int = EVIDENCE_COMPRESS_THRESHOLD,
+    ) -> dict[str, str]:
+        """
+        Compress all large sections in *evidence* concurrently.
+
+        Sections shorter than *threshold* chars are returned unchanged.
+        This ensures every section is represented in the final evidence
+        even when the total would exceed the LLM's context window.
+        """
+        keys = list(evidence.keys())
+        results = await asyncio.gather(
+            *[
+                self._compress_evidence_section(k, evidence[k], threshold=threshold)
+                for k in keys
+            ],
+            return_exceptions=True,
+        )
+        compressed: dict[str, str] = {}
+        for k, r in zip(keys, results):
+            if isinstance(r, Exception):
+                logger.warning(
+                    "%s: compression gather error for '%s': %s", self.name, k, r
+                )
+                compressed[k] = evidence[k]
+            else:
+                compressed[k] = str(r)
+        return compressed
+
+    # ── RAG: individual file list (for Map-Reduce, Item 2) ────────────────────
+
+    async def _read_relevant_files_list(
+        self,
+        repo_path: Path,
+        problem: str,
+    ) -> list[tuple[str, str]]:
+        """
+        Like `_read_relevant_files()` but returns individual (rel_path, content)
+        tuples instead of a single concatenated string.
+
+        Used by the Map-Reduce flow in DeveloperQnAAgent.
+        Falls back to an empty list if code_search is unavailable.
+        """
+        try:
+            from src.tools.code_search import build_ast_index, rank_files_by_relevance
+        except ImportError:
+            logger.warning("%s: code_search not available; skipping RAG file list", self.name)
+            return []
+
+        if not problem:
+            return []
+
+        try:
+            symbol_index = build_ast_index(repo_path)
+            candidates   = list(symbol_index.keys())
+            if not candidates:
+                return []
+
+            ranked = rank_files_by_relevance(candidates, symbol_index, problem)
+            top_n  = ranked[:MAX_RELEVANT_FILES]
+
+            file_list: list[tuple[str, str]] = []
+            for rel_path in top_n:
+                abs_path = repo_path / rel_path
+                try:
+                    text = abs_path.read_text(errors="replace")[:MAX_FILE_BYTES]
+                    file_list.append((rel_path, text))
+                except OSError as exc:
+                    logger.debug(
+                        "%s: could not read %s: %s", self.name, rel_path, exc
+                    )
+            return file_list
+
+        except Exception as exc:
+            logger.warning("%s: RAG file list step failed: %s", self.name, exc)
+            return []
+
+    # ── Rolling conversation summary (Item 3) ──────────────────────────────────
+
+    async def _get_conversation_summary(self, session_id: str) -> str:
+        """
+        Return a compressed summary of the conversation history for *session_id*.
+
+        Behaviour:
+        - If history has fewer than HISTORY_SUMMARY_THRESHOLD messages, return
+          the cached summary (or empty string if none exists yet).
+        - When history is long enough, create a new summary via LLM and cache it
+          in the session context.  The summary is regenerated only when at least
+          HISTORY_SUMMARY_REGEN_DELTA new messages have appeared since the last
+          summary, to avoid unnecessary LLM calls.
+        """
+        ctx = self._get_session_context(session_id)
+        existing_summary: str = ctx.get("conversation_summary", "")
+
+        if not self._history:
+            return existing_summary
+
+        messages = self._history.get_as_llm_messages(session_id)
+        if len(messages) < HISTORY_SUMMARY_THRESHOLD:
+            return existing_summary
+
+        # Avoid regenerating if the message count hasn't grown enough.
+        last_count: int = ctx.get("summary_message_count", 0)
+        if existing_summary and len(messages) - last_count < HISTORY_SUMMARY_REGEN_DELTA:
+            return existing_summary
+
+        # Summarise all messages except the most recent few (kept verbatim).
+        older_messages = messages[:-3]
+        history_text   = "\n".join(
+            f"[{m['role']}]: {m['content'][:800]}"
+            for m in older_messages
+        )
+
+        try:
+            summary = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
+                    {"role": "user",   "content": f"Percakapan:\n\n{history_text}"},
+                ],
+                temperature=0.05,
+                top_p=0.90,
+                max_tokens=256,
+            )
+            if summary.strip():
+                ctx_mut = _REPO_SESSION_CONTEXT.setdefault(session_id, {})
+                ctx_mut["conversation_summary"]  = summary.strip()
+                ctx_mut["summary_message_count"] = len(messages)
+                logger.info(
+                    "%s: created conversation summary for session %s (%d msgs → %d chars)",
+                    self.name, session_id, len(messages), len(summary),
+                )
+                return summary.strip()
+        except Exception as exc:
+            logger.warning(
+                "%s: conversation summary LLM call failed: %s", self.name, exc
+            )
+
+        return existing_summary
+

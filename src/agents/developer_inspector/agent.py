@@ -35,6 +35,7 @@ gunakan DeveloperQnAAgent (intent: code_understanding).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -63,6 +64,17 @@ MAX_GREP_LINES = 80
 # Keeps the total prompt within a safe context window (~60 k tokens ≈ 240 k chars,
 # but we cap conservatively to leave room for the system prompt and the response).
 MAX_EVIDENCE_CHARS = 60_000
+
+# ── Progressive Deepening constants (Items 5, 6) ──────────────────────────────
+# Maximum LLM calls for a single inspection (token budget).
+MAX_LLM_CALLS = 3
+
+# If evidence is truncated by more than this fraction, add the "Data Not Enough"
+# instruction so the LLM can explicitly flag what's missing (Item 7).
+_TRUNCATION_WARN_FRACTION = 0.20   # 20 %
+
+# Maximum files that the hypothesis LLM may request in phase 1.
+_MAX_SUSPECTED_FILES = 5
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
@@ -185,8 +197,33 @@ Verifikasi setiap temuan dalam laporan terhadap evidence di atas. \
 Perbarui status [CONFIRMED/LIKELY/UNVERIFIED] dan tambahkan/perbaiki kutipan bukti.
 """
 
-# ── Q/A mode LLM prompt ───────────────────────────────────────────────────────
+# ── Progressive Deepening: phase-1 hypothesis prompt (Item 5) ─────────────────
 
+_HYPOTHESIS_SYSTEM_PROMPT = """\
+Kamu adalah inspektor kode yang melakukan investigasi bertahap.
+Berdasarkan data awal berikut (directory tree + git log + grep), berikan:
+1. Hipotesis awal singkat tentang penyebab masalah (1-2 kalimat).
+2. Daftar file yang perlu dibuka untuk mengkonfirmasi atau membantah hipotesis.
+3. Keyword tambahan untuk grep lanjutan jika dibutuhkan.
+
+Balas HANYA dengan JSON valid (tidak ada teks lain):
+{
+  "hypothesis": "<hipotesis dalam 1-2 kalimat>",
+  "suspected_files": ["<repo/relative/path/file1.py>", "<path/file2.go>"],
+  "additional_keywords": ["<keyword>"]
+}
+
+Maksimal %d file dalam suspected_files. Jika data sudah cukup, gunakan daftar kosong [].
+""" % _MAX_SUSPECTED_FILES
+
+# Regex to detect the "Data Not Enough" signal emitted by the LLM (Item 7).
+_DATA_NEEDED_RE = re.compile(
+    r"\[(?:DATA TIDAK CUKUP|PERLU DATA TAMBAHAN)[^\]]*\]"
+    r"|PERLU VERIFIKASI TAMBAHAN\s*[:\-]?\s*([\w/\.]+)",
+    re.IGNORECASE,
+)
+
+# Q/A mode LLM prompt
 # (Q/A prompt has moved to DeveloperQnAAgent – src/agents/developer_qna/agent.py)
 
 # ── Branch confirmation state ─────────────────────────────────────────────────
@@ -316,23 +353,46 @@ class DeveloperInspectorAgent(RepoAgentBase):
         evidence:   dict[str, str],
     ) -> str:
         """
-        Phase 1 – Generate initial report.
-        Phase 2 – Critic pass: verify every finding against raw evidence.
-        """
-        evidence_text = self._build_evidence_text(evidence)
+        Generate an inspection report via two LLM passes:
+          Phase 1 – Initial report from compressed evidence.
+          Phase 2 – Critic pass: verify every finding against raw evidence.
 
+        Before assembling the evidence string, large sections are compressed via
+        LLM so that every section is represented rather than simply chopped off
+        (Item 1: Hierarchical Summarization).
+
+        When evidence is still too large after compression, a "Data Not Enough"
+        instruction is injected so the LLM explicitly flags missing information
+        instead of hallucinating (Item 7).
+        """
+        # ── Step 1: Compress oversized sections (Item 1) ──────────────────
+        compressed_evidence = await self._compress_evidence_dict(evidence)
+        evidence_text = self._build_evidence_text(compressed_evidence)
+
+        original_len = sum(len(v) for v in evidence.values())
+        logger.debug(
+            "Inspector: evidence compressed %d → %d chars (%d sections)",
+            original_len, len(evidence_text), len(evidence),
+        )
+
+        # ── Step 2: Hard-truncate if still too large ──────────────────────
         _TRUNCATION_NOTICE = (
             f"\n\n... [evidence truncated at {MAX_EVIDENCE_CHARS} characters due to LLM context limit]"
         )
+        truncated = False
         if len(evidence_text) > MAX_EVIDENCE_CHARS:
+            truncation_amount = len(evidence_text) - MAX_EVIDENCE_CHARS
+            truncation_fraction = truncation_amount / len(evidence_text)
             logger.warning(
-                "Inspector: evidence text too large (%d chars), truncating to %d chars",
-                len(evidence_text), MAX_EVIDENCE_CHARS,
+                "Inspector: evidence still too large after compression (%d chars), "
+                "truncating to %d chars (%.0f%% lost)",
+                len(evidence_text), MAX_EVIDENCE_CHARS, truncation_fraction * 100,
             )
             evidence_text = (
                 evidence_text[:MAX_EVIDENCE_CHARS - len(_TRUNCATION_NOTICE)]
                 + _TRUNCATION_NOTICE
             )
+            truncated = truncation_fraction > _TRUNCATION_WARN_FRACTION
 
         for title, content in evidence.items():
             logger.debug("Inspector evidence '%s': %d chars", title, len(content))
@@ -341,9 +401,22 @@ class DeveloperInspectorAgent(RepoAgentBase):
             len(evidence), len(evidence_text),
         )
 
+        # ── Step 3: Add "Data Not Enough" instruction if evidence was truncated ─
+        # (Item 7): Guide the LLM to explicitly signal missing information.
+        data_needed_instruction = ""
+        if truncated:
+            data_needed_instruction = (
+                "\n\n**⚠️ PERHATIAN: Evidence mungkin tidak lengkap akibat pemotongan.**\n"
+                "Jika ada temuan yang tidak dapat dikonfirmasi karena data kurang:\n"
+                "1. Tandai dengan 🔴 **[DATA TIDAK CUKUP]**\n"
+                "2. Sebutkan secara eksplisit file atau informasi apa yang masih dibutuhkan\n"
+                "   dengan format: `[PERLU DATA TAMBAHAN: path/ke/file.py]`\n"
+            )
+
         user_msg = (
             f"**Permintaan inspeksi:**\n{user_input}\n\n"
-            f"**Masalah yang dilaporkan:**\n{problem}\n\n"
+            f"**Masalah yang dilaporkan:**\n{problem}"
+            f"{data_needed_instruction}\n\n"
             f"---\n\n"
             f"**Hasil pengumpulan data dari repositori:**\n\n{evidence_text}"
         )
@@ -365,6 +438,215 @@ class DeveloperInspectorAgent(RepoAgentBase):
         verified_report = await self._verify_report(initial_report.strip(), evidence_text)
         return verified_report
 
+    # ── Progressive Deepening helpers (Items 5, 6, 7) ─────────────────────────
+
+    async def _get_investigation_hypothesis(
+        self,
+        problem: str,
+        phase1_evidence: dict[str, str],
+    ) -> dict:
+        """
+        Phase-1 LLM call: given lightweight evidence (dir_tree + git_log + grep),
+        produce a JSON hypothesis with suspected files + additional keywords.
+
+        Returns a dict with keys "hypothesis", "suspected_files",
+        "additional_keywords" — or a default dict on failure.
+        """
+        evidence_text = self._build_evidence_text(phase1_evidence)
+        # Cap phase-1 evidence to keep the hypothesis call cheap.
+        _PHASE1_CAP = 8_000
+        if len(evidence_text) > _PHASE1_CAP:
+            evidence_text = evidence_text[:_PHASE1_CAP] + "\n... [dipotong]"
+
+        try:
+            response = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": _HYPOTHESIS_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"**Masalah:** {problem}\n\n"
+                            f"**Data awal:**\n\n{evidence_text}"
+                        ),
+                    },
+                ],
+                temperature=0.10,
+                top_p=0.90,
+                max_tokens=256,
+            )
+            raw = response.strip()
+            # Strip optional markdown fences.
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+            raw = re.sub(r"```\s*$",           "", raw, flags=re.MULTILINE)
+            data = json.loads(raw)
+            # Sanitise types.
+            data.setdefault("hypothesis", "")
+            data.setdefault("suspected_files", [])
+            data.setdefault("additional_keywords", [])
+            if not isinstance(data["suspected_files"], list):
+                data["suspected_files"] = []
+            if not isinstance(data["additional_keywords"], list):
+                data["additional_keywords"] = []
+            # Cap to maximum allowed files.
+            data["suspected_files"] = data["suspected_files"][:_MAX_SUSPECTED_FILES]
+            logger.info(
+                "Inspector: hypothesis='%s'; suspected_files=%s; extra_keywords=%s",
+                data["hypothesis"][:100],
+                data["suspected_files"],
+                data["additional_keywords"],
+            )
+            return data
+        except Exception as exc:
+            logger.warning("Inspector: hypothesis LLM call failed (%s); skipping phase 1", exc)
+            return {"hypothesis": "", "suspected_files": [], "additional_keywords": []}
+
+    async def _read_suspected_files(
+        self,
+        repo_path: Path,
+        suspected_files: list[str],
+    ) -> str:
+        """
+        Read the files requested by the hypothesis LLM, returning a formatted
+        evidence string.  Gracefully skips files that do not exist or are
+        unreadable.
+        """
+        from src.agents.repo_agent_base import MAX_FILE_BYTES
+        snippets: list[str] = []
+        for rel_path in suspected_files:
+            abs_path = repo_path / rel_path
+            if not abs_path.exists() or not abs_path.is_file():
+                logger.debug("Inspector: suspected file not found: %s", rel_path)
+                continue
+            try:
+                text = abs_path.read_text(errors="replace")[:MAX_FILE_BYTES]
+                snippets.append(
+                    f"### 📄 {rel_path} (suspected by hypothesis)\n```\n{text}\n```"
+                )
+            except OSError as exc:
+                logger.debug("Inspector: could not read suspected file %s: %s", rel_path, exc)
+        return "\n\n".join(snippets) if snippets else "(nenhum dos arquivos suspeitos encontrado)"
+
+    async def _grep_additional_keywords(
+        self,
+        repo_path: Path,
+        keywords: list[str],
+    ) -> str:
+        """Run an extra grep pass for *keywords* suggested by the hypothesis LLM."""
+        if not keywords:
+            return ""
+        return await self._grep_keywords(repo_path, keywords[:5])
+
+    async def _progressive_inspection(
+        self,
+        user_input:  str,
+        problem:     str,
+        repo_path:   Path,
+        keywords:    list[str],
+    ) -> str:
+        """
+        Iterative investigation with a token budget (Items 5, 6, 7).
+
+        Strategy:
+          Iteration 1 (phase 1) — lightweight evidence:
+            dir_tree + git_log + grep_keywords → LLM hypothesis
+          Iteration 2 (phase 2) — targeted evidence:
+            phase-1 evidence + suspected files + refined grep + full evidence
+          Iteration 3 (optional) — if report still contains [DATA TIDAK CUKUP]:
+            read additional files mentioned by the LLM → produce final report
+
+        The loop stops when:
+          a) LLM report has no [DATA TIDAK CUKUP] signals, or
+          b) MAX_LLM_CALLS is reached, or
+          c) No new files are identified.
+        """
+        llm_calls_used = 0
+
+        # ── Iteration 1: Lightweight evidence → hypothesis ─────────────────
+        dir_tree, git_log, grep_result, grep_errors = await asyncio.gather(
+            self._get_dir_tree(repo_path),
+            self._get_git_log(repo_path),
+            self._grep_keywords(repo_path, keywords),
+            self._grep_error_patterns(repo_path),
+            return_exceptions=True,
+        )
+
+        def _safe(r: object, fallback: str) -> str:
+            return str(r) if not isinstance(r, Exception) else fallback
+
+        phase1_evidence: dict[str, str] = {
+            "Struktur Direktori":   _safe(dir_tree,     "(no dir tree)"),
+            "Git Log (terbaru)":    _safe(git_log,      "(no git log)"),
+            "Grep Keyword Masalah": _safe(grep_result,  "(no grep result)"),
+            "Grep Pola Error Umum": _safe(grep_errors,  "(no error patterns)"),
+        }
+
+        hypothesis_data = await self._get_investigation_hypothesis(problem, phase1_evidence)
+        llm_calls_used += 1
+
+        # ── Iteration 2: Full evidence + suspected files ───────────────────
+        git_diff, key_files, error_logs, relevant_files = await asyncio.gather(
+            self._get_git_diff(repo_path),
+            self._read_key_files(repo_path),
+            self._find_error_logs(repo_path),
+            self._read_relevant_files(repo_path, problem),
+            return_exceptions=True,
+        )
+
+        suspected_files_text    = await self._read_suspected_files(
+            repo_path, hypothesis_data["suspected_files"]
+        )
+        extra_grep_text = await self._grep_additional_keywords(
+            repo_path, hypothesis_data["additional_keywords"]
+        )
+
+        evidence: dict[str, str] = {
+            **phase1_evidence,
+            "Git Diff (terakhir)":          _safe(git_diff,        "(no diff)"),
+            "File Kunci":                   _safe(key_files,       "(no key files)"),
+            "Log & Error Files":            _safe(error_logs,      "(no log files)"),
+            "File Relevan (RAG/TF-IDF)":    _safe(relevant_files,  "(no RAG results)"),
+        }
+        if suspected_files_text.strip():
+            evidence["File Dicurigai (Hypothesis)"] = suspected_files_text
+        if extra_grep_text.strip():
+            evidence["Grep Tambahan (Hypothesis)"] = extra_grep_text
+        if hypothesis_data["hypothesis"]:
+            evidence["Hipotesis Awal"] = hypothesis_data["hypothesis"]
+
+        report = await self._run_inspection_llm(user_input, problem, evidence)
+        llm_calls_used += 1  # _run_inspection_llm does 2 LLM calls internally
+
+        # ── Iteration 3: Handle [DATA TIDAK CUKUP] signal (Item 7) ────────
+        if llm_calls_used < MAX_LLM_CALLS and _DATA_NEEDED_RE.search(report):
+            logger.info(
+                "Inspector: [DATA TIDAK CUKUP] detected in report — running iteration 3"
+            )
+            # Extract file paths mentioned after the signal.
+            extra_paths: list[str] = re.findall(
+                r"\[PERLU DATA TAMBAHAN:\s*([^\]]+)\]",
+                report,
+                re.IGNORECASE,
+            )
+            extra_paths = [p.strip() for p in extra_paths if p.strip()][:_MAX_SUSPECTED_FILES]
+
+            if extra_paths:
+                extra_files_text = await self._read_suspected_files(repo_path, extra_paths)
+                if extra_files_text.strip():
+                    evidence["File Tambahan (Iterasi 3)"] = extra_files_text
+                    logger.info(
+                        "Inspector: iteration 3 — added %d extra file(s): %s",
+                        len(extra_paths), extra_paths,
+                    )
+                    # Run a final targeted LLM pass with the augmented evidence.
+                    report = await self._run_inspection_llm(user_input, problem, evidence)
+                    llm_calls_used += 1
+
+        logger.info(
+            "Inspector: progressive inspection complete — %d LLM call(s) used (max=%d)",
+            llm_calls_used, MAX_LLM_CALLS,
+        )
+        return report
+
     # ── Inspection task ────────────────────────────────────────────────────────
 
     async def _run_inspection_task(
@@ -374,60 +656,36 @@ class DeveloperInspectorAgent(RepoAgentBase):
         req:       RepoExtractionRequest,
     ) -> AgentTask:
         """
-        Execute the full inspection after branch has been confirmed and checked out.
+        Execute the full inspection using Progressive Deepening (Items 5, 6, 7).
+
+        Replaces the single-shot evidence-gather approach with an iterative
+        investigation that:
+          1. Forms a hypothesis from lightweight evidence (dir_tree + git_log).
+          2. Opens only the files the hypothesis identifies as suspicious.
+          3. Re-runs if the LLM signals [DATA TIDAK CUKUP] (Item 7).
+          4. Enforces a MAX_LLM_CALLS budget (Item 6).
         """
         try:
             logger.info(
-                "Inspector: inspecting repo at %s (branch=%s)",
+                "Inspector: starting progressive inspection at %s (branch=%s)",
                 repo_path, req.branch,
             )
             t_start = time.monotonic()
 
-            (
-                dir_tree,
-                git_log,
-                git_diff,
-                grep_result,
-                grep_errors,
-                key_files,
-                error_logs,
-                relevant_files,
-            ) = await _gather_evidence(self, repo_path, req.keywords, req.problem)
-
-            t_gather = time.monotonic()
-            logger.info("Inspector: evidence gathered in %.2fs", t_gather - t_start)
-
-            evidence = {
-                "Struktur Direktori":           dir_tree,
-                "Git Log (terbaru)":            git_log,
-                "Git Diff (terakhir)":          git_diff,
-                "Grep Keyword Masalah":         grep_result,
-                "Grep Pola Error Umum":         grep_errors,
-                "File Kunci":                   key_files,
-                "Log & Error Files":            error_logs,
-                "File Relevan (RAG/TF-IDF)":    relevant_files,
-            }
-
-            report = await self._run_inspection_llm(
-                req.problem or task.user_input,
-                req.problem or task.user_input,
-                evidence,
+            report = await self._progressive_inspection(
+                user_input=req.problem or task.user_input,
+                problem=req.problem or task.user_input,
+                repo_path=repo_path,
+                keywords=req.keywords,
             )
 
             t_total = time.monotonic() - t_start
-            logger.info(
-                "Inspector: inspection complete in %.2fs total "
-                "(gather=%.2fs, llm=%.2fs)",
-                t_total,
-                t_gather - t_start,
-                t_total - (t_gather - t_start),
-            )
+            logger.info("Inspector: progressive inspection complete in %.2fs", t_total)
 
             branch_header = f"🌿 **Branch:** `{req.branch}`\n\n" if req.branch else ""
             perf_footer = (
                 f"\n\n---\n"
-                f"⏱️ *Inspeksi selesai dalam {t_total:.1f}s "
-                f"(pengumpulan data: {t_gather - t_start:.1f}s)*"
+                f"⏱️ *Inspeksi selesai dalam {t_total:.1f}s (progressive deepening, max {MAX_LLM_CALLS} iterasi)*"
             )
             task.mark_done(branch_header + report + perf_footer)
 
