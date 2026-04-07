@@ -524,7 +524,7 @@ class DeveloperInspectorAgent(RepoAgentBase):
                 )
             except OSError as exc:
                 logger.debug("Inspector: could not read suspected file %s: %s", rel_path, exc)
-        return "\n\n".join(snippets) if snippets else "(nenhum dos arquivos suspeitos encontrado)"
+        return "\n\n".join(snippets) if snippets else "(tidak ada file yang dicurigai berhasil dibaca)"
 
     async def _grep_additional_keywords(
         self,
