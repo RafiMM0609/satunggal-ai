@@ -200,7 +200,7 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             # "jelaskan pengolahan request yang ada pada ./src/..."
             r"(?:pada|di|dalam|in|at)\s+\.?/[a-zA-Z]",
             r"yang\s+ada\s+(?:pada|di|dalam)\s+\.?/[a-zA-Z]",
-            r"(?:jelaskan|jelasin|jabarkan|explain|describe|coba\s+\w*\s*jelas\w*)\s+.{0,60}\.?/[a-zA-Z]",
+            r"(?:jelaskan|jelasin|jabarkan|explain|describe|coba\s+(?:dong|deh|lah|yuk|sih|ya)?\s*jelas\w*)\s+[^./\n]{0,60}\.?/[a-zA-Z]",
             # ── File content requests ─────────────────────────────────────────
             # "jelaskan isi file main.py", "tampilkan config.yaml", "lihat router.go"
             r"(?:jelaskan|jelasin|jabarkan|explain|describe|tampilkan|tunjukkan|berikan"
@@ -312,10 +312,11 @@ def classify_intent(user_input: str) -> QAIntent:
     # ORIGINAL (non-lowercased) input — catches identifiers like HandleDownload,
     # get_user_data that can't be detected in lowercase text reliably.
     # Also handles informal Indonesian "jelasin", "tolong jelasin", "coba jelasin",
-    # and "coba dong jelasin" (with an interceding particle word like "dong").
+    # and "coba dong jelasin" (with a known particle word like "dong/deh/lah").
     if re.search(
         r"(?:jelaskan|jelasin|jabarkan|explain|describe|cari|apa.itu|tentang"
-        r"|coba\s+(?:\w+\s+)?jelas\w*|tolong\s+(?:\w+\s+)?jelas\w*)\s+"
+        r"|coba\s+(?:dong|deh|lah|yuk|sih|ya)?\s*jelas\w*"
+        r"|tolong\s+(?:dong|deh|lah|ya)?\s*jelas\w*)\s+"
         r"(?:[A-Z][a-zA-Z0-9]{2,}|[a-z][a-z0-9]+(?:_[a-z0-9]+)+)\b",
         user_input,  # original case
     ):
@@ -346,7 +347,9 @@ def extract_specific_target(user_input: str) -> str:
     # and imperative/existence verbs.
     _TRIGGER = (
         r"(?:jelaskan|jelasin|jabarkan|explain|apa.itu|what.is|describe"
-        r"|tentang|cari|coba\s+(?:\w+\s+)?jelas\w*|tolong\s+(?:\w+\s+)?jelas\w*"
+        r"|tentang|cari"
+        r"|coba\s+(?:dong|deh|lah|yuk|sih|ya)?\s*jelas\w*"
+        r"|tolong\s+(?:dong|deh|lah|ya)?\s*jelas\w*"
         r"|adakah|apakah.ada|ada.tidak"
         r"|berikan|tampilkan|tunjukkan|kasih|lihat.isi|apa.isi)"
     )
