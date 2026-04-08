@@ -851,11 +851,13 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler /status — tampilkan mode aktif saat ini."""
+    """Handler /status — tampilkan mode aktif saat ini beserta daftar agent yang tersedia."""
     import asyncio
+    import telegramify_markdown
+    from telegram.constants import ParseMode
     from src.memory.user_mode_store import get_user_mode_store
-    from src.orchestrator.router import MODE_MAP
     from src.handlers.message import _chat_session_id
+    from src.orchestrator.main_loop import _format_mode_status
 
     user = update.effective_user
     chat = update.effective_chat
@@ -863,19 +865,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     store = get_user_mode_store()
     current_mode = await asyncio.to_thread(store.get_mode, session_id)
 
-    mode_cfg = MODE_MAP.get(current_mode, MODE_MAP["all"])
-    mode_label = mode_cfg["label"]
-    allowed_agents = mode_cfg.get("allowed_agents")
-
-    if allowed_agents is None:
-        scope_text = "Semua agent aktif (full-orchestrator)."
-    else:
-        scope_text = "Agent aktif: " + ", ".join(f"<code>{a}</code>" for a in allowed_agents)
-
-    await update.message.reply_html(
-        f"🎛️ <b>Status Mode Aktif</b>\n\n"
-        f"Mode: <b>{mode_label}</b>\n"
-        f"{scope_text}\n\n"
-        "Ketik /mode untuk ganti mode.",
+    reply_md = _format_mode_status(current_mode)
+    await update.message.reply_text(
+        telegramify_markdown.markdownify(reply_md),
+        parse_mode=ParseMode.MARKDOWN_V2,
     )
 

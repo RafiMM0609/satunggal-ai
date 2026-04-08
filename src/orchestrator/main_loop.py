@@ -208,6 +208,174 @@ def _get_pipeline():
     return _history, _agents, _router, _gatekeeper, _tools, _mode_store
 
 
+# ── Natural-language mode commands ────────────────────────────────────────────
+#
+# Users can check or change mode via plain chat instead of /mode command.
+# Detected BEFORE the gatekeeper so the pipeline short-circuits immediately.
+#
+# _detect_natural_mode_command returns a tuple:
+#   ("status", None)           – user is asking for current mode
+#   ("change", "<mode_key>")   – user wants to switch to mode_key
+#   None                       – not a mode command; proceed normally
+
+import re as _re
+
+_MODE_STATUS_PATTERNS: list[_re.Pattern[str]] = [
+    _re.compile(r"\bstatus\s+mode\b", _re.I),
+    _re.compile(r"\bmode\s+(?:apa|aktif|sekarang|saat\s+ini|yang\s+aktif)\b", _re.I),
+    _re.compile(r"\bcek\s+mode\b", _re.I),
+    _re.compile(r"\bcheck\s+mode\b", _re.I),
+    _re.compile(r"\bmode\s+status\b", _re.I),
+    _re.compile(r"\blihat\s+mode\b", _re.I),
+    _re.compile(r"\btampilkan\s+mode\b", _re.I),
+    _re.compile(r"\bshow\s+mode\b", _re.I),
+    _re.compile(r"\bapa\s+mode(?:\s+saya)?\b", _re.I),
+    _re.compile(r"\bwhat.{0,30}\bmode\b", _re.I),
+]
+
+# Maps human-friendly aliases → canonical mode_key
+_MODE_ALIAS_MAP: dict[str, str] = {
+    "all":     "all",
+    "semua":   "all",
+    "default": "all",
+    "dev":     "dev",
+    "developer": "dev",
+    "pengembang": "dev",
+    "development": "dev",
+    "writer":  "writer",
+    "penulis": "writer",
+    "penulisan": "writer",
+    "office":  "office",
+    "kantor":  "office",
+    "kerja":   "office",
+    "media":   "media",
+    "dokumen": "media",
+    "document": "media",
+    "pdf":     "media",
+    "web":     "web",
+    "internet": "web",
+    "browser": "web",
+    "browsing": "web",
+}
+
+_MODE_CHANGE_PATTERN = _re.compile(
+    r"(?:"
+    r"(?:ganti|ubah|pindah|aktifkan|set|switch|change|gunakan|pakai)\s+mode\s+(?:ke\s+|to\s+)?(?P<mode1>\w+)"
+    r"|"
+    r"mode\s+(?:ke\s+|to\s+)?(?P<mode2>\w+)"
+    r"|"
+    r"(?:change|switch|set)\s+(?:to\s+)?(?P<mode3>\w+)\s+mode"
+    r"|"
+    r"(?P<mode4>\w+)\s+mode\s+(?:aktifkan|on|enable|nyalakan)"
+    r")",
+    _re.I,
+)
+
+
+def _detect_natural_mode_command(
+    user_text: str,
+) -> "tuple[str, str | None] | None":
+    """Detect natural-language mode status/change requests.
+
+    Returns:
+        ``("status", None)``         – user is asking for the current mode.
+        ``("change", "<mode_key>")`` – user wants to switch to *mode_key*.
+        ``None``                     – not a mode command.
+    """
+    text = user_text.strip()
+
+    # Status check
+    for pat in _MODE_STATUS_PATTERNS:
+        if pat.search(text):
+            return ("status", None)
+
+    # Change request
+    m = _MODE_CHANGE_PATTERN.search(text)
+    if m:
+        raw = (
+            m.group("mode1")
+            or m.group("mode2")
+            or m.group("mode3")
+            or m.group("mode4")
+            or ""
+        ).lower()
+        mode_key = _MODE_ALIAS_MAP.get(raw)
+        if mode_key:
+            return ("change", mode_key)
+
+    return None
+
+
+def _format_mode_status(active_mode: str) -> str:
+    """Build a human-readable status reply for the active mode."""
+    from src.orchestrator.router import MODE_MAP
+
+    mode_cfg   = MODE_MAP.get(active_mode, MODE_MAP["all"])
+    mode_label = mode_cfg["label"]
+    allowed    = mode_cfg.get("allowed_agents")
+
+    # Build a compact agent → capability description map shown in the reply.
+    _AGENT_DESC: dict[str, str] = {
+        "developer":          "💻 Developer — clone repo, edit/fix code, Docker sandbox",
+        "developer_inspector":"🔍 Inspector — cari bug, root cause analysis (read-only)",
+        "developer_qna":      "❓ Dev Q&A — tanya jawab isi repo (API, tech stack, alur)",
+        "code_reviewer":      "📋 Code Reviewer — review kualitas kode, best practice",
+        "code_fix":           "🔧 Code Fix — temukan & perbaiki bug secara otomatis",
+        "sysinfo_agent":      "🖥️ SysInfo — status CPU, RAM, disk server",
+        "log_viewer_agent":   "📜 Log Viewer — tampilkan log bot terbaru",
+        "researcher":         "🔎 Researcher — riset mendalam via internet (Tavily)",
+        "content_creator":    "✍️ Content Creator — buat konten LinkedIn, blog, posting",
+        "technical_writer":   "📄 Technical Writer — buat dokumen teknis PDF/Word",
+        "wbs_agent":          "📊 WBS Agent — buat Work Breakdown Structure proyek",
+        "mandays_agent":      "📅 Mandays Agent — estimasi effort & resource proyek",
+        "reminder_agent":     "⏰ Reminder — set/list/cancel pengingat terjadwal",
+        "pdf_summarizer":     "📑 PDF Summarizer — ringkas & QnA isi dokumen PDF",
+        "quiz_agent":         "🎯 Quiz Agent — konversi PDF → kuis HTML interaktif",
+        "tg_quiz_agent":      "📲 TG Quiz — konversi PDF → polling kuis Telegram",
+        "doc_agent":          "📝 Doc Agent — analisis & QnA isi dokumen .docx",
+        "analysis_diagram":   "🗺️ Diagram — buat flow diagram dari hasil analisa",
+        "web_automation":     "🌐 Web Automation — browse, klik, isi form, screenshot",
+        "responder":          "💬 Responder — pertanyaan umum & percakapan biasa",
+    }
+
+    if allowed is None:
+        scope = "✅ Semua agent aktif (full-orchestrator — tidak ada batasan)."
+    else:
+        lines = [
+            _AGENT_DESC.get(a, f"• {a}")
+            for a in allowed
+            if a != "responder"
+        ]
+        scope = "Agent aktif di mode ini:\n" + "\n".join(f"  • {l}" for l in lines)
+        scope += "\n  • 💬 Responder — pertanyaan umum & percakapan biasa"
+
+    mode_list = "\n".join(
+        f"  {'✅' if k == active_mode else '○'} {v['label']}"
+        for k, v in MODE_MAP.items()
+    )
+
+    return (
+        f"🎛️ **Status Mode Aktif**\n\n"
+        f"Mode: **{mode_label}**\n\n"
+        f"{scope}\n\n"
+        f"**Mode tersedia:**\n{mode_list}\n\n"
+        "Ketik *ganti mode ke [nama mode]* atau /mode untuk berpindah mode."
+    )
+
+
+def _format_mode_changed(new_mode: str) -> str:
+    """Build a confirmation reply after a mode change."""
+    from src.orchestrator.router import MODE_MAP
+    mode_cfg   = MODE_MAP.get(new_mode, MODE_MAP["all"])
+    mode_label = mode_cfg["label"]
+    prefix     = mode_cfg.get("system_prefix", "") or ""
+    return (
+        f"✅ Mode berhasil diubah ke **{mode_label}**!\n\n"
+        f"{prefix}\n\n"
+        "Ketik *status mode* kapan saja untuk melihat mode aktif."
+    )
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def process_message(
@@ -246,6 +414,26 @@ async def process_message(
     # 2b. Fetch the active mode for this session and attach it to the task.
     active_mode = await asyncio.to_thread(mode_store.get_mode, session_id)
     task.current_mode = active_mode
+
+    # 2c. Natural-language mode commands – short-circuit the full pipeline.
+    #     Handles "status mode", "ganti mode ke dev", "change mode to writer", etc.
+    mode_cmd = _detect_natural_mode_command(user_text)
+    if mode_cmd is not None:
+        cmd_type, mode_key = mode_cmd
+        if cmd_type == "status":
+            task.result = _format_mode_status(active_mode)
+        else:  # "change"
+            await asyncio.to_thread(mode_store.set_mode, session_id, mode_key)
+            task.current_mode = mode_key
+            task.result = _format_mode_changed(mode_key)
+            logger.info(
+                "Natural mode change: session=%s %s → %s",
+                session_id, active_mode, mode_key,
+            )
+        history.add(session_id, "assistant", task.result)
+        tracker.advance("done")
+        await _notify(status_callback, tracker.render())
+        return task
 
     # Compute allowed intents for the active mode (None = no restriction).
     allowed_intents = get_allowed_intents(active_mode)
