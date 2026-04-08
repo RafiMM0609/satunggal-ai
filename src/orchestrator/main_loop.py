@@ -230,7 +230,8 @@ _MODE_STATUS_PATTERNS: list[_re.Pattern[str]] = [
     _re.compile(r"\btampilkan\s+mode\b", _re.I),
     _re.compile(r"\bshow\s+mode\b", _re.I),
     _re.compile(r"\bapa\s+mode(?:\s+saya)?\b", _re.I),
-    _re.compile(r"\bwhat.{0,30}\bmode\b", _re.I),
+    # English variants: "what is my mode", "what's the mode", "what mode am I in"
+    _re.compile(r"\bwhat(?:'s|\s+is|\s+mode)\b", _re.I),
 ]
 
 # Maps human-friendly aliases → canonical mode_key
