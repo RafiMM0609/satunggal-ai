@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
@@ -79,11 +80,17 @@ beberapa poin pencarian yang spesifik dan saling melengkapi.
 Tujuannya adalah mendapatkan informasi yang komprehensif dari berbagai sudut pandang.
 
 Aturan ketat:
-- Berikan tepat 3 hingga 4 poin pencarian yang berbeda dan spesifik.
-- Setiap poin harus merupakan query pencarian yang bisa langsung digunakan di mesin pencari.
-- Jangan gunakan penomoran, bullet point, atau karakter khusus di awal baris.
-- Tulis satu poin per baris, tanpa baris kosong di antara poin.
+- Berikan tepat 3 hingga 4 query pencarian yang berbeda dan spesifik.
+- Setiap query harus bisa langsung digunakan di mesin pencari (Google, Bing, dll).
+- Setiap baris query WAJIB diawali dengan prefix "QUERY: " (tanpa tanda kutip).
+- Jangan tulis penjelasan, komentar, penomoran, atau baris lain selain baris QUERY.
+- Jangan gunakan baris kosong di antara query.
 - Gunakan bahasa yang sama dengan input pengguna.
+
+Contoh format output yang benar:
+QUERY: lowongan kerja Astra International 2024
+QUERY: rekrutmen fresh graduate Astra Group
+QUERY: cara daftar kerja di Astra online
 """
 
 _PLAN_SYSTEM_PROMPT = """\
@@ -111,7 +118,7 @@ class ResearcherAgent(BaseAgent):
     name = "researcher"
 
     _MAX_SUB_QUERIES      = 4    # hard cap on parallel Tavily calls per request
-    _DECOMPOSE_MAX_TOKENS = 256  # small budget; we only need a few short search strings
+    _DECOMPOSE_MAX_TOKENS = 1024  # reasoning models need budget before producing answers
     _PLAN_MAX_TOKENS      = 512  # budget for building the research outline
     _PLAN_CONTEXT_MAX_CHARS = 3000  # preview fed to planner – keeps planning call cheap
     _MAX_HISTORY_MESSAGES = 8    # keep last N turns in context window
@@ -141,13 +148,19 @@ class ResearcherAgent(BaseAgent):
             },
         ]
         try:
-            response   = await self._llm.chat(messages, max_tokens=self._DECOMPOSE_MAX_TOKENS)
+            response = await self._llm.chat(messages, max_tokens=self._DECOMPOSE_MAX_TOKENS)
+
+            # Strip reasoning/thinking blocks emitted by reasoning models
+            # e.g. <think>...</think> or <thinking>...</thinking>
+            cleaned = re.sub(r"<think(?:ing)?>[^<]*(?:<(?!/think(?:ing)?>)[^<]*)*</think(?:ing)?>", "", response, flags=re.DOTALL | re.IGNORECASE)
+
+            # Extract only lines that start with "QUERY:" prefix
             sub_queries = [
-                line.strip()
-                for line in response.strip().splitlines()
-                if line.strip()
+                line[len("QUERY:"):].strip()
+                for line in cleaned.splitlines()
+                if line.strip().upper().startswith("QUERY:")
             ]
-            sub_queries = sub_queries[:self._MAX_SUB_QUERIES]  # hard cap to avoid excessive API calls
+            sub_queries = sub_queries[:self._MAX_SUB_QUERIES]  # hard cap
             logger.debug("ResearcherAgent decomposed query into: %s", sub_queries)
             return sub_queries if sub_queries else [query]
         except Exception as exc:
