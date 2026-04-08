@@ -519,7 +519,7 @@ class GatekeeperLLMClient:
             "GatekeeperLLMClient.classify_intent → provider=%s model=%s",
             provider, model_used,
         )
-        raw = await self._llm.chat(messages, max_tokens=256, json_mode=True)
+        raw = await self._llm.chat(messages, max_tokens=512, json_mode=True)
         return self._parse(raw, model_used=model_used)
 
     async def aclose(self) -> None:
