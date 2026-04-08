@@ -28,6 +28,7 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Awaitable, Callable, Optional, TYPE_CHECKING
 
@@ -92,14 +93,15 @@ _agents     = None
 _router     = None
 _gatekeeper = None
 _tools      = None   # dict[str, BaseTool]
+_mode_store = None   # UserModeStore
 
 
 def _get_pipeline():
     """Lazily create and cache all pipeline components."""
-    global _history, _llm, _agents, _router, _gatekeeper, _tools
+    global _history, _llm, _agents, _router, _gatekeeper, _tools, _mode_store
 
     if _gatekeeper is not None:
-        return _history, _agents, _router, _gatekeeper, _tools
+        return _history, _agents, _router, _gatekeeper, _tools, _mode_store
 
     from src.agents.code_fix.agent import CodeFixAgent
     from src.agents.code_reviewer.agent import CodeReviewerAgent
@@ -124,6 +126,7 @@ def _get_pipeline():
     from src.agents.wbs_agent.agent import WBSAgent
     from src.agents.web_automation.agent import WebAutomationAgent
     from src.memory.history import ConversationHistory
+    from src.memory.user_mode_store import get_user_mode_store
     from src.orchestrator.router import AgentRouter
     from src.tools.browser_navigator import BrowserNavigatorTool
     from src.tools.diagram_renderer import DiagramRendererTool
@@ -136,8 +139,9 @@ def _get_pipeline():
     from src.tools.web_reader import WebReaderTool
     from src.tools.wbs_generator import WBSGeneratorTool
 
-    _history = ConversationHistory(max_messages=30)
-    _llm     = LLMClient()
+    _history    = ConversationHistory(max_messages=30)
+    _llm        = LLMClient()
+    _mode_store = get_user_mode_store()
 
     # ── Tool registry ──────────────────────────────────────────────────────
     # Keyed by tool name (same string used in intent_result.tools and
@@ -201,7 +205,176 @@ def _get_pipeline():
         "Pipeline initialised: %d agents, %d tools registered.",
         len(_agents), len(_tools),
     )
-    return _history, _agents, _router, _gatekeeper, _tools
+    return _history, _agents, _router, _gatekeeper, _tools, _mode_store
+
+
+# ── Natural-language mode commands ────────────────────────────────────────────
+#
+# Users can check or change mode via plain chat instead of /mode command.
+# Detected BEFORE the gatekeeper so the pipeline short-circuits immediately.
+#
+# _detect_natural_mode_command returns a tuple:
+#   ("status", None)           – user is asking for current mode
+#   ("change", "<mode_key>")   – user wants to switch to mode_key
+#   None                       – not a mode command; proceed normally
+
+import re as _re
+
+_MODE_STATUS_PATTERNS: list[_re.Pattern[str]] = [
+    _re.compile(r"\bstatus\s+mode\b", _re.I),
+    _re.compile(r"\bmode\s+(?:apa|aktif|sekarang|saat\s+ini|yang\s+aktif)\b", _re.I),
+    _re.compile(r"\bcek\s+mode\b", _re.I),
+    _re.compile(r"\bcheck\s+mode\b", _re.I),
+    _re.compile(r"\bmode\s+status\b", _re.I),
+    _re.compile(r"\blihat\s+mode\b", _re.I),
+    _re.compile(r"\btampilkan\s+mode\b", _re.I),
+    _re.compile(r"\bshow\s+mode\b", _re.I),
+    _re.compile(r"\bapa\s+mode(?:\s+saya)?\b", _re.I),
+    # English variants: "what is my mode", "what's the mode", "what mode am I in"
+    _re.compile(r"\bwhat(?:'s|\s+is|\s+mode)\b", _re.I),
+]
+
+# Maps human-friendly aliases → canonical mode_key
+_MODE_ALIAS_MAP: dict[str, str] = {
+    "all":     "all",
+    "semua":   "all",
+    "default": "all",
+    "dev":     "dev",
+    "developer": "dev",
+    "pengembang": "dev",
+    "development": "dev",
+    "writer":  "writer",
+    "penulis": "writer",
+    "penulisan": "writer",
+    "office":  "office",
+    "kantor":  "office",
+    "kerja":   "office",
+    "media":   "media",
+    "dokumen": "media",
+    "document": "media",
+    "pdf":     "media",
+    "web":     "web",
+    "internet": "web",
+    "browser": "web",
+    "browsing": "web",
+}
+
+_MODE_CHANGE_PATTERN = _re.compile(
+    r"(?:"
+    r"(?:ganti|ubah|pindah|aktifkan|set|switch|change|gunakan|pakai)\s+mode\s+(?:ke\s+|to\s+)?(?P<mode1>\w+)"
+    r"|"
+    r"mode\s+(?:ke\s+|to\s+)?(?P<mode2>\w+)"
+    r"|"
+    r"(?:change|switch|set)\s+(?:to\s+)?(?P<mode3>\w+)\s+mode"
+    r"|"
+    r"(?P<mode4>\w+)\s+mode\s+(?:aktifkan|on|enable|nyalakan)"
+    r")",
+    _re.I,
+)
+
+
+def _detect_natural_mode_command(
+    user_text: str,
+) -> "tuple[str, str | None] | None":
+    """Detect natural-language mode status/change requests.
+
+    Returns:
+        ``("status", None)``         – user is asking for the current mode.
+        ``("change", "<mode_key>")`` – user wants to switch to *mode_key*.
+        ``None``                     – not a mode command.
+    """
+    text = user_text.strip()
+
+    # Status check
+    for pat in _MODE_STATUS_PATTERNS:
+        if pat.search(text):
+            return ("status", None)
+
+    # Change request
+    m = _MODE_CHANGE_PATTERN.search(text)
+    if m:
+        raw = (
+            m.group("mode1")
+            or m.group("mode2")
+            or m.group("mode3")
+            or m.group("mode4")
+            or ""
+        ).lower()
+        mode_key = _MODE_ALIAS_MAP.get(raw)
+        if mode_key:
+            return ("change", mode_key)
+
+    return None
+
+
+def _format_mode_status(active_mode: str) -> str:
+    """Build a human-readable status reply for the active mode."""
+    from src.orchestrator.router import MODE_MAP
+
+    mode_cfg   = MODE_MAP.get(active_mode, MODE_MAP["all"])
+    mode_label = mode_cfg["label"]
+    allowed    = mode_cfg.get("allowed_agents")
+
+    # Build a compact agent → capability description map shown in the reply.
+    _AGENT_DESC: dict[str, str] = {
+        "developer":          "💻 Developer — clone repo, edit/fix code, Docker sandbox",
+        "developer_inspector":"🔍 Inspector — cari bug, root cause analysis (read-only)",
+        "developer_qna":      "❓ Dev Q&A — tanya jawab isi repo (API, tech stack, alur)",
+        "code_reviewer":      "📋 Code Reviewer — review kualitas kode, best practice",
+        "code_fix":           "🔧 Code Fix — temukan & perbaiki bug secara otomatis",
+        "sysinfo_agent":      "🖥️ SysInfo — status CPU, RAM, disk server",
+        "log_viewer_agent":   "📜 Log Viewer — tampilkan log bot terbaru",
+        "researcher":         "🔎 Researcher — riset mendalam via internet (Tavily)",
+        "content_creator":    "✍️ Content Creator — buat konten LinkedIn, blog, posting",
+        "technical_writer":   "📄 Technical Writer — buat dokumen teknis PDF/Word",
+        "wbs_agent":          "📊 WBS Agent — buat Work Breakdown Structure proyek",
+        "mandays_agent":      "📅 Mandays Agent — estimasi effort & resource proyek",
+        "reminder_agent":     "⏰ Reminder — set/list/cancel pengingat terjadwal",
+        "pdf_summarizer":     "📑 PDF Summarizer — ringkas & QnA isi dokumen PDF",
+        "quiz_agent":         "🎯 Quiz Agent — konversi PDF → kuis HTML interaktif",
+        "tg_quiz_agent":      "📲 TG Quiz — konversi PDF → polling kuis Telegram",
+        "doc_agent":          "📝 Doc Agent — analisis & QnA isi dokumen .docx",
+        "analysis_diagram":   "🗺️ Diagram — buat flow diagram dari hasil analisa",
+        "web_automation":     "🌐 Web Automation — browse, klik, isi form, screenshot",
+        "responder":          "💬 Responder — pertanyaan umum & percakapan biasa",
+    }
+
+    if allowed is None:
+        scope = "✅ Semua agent aktif (full-orchestrator — tidak ada batasan)."
+    else:
+        lines = [
+            _AGENT_DESC.get(a, f"• {a}")
+            for a in allowed
+            if a != "responder"
+        ]
+        scope = "Agent aktif di mode ini:\n" + "\n".join(f"  • {l}" for l in lines)
+        scope += "\n  • 💬 Responder — pertanyaan umum & percakapan biasa"
+
+    mode_list = "\n".join(
+        f"  {'✅' if k == active_mode else '○'} {v['label']}"
+        for k, v in MODE_MAP.items()
+    )
+
+    return (
+        f"🎛️ **Status Mode Aktif**\n\n"
+        f"Mode: **{mode_label}**\n\n"
+        f"{scope}\n\n"
+        f"**Mode tersedia:**\n{mode_list}\n\n"
+        "Ketik *ganti mode ke [nama mode]* atau /mode untuk berpindah mode."
+    )
+
+
+def _format_mode_changed(new_mode: str) -> str:
+    """Build a confirmation reply after a mode change."""
+    from src.orchestrator.router import MODE_MAP
+    mode_cfg   = MODE_MAP.get(new_mode, MODE_MAP["all"])
+    mode_label = mode_cfg["label"]
+    prefix     = mode_cfg.get("system_prefix", "") or ""
+    return (
+        f"✅ Mode berhasil diubah ke **{mode_label}**!\n\n"
+        f"{prefix}\n\n"
+        "Ketik *status mode* kapan saja untuk melihat mode aktif."
+    )
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -225,9 +398,10 @@ async def process_message(
         task.metadata may contain extra data such as "excel_path").
     """
     from src.memory.state import AgentTask
+    from src.orchestrator.router import MODE_MAP, get_allowed_intents
     from src.tools.progress_tracker import ProgressTracker
 
-    history, agents, router, gatekeeper, tools = _get_pipeline()
+    history, agents, router, gatekeeper, tools, mode_store = _get_pipeline()
 
     # ── Bootstrap progress tracker ─────────────────────────────────────────
     tracker = ProgressTracker(title="⏳ Sedang memproses permintaan...")
@@ -237,6 +411,33 @@ async def process_message(
 
     # 2. Build the task blackboard
     task = AgentTask(session_id=session_id, user_input=user_text)
+
+    # 2b. Fetch the active mode for this session and attach it to the task.
+    active_mode = await asyncio.to_thread(mode_store.get_mode, session_id)
+    task.current_mode = active_mode
+
+    # 2c. Natural-language mode commands – short-circuit the full pipeline.
+    #     Handles "status mode", "ganti mode ke dev", "change mode to writer", etc.
+    mode_cmd = _detect_natural_mode_command(user_text)
+    if mode_cmd is not None:
+        cmd_type, mode_key = mode_cmd
+        if cmd_type == "status":
+            task.result = _format_mode_status(active_mode)
+        else:  # "change"
+            await asyncio.to_thread(mode_store.set_mode, session_id, mode_key)
+            task.current_mode = mode_key
+            task.result = _format_mode_changed(mode_key)
+            logger.info(
+                "Natural mode change: session=%s %s → %s",
+                session_id, active_mode, mode_key,
+            )
+        history.add(session_id, "assistant", task.result)
+        tracker.advance("done")
+        await _notify(status_callback, tracker.render())
+        return task
+
+    # Compute allowed intents for the active mode (None = no restriction).
+    allowed_intents = get_allowed_intents(active_mode)
 
     # 3. Classify intent (gatekeeper) – now also returns which tools to run
     tracker.advance("gatekeeper")
@@ -250,7 +451,10 @@ async def process_message(
     recent_history = history.get_as_llm_messages(session_id)[:-1][-4:] or None
     try:
         intent_result = await gatekeeper.classify_intent(
-            user_text, session_id=session_id, history=recent_history
+            user_text,
+            session_id=session_id,
+            history=recent_history,
+            allowed_intents=allowed_intents,
         )
     except Exception as gk_exc:
         if _is_rate_limit_error(gk_exc):
@@ -328,6 +532,33 @@ async def process_message(
     # 5. Route to specialist agent
     agent = router.resolve(task)
     task.mark_processing(agent.name)
+
+    # 5b. Mode Guard – if the resolved agent is outside the active mode,
+    #     inform the user and suggest switching instead of proceeding.
+    if active_mode != "all" and not router.is_agent_allowed(agent.name, active_mode):
+        mode_label = MODE_MAP.get(active_mode, {}).get("label", active_mode)
+        # Find which mode(s) support the resolved agent and suggest the best one.
+        suggestion = ""
+        for mode_key, mode_cfg in MODE_MAP.items():
+            if mode_key == "all":
+                continue
+            if agent.name in (mode_cfg.get("allowed_agents") or []):
+                suggestion = f" Ketik /mode untuk pindah ke {mode_cfg['label']}."
+                break
+        task.result = (
+            f"⚠️ Permintaan ini di luar cakupan {mode_label} Anda.\n"
+            f"Fitur ini membutuhkan agent lain yang tidak aktif di mode saat ini."
+            f"{(' ' + suggestion.strip()) if suggestion else ''}\n\n"
+            "Ketik /status untuk melihat mode aktif, atau /mode untuk ganti mode."
+        )
+        history.add(session_id, "assistant", task.result)
+        logger.info(
+            "Mode guard triggered: session=%s mode=%s agent=%s",
+            session_id, active_mode, agent.name,
+        )
+        tracker.advance("done")
+        await _notify(status_callback, tracker.render())
+        return task
 
     # 6. Execute agent (task.tool_results is already populated)
     tracker.advance(f"agent:{agent.name}")
