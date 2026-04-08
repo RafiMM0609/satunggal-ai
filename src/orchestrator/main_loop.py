@@ -92,14 +92,15 @@ _agents     = None
 _router     = None
 _gatekeeper = None
 _tools      = None   # dict[str, BaseTool]
+_mode_store = None   # UserModeStore
 
 
 def _get_pipeline():
     """Lazily create and cache all pipeline components."""
-    global _history, _llm, _agents, _router, _gatekeeper, _tools
+    global _history, _llm, _agents, _router, _gatekeeper, _tools, _mode_store
 
     if _gatekeeper is not None:
-        return _history, _agents, _router, _gatekeeper, _tools
+        return _history, _agents, _router, _gatekeeper, _tools, _mode_store
 
     from src.agents.code_fix.agent import CodeFixAgent
     from src.agents.code_reviewer.agent import CodeReviewerAgent
@@ -124,6 +125,7 @@ def _get_pipeline():
     from src.agents.wbs_agent.agent import WBSAgent
     from src.agents.web_automation.agent import WebAutomationAgent
     from src.memory.history import ConversationHistory
+    from src.memory.user_mode_store import get_user_mode_store
     from src.orchestrator.router import AgentRouter
     from src.tools.browser_navigator import BrowserNavigatorTool
     from src.tools.diagram_renderer import DiagramRendererTool
@@ -136,8 +138,9 @@ def _get_pipeline():
     from src.tools.web_reader import WebReaderTool
     from src.tools.wbs_generator import WBSGeneratorTool
 
-    _history = ConversationHistory(max_messages=30)
-    _llm     = LLMClient()
+    _history    = ConversationHistory(max_messages=30)
+    _llm        = LLMClient()
+    _mode_store = get_user_mode_store()
 
     # ── Tool registry ──────────────────────────────────────────────────────
     # Keyed by tool name (same string used in intent_result.tools and
@@ -201,7 +204,7 @@ def _get_pipeline():
         "Pipeline initialised: %d agents, %d tools registered.",
         len(_agents), len(_tools),
     )
-    return _history, _agents, _router, _gatekeeper, _tools
+    return _history, _agents, _router, _gatekeeper, _tools, _mode_store
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -225,9 +228,10 @@ async def process_message(
         task.metadata may contain extra data such as "excel_path").
     """
     from src.memory.state import AgentTask
+    from src.orchestrator.router import MODE_MAP, get_allowed_intents
     from src.tools.progress_tracker import ProgressTracker
 
-    history, agents, router, gatekeeper, tools = _get_pipeline()
+    history, agents, router, gatekeeper, tools, mode_store = _get_pipeline()
 
     # ── Bootstrap progress tracker ─────────────────────────────────────────
     tracker = ProgressTracker(title="⏳ Sedang memproses permintaan...")
@@ -237,6 +241,14 @@ async def process_message(
 
     # 2. Build the task blackboard
     task = AgentTask(session_id=session_id, user_input=user_text)
+
+    # 2b. Fetch the active mode for this session and attach it to the task.
+    import asyncio as _asyncio
+    active_mode = await _asyncio.to_thread(mode_store.get_mode, session_id)
+    task.current_mode = active_mode
+
+    # Compute allowed intents for the active mode (None = no restriction).
+    allowed_intents = get_allowed_intents(active_mode)
 
     # 3. Classify intent (gatekeeper) – now also returns which tools to run
     tracker.advance("gatekeeper")
@@ -250,7 +262,10 @@ async def process_message(
     recent_history = history.get_as_llm_messages(session_id)[:-1][-4:] or None
     try:
         intent_result = await gatekeeper.classify_intent(
-            user_text, session_id=session_id, history=recent_history
+            user_text,
+            session_id=session_id,
+            history=recent_history,
+            allowed_intents=allowed_intents,
         )
     except Exception as gk_exc:
         if _is_rate_limit_error(gk_exc):
@@ -328,6 +343,32 @@ async def process_message(
     # 5. Route to specialist agent
     agent = router.resolve(task)
     task.mark_processing(agent.name)
+
+    # 5b. Mode Guard – if the resolved agent is outside the active mode,
+    #     inform the user and suggest switching instead of proceeding.
+    if active_mode != "all" and not router.is_agent_allowed(agent.name, active_mode):
+        mode_label = MODE_MAP.get(active_mode, {}).get("label", active_mode)
+        # Find which mode(s) support the resolved agent and suggest the best one.
+        suggestion = ""
+        for mode_key, mode_cfg in MODE_MAP.items():
+            if mode_key == "all":
+                continue
+            if agent.name in (mode_cfg.get("allowed_agents") or []):
+                suggestion = f" Ketik /mode untuk pindah ke {mode_cfg['label']}."
+                break
+        task.result = (
+            f"⚠️ Permintaan ini di luar cakupan {mode_label} Anda.\n"
+            f"Fitur ini membutuhkan agent lain yang tidak aktif di mode saat ini.{suggestion}\n\n"
+            "Ketik /status untuk melihat mode aktif, atau /mode untuk ganti mode."
+        )
+        history.add(session_id, "assistant", task.result)
+        logger.info(
+            "Mode guard triggered: session=%s mode=%s agent=%s",
+            session_id, active_mode, agent.name,
+        )
+        tracker.advance("done")
+        await _notify(status_callback, tracker.render())
+        return task
 
     # 6. Execute agent (task.tool_results is already populated)
     tracker.advance(f"agent:{agent.name}")

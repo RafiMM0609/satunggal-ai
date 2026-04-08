@@ -325,12 +325,24 @@ class GatekeeperLLMClient:
         self,
         user_text: str,
         history: "list[dict] | None" = None,
+        allowed_intents: "list[str] | None" = None,
     ) -> LLMIntentResponse:
         # Inject current date/time (WIB, UTC+7) so the LLM is never anchored to
         # its training-data cutoff when answering time-sensitive questions.
         wib = timezone(timedelta(hours=7))
         now_str = datetime.now(tz=wib).strftime("%A, %d %B %Y %H:%M WIB")
         system_content_base = _SYSTEM_PROMPT + f"\n\nWaktu saat ini: {now_str}"
+
+        # Inject mode restriction when a specific set of intents is active.
+        # The Gatekeeper is instructed to only classify within those intents;
+        # the Mode Guard in the router will enforce this as a safety net.
+        if allowed_intents:
+            allowed_str = ", ".join(allowed_intents)
+            system_content_base += (
+                "\n\nMODE AKTIF: User sedang dalam mode terbatas. "
+                f"HANYA klasifikasikan ke salah satu intent berikut: {allowed_str}. "
+                "Jika permintaan tidak sesuai, gunakan 'general_inquiry' sebagai fallback."
+            )
 
         # Inject recent conversation history into system prompt so the LLM can
         # correctly classify follow-up commands (e.g. "berikan screenshot" after

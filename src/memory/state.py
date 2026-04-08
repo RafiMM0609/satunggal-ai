@@ -39,6 +39,10 @@ class AgentTask:
     agent_trace:   list[str]          = field(default_factory=list)
     tool_results:  dict[str, Any]     = field(default_factory=dict)
 
+    # Active mode for this request (set by the orchestrator from UserModeStore).
+    # Defaults to "all" which preserves full-orchestrator behaviour.
+    current_mode:  str                = "all"
+
     # Tools requested by an agent to be executed by the orchestrator AFTER
     # the agent finishes.  Agent sets this list; orchestrator drains it.
     pending_tools: list[str]          = field(default_factory=list)

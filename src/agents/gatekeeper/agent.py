@@ -31,19 +31,24 @@ class GatekeeperAgent:
         text: str,
         session_id: str = "",
         history: "list[dict] | None" = None,
+        allowed_intents: "list[str] | None" = None,
     ) -> IntentResult:
         """
         Classify a single text string.
 
         Args:
-            text:       Raw user text.
-            session_id: Optional identifier for logging.
-            history:    Optional list of recent conversation messages in
-                        OpenAI chat-completion format (role/content dicts).
-                        When provided, these are injected into the LLM
-                        system prompt so follow-up commands (e.g.
-                        "berikan screenshot" after a web_automation turn)
-                        are classified correctly.
+            text:             Raw user text.
+            session_id:       Optional identifier for logging.
+            history:          Optional list of recent conversation messages in
+                              OpenAI chat-completion format (role/content dicts).
+                              When provided, these are injected into the LLM
+                              system prompt so follow-up commands (e.g.
+                              "berikan screenshot" after a web_automation turn)
+                              are classified correctly.
+            allowed_intents:  Optional list of IntentCategory values (strings)
+                              that the Gatekeeper is allowed to return.  When
+                              provided, a mode-restriction note is appended to
+                              the system prompt so the LLM narrows its choices.
 
         Returns:
             IntentResult with intent category and confidence score.
@@ -54,7 +59,9 @@ class GatekeeperAgent:
         normalised = text.strip()
         logger.info("Gatekeeper classifying session=%s text=%.80s…", session_id, normalised)
 
-        llm_response = await self._llm_client.classify_intent(normalised, history=history)
+        llm_response = await self._llm_client.classify_intent(
+            normalised, history=history, allowed_intents=allowed_intents
+        )
 
         # ── Self-Correction: fallback clarification question ──────────────
         clarification_question = llm_response.clarification_question

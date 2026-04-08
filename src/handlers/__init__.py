@@ -3,6 +3,8 @@
 from .command import (
     deploy,
     help_command,
+    mode_callback,
+    mode_command,
     ping,
     reset,
     setapikey,
@@ -15,6 +17,7 @@ from .command import (
     setollamakey,
     setprovider,
     start,
+    status_command,
 )
 from .message import echo_text, handle_docx_document, handle_pdf_document, handle_photo, unknown_message
 
@@ -24,6 +27,9 @@ __all__ = [
     "ping",
     "reset",
     "deploy",
+    "mode_command",
+    "mode_callback",
+    "status_command",
     "setapikey",
     "setmaxtokens",
     "setllmmodel",
