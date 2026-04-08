@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 #
 MODE_MAP: dict[str, dict] = {
     "all": {
-        "label": "🌐 Mode All (Default)",
+        "label": "🎯 Mode All (Default)",
         "allowed_agents": None,
         "system_prefix": None,
     },

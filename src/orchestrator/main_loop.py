@@ -28,6 +28,7 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Awaitable, Callable, Optional, TYPE_CHECKING
 
@@ -243,8 +244,7 @@ async def process_message(
     task = AgentTask(session_id=session_id, user_input=user_text)
 
     # 2b. Fetch the active mode for this session and attach it to the task.
-    import asyncio as _asyncio
-    active_mode = await _asyncio.to_thread(mode_store.get_mode, session_id)
+    active_mode = await asyncio.to_thread(mode_store.get_mode, session_id)
     task.current_mode = active_mode
 
     # Compute allowed intents for the active mode (None = no restriction).
@@ -358,7 +358,8 @@ async def process_message(
                 break
         task.result = (
             f"⚠️ Permintaan ini di luar cakupan {mode_label} Anda.\n"
-            f"Fitur ini membutuhkan agent lain yang tidak aktif di mode saat ini.{suggestion}\n\n"
+            f"Fitur ini membutuhkan agent lain yang tidak aktif di mode saat ini."
+            f"{(' ' + suggestion.strip()) if suggestion else ''}\n\n"
             "Ketik /status untuk melihat mode aktif, atau /mode untuk ganti mode."
         )
         history.add(session_id, "assistant", task.result)
