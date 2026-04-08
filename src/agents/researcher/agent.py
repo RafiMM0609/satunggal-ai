@@ -128,7 +128,7 @@ class ResearcherAgent(BaseAgent):
     name = "researcher"
 
     _MAX_SUB_QUERIES      = 4    # hard cap on parallel Tavily calls per request
-    _DECOMPOSE_MAX_TOKENS = 1024  # reasoning models need budget before producing answers
+    _DECOMPOSE_MAX_TOKENS = 8192  # reasoning models need budget before producing answers
     _PLAN_MAX_TOKENS      = 512  # budget for building the research outline
     _PLAN_CONTEXT_MAX_CHARS = 3000  # preview fed to planner – keeps planning call cheap
     _MAX_HISTORY_MESSAGES = 8    # keep last N turns in context window

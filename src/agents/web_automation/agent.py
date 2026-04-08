@@ -482,7 +482,7 @@ Aturan:
 """
 
 _MAX_REACT_STEPS       = 20    # max number of tool-execution steps in the ReAct loop
-_MAX_TOKENS            = 2048
+_MAX_TOKENS            = 8192
 _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
 _FULL_PAGE_SUMMARISE_TEXT_CHARS = 8_000  # higher budget for get_full_content results
 _SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser

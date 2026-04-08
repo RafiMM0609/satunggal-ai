@@ -119,7 +119,7 @@ class LogViewerAgent(BaseAgent):
                 messages.append({"role": "user", "content": task.user_input})
 
             # ── Step 4: LLM formats the result ────────────────────────────
-            reply = await self._llm.chat(messages, max_tokens=2048)
+            reply = await self._llm.chat(messages, max_tokens=8192)
             task.mark_done(reply)
 
             logger.info(

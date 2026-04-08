@@ -474,7 +474,7 @@ class DeveloperInspectorAgent(RepoAgentBase):
                 ],
                 temperature=0.10,
                 top_p=0.90,
-                max_tokens=256,
+                max_tokens=8192,
             )
             raw = response.strip()
             # Strip optional markdown fences.

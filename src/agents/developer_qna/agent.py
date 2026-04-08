@@ -66,8 +66,10 @@ QNA_MAX_TOKENS  = 16384   # increased from global default to allow richer answer
 # Each file is analysed individually (map), then answers are synthesised (reduce).
 _MAP_REDUCE_THRESHOLD  = 8_000   # chars; total RAG text above this triggers map-reduce
 _MAP_MAX_FILE_CHARS    = 4_000   # chars sent to LLM per file in the map phase
-_MAP_MAX_TOKENS        = 300     # max output tokens for each file-level answer
-_REDUCE_MAX_TOKENS     = 1_024   # max tokens for the reduce synthesis pass
+_MAP_MAX_TOKENS        = 8192     # max output tokens for each file-level answer
+_REDUCE_MAX_TOKENS     = 8192   # max tokens for the reduce synthesis pass
+# _MAP_MAX_TOKENS        = 300     # max output tokens for each file-level answer
+# _REDUCE_MAX_TOKENS     = 1_024   # max tokens for the reduce synthesis pass
 
 # ── Adaptive deepening: [DATA TIDAK CUKUP] detector ──────────────────────────
 # When the LLM response contains this signal, the agent will automatically
