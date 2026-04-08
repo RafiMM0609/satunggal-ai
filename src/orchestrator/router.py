@@ -58,11 +58,11 @@ MODE_MAP: dict[str, dict] = {
     "office": {
         "label": "📋 Mode Office",
         "allowed_agents": [
-            "wbs_agent", "mandays_agent", "reminder_agent", "responder",
+            "wbs_agent", "mandays_agent", "reminder_agent", "researcher", "responder",
         ],
         "system_prefix": (
             "User sedang dalam Mode Office. "
-            "Fokus pada manajemen proyek, perencanaan WBS, estimasi mandays, dan pengingat."
+            "Fokus pada manajemen proyek, perencanaan WBS, estimasi mandays, pengingat, dan riset."
         ),
     },
     "media": {
@@ -79,11 +79,11 @@ MODE_MAP: dict[str, dict] = {
     "web": {
         "label": "🌐 Mode Web",
         "allowed_agents": [
-            "web_automation", "researcher", "responder",
+            "web_automation", "responder",
         ],
         "system_prefix": (
             "User sedang dalam Mode Web. "
-            "Fokus pada otomasi web, penjelajahan browser, dan riset online."
+            "Fokus pada otomasi web dan penjelajahan browser."
         ),
     },
 }
