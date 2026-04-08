@@ -30,6 +30,16 @@ from src.memory.state import AgentTask
 
 logger = logging.getLogger(__name__)
 
+# Matches <think>…</think> or <thinking>…</thinking> blocks produced by reasoning
+# models (e.g. DeepSeek R1).  Must be stripped before parsing structured output.
+_THINK_TAG_RE = re.compile(
+    r"<think(?:ing)?>.*?</think(?:ing)?>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+# Prefix that every decomposed search query must start with.
+_QUERY_PREFIX = "QUERY:"
+
 _SYSTEM_PROMPT = """\
 Kamu adalah asisten riset dan teknis yang ahli.
 Ketika menjawab pertanyaan teknis atau kompleks:
@@ -152,13 +162,13 @@ class ResearcherAgent(BaseAgent):
 
             # Strip reasoning/thinking blocks emitted by reasoning models
             # e.g. <think>...</think> or <thinking>...</thinking>
-            cleaned = re.sub(r"<think(?:ing)?>[^<]*(?:<(?!/think(?:ing)?>)[^<]*)*</think(?:ing)?>", "", response, flags=re.DOTALL | re.IGNORECASE)
+            cleaned = _THINK_TAG_RE.sub("", response)
 
-            # Extract only lines that start with "QUERY:" prefix
+            # Extract only lines that start with the QUERY: prefix
             sub_queries = [
-                line[len("QUERY:"):].strip()
+                line[len(_QUERY_PREFIX):].strip()
                 for line in cleaned.splitlines()
-                if line.strip().upper().startswith("QUERY:")
+                if line.strip().upper().startswith(_QUERY_PREFIX)
             ]
             sub_queries = sub_queries[:self._MAX_SUB_QUERIES]  # hard cap
             logger.debug("ResearcherAgent decomposed query into: %s", sub_queries)
