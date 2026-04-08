@@ -212,6 +212,18 @@ _INTENT_RULES: list[tuple[QAIntent, list[str], list[str]]] = [
             r"|cs|yaml|yml|json|toml|env|sh|md|txt|cfg|ini|sql|html|css|scss)\b",
             # "jelaskan isi file main" (filename without extension)
             r"(?:jelaskan|jelasin|jabarkan|explain|describe|tampilkan|tunjukkan|berikan)\s+(?:isi\s+)?(?:dari\s+)?file\s+\S+",
+            # ── File path without leading slash in "pada/di" context ──────────
+            # "berikan list function yang ada pada src/agents/agent.py"
+            # "lihat implementasi di controllers/user.go"
+            r"(?:pada|di|dalam|in|at)\s+\S+\.(?:py|go|js|ts|jsx|tsx|java|php|rb|rs|kt"
+            r"|cs|yaml|yml|json|toml|env|sh|md|txt|cfg|ini|sql|html|css|scss)\b",
+            r"yang\s+ada\s+(?:pada|di|dalam)\s+\S+\.(?:py|go|js|ts|jsx|tsx|java|php|rb|rs|kt"
+            r"|cs|yaml|yml|json|toml|env|sh|md|txt|cfg|ini|sql|html|css|scss)\b",
+            # ── "list/daftar function/method" requests ────────────────────────
+            # "berikan list function yang ada pada ...",
+            # "tampilkan daftar function di file X"
+            r"(?:berikan|tampilkan|tunjukkan|kasih|lihat|list|daftar)\s+"
+            r"(?:list\s+|daftar\s+)?(?:fungsi|function|method|class|def)\s+",
             # ── Existence questions about specific features / handlers ────────
             # "adakah handle upload file", "apakah ada fungsi untuk login"
             # Negative lookahead prevents matching bug/error/masalah reports
@@ -1025,10 +1037,39 @@ async def _search_keyword_in_file(
             matches.append(fpath)
 
     if not matches:
-        return f"(file `{filename_target}` tidak ditemukan di repositori)"
+        # ── Fuzzy fallback: match stem keywords across the repo tree ──────────
+        # Handles flattened filenames like "developer_qna_agent.py" that map to
+        # an actual path "src/agents/developer_qna/agent.py" — all stem tokens
+        # ("developer", "qna", "agent") appear somewhere in the real path.
+        stem = Path(target_name).stem                              # e.g. "developer_qna_agent"
+        stem_kws = [kw.lower() for kw in re.split(r"[_\-]+", stem) if len(kw) >= 3]
+        if stem_kws:
+            for fpath in sorted(repo_path.rglob("*")):
+                if fpath.is_dir() or _should_skip(fpath.relative_to(repo_path).parts):
+                    continue
+                rel_lower = fpath.relative_to(repo_path).as_posix().lower()
+                if all(kw in rel_lower for kw in stem_kws):
+                    matches.append(fpath)
+        if not matches:
+            return f"(file `{filename_target}` tidak ditemukan di repositori)"
+        logger.info(
+            "_search_keyword_in_file: exact match failed for %r — "
+            "fuzzy stem match found %d candidate(s): %s",
+            filename_target, len(matches),
+            [str(m.relative_to(repo_path)) for m in matches[:3]],
+        )
 
-    # Sort: prefer path that ends with the full target (most specific first)
-    matches.sort(key=lambda p: (0 if p.relative_to(repo_path).as_posix().endswith(target_norm) else 1, str(p)))
+    # Sort: prefer path that ends with the full target (most specific first),
+    # then files whose stem exactly matches one of the filename stem keywords
+    # (handles fuzzy matches where "agent.py" should rank above "HOW_IT_WORKS.md"),
+    # then alphabetically.
+    _stem_kws_sort = [kw.lower() for kw in re.split(r"[_\-]+", Path(target_name).stem) if len(kw) >= 3]
+    matches.sort(key=lambda p: (
+        0 if p.relative_to(repo_path).as_posix().endswith(target_norm) else
+        1 if p.stem.lower() in _stem_kws_sort else
+        2,
+        str(p),
+    ))
     fpath = matches[0]
     rel_path = fpath.relative_to(repo_path).as_posix()
 
@@ -1038,13 +1079,37 @@ async def _search_keyword_in_file(
     except OSError as exc:
         return f"(gagal membaca `{rel_path}`: {exc})"
 
-    # ── 2. Extract keywords from the user query ─────────────────────────────
+    # ── 2. Detect "list all functions/methods" requests ────────────────────
+    # When the user asks for a list of ALL functions/methods/classes in a file,
+    # skip keyword search and return full file content so the LLM can enumerate
+    # every definition — not just the 3 lines where "function" appears in a comment.
+    _LIST_DEFS_RE = re.compile(
+        r"(?:list|daftar|semua|tampilkan|berikan|tunjukkan|lihat)\s+"
+        r"(?:list\s+|daftar\s+|semua\s+)?"
+        r"(?:fungsi|function|functions|method|methods|class|classes|def|"
+        r"semua\s+fungsi|all\s+function)",
+        re.IGNORECASE,
+    )
+    if user_input and _LIST_DEFS_RE.search(user_input):
+        logger.info(
+            "_search_keyword_in_file: 'list function' intent detected — "
+            "returning full file content for %r",
+            rel_path,
+        )
+        content = file_text[:MAX_BYTES_PER_FILE]
+        ext = fpath.suffix.lstrip(".")
+        return (
+            f"### 📄 `{rel_path}` (full content — list all definitions)\n"
+            f"```{ext}\n{content}\n```"
+        )
+
+    # ── 3. Extract keywords from the user query ─────────────────────────────
     keywords = _extract_search_keywords(user_input, exclude_token=filename_target)
     logger.info(
         "_search_keyword_in_file: file=%r keywords=%r", rel_path, keywords[:5]
     )
 
-    # ── 3. Grep for each keyword, collect matching line ranges ─────────────
+    # ── 4. Grep for each keyword, collect matching line ranges ─────────────
     _CONTEXT_LINES = 5  # lines of context around each match
     hit_line_indices: set[int] = set()
 
@@ -1097,7 +1162,7 @@ async def _search_keyword_in_file(
         )
         return header + body
 
-    # ── 4. No keyword hits – fall back to full file content ─────────────────
+    # ── 5. No keyword hits – fall back to full file content ─────────────────
     logger.info(
         "_search_keyword_in_file: no keyword hits in %r, returning full content", rel_path
     )
@@ -1379,7 +1444,17 @@ async def extract_specific_symbol(
     # NOT misinterpreted as package "main" + symbol "py".
     if _is_filename_target(target):
         logger.info("extract_specific_symbol: file target detected → %r", target)
-        return await _search_keyword_in_file(repo_path, target, user_input)
+        result = await _search_keyword_in_file(repo_path, target, user_input)
+        if _evidence_is_empty(result):
+            logger.info(
+                "extract_specific_symbol: file target %r not found — "
+                "falling back to config file search",
+                target,
+            )
+            return await _extract_symbol_with_config_fallback(
+                repo_path, Path(target).stem, user_input, result
+            )
+        return result
 
     # Qualified name: controllers.DownloadFile → search in controllers/ first
     if "." in target and not target.startswith("."):
