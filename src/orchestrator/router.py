@@ -37,7 +37,7 @@ MODE_MAP: dict[str, dict] = {
         "label": "💻 Mode Developer",
         "allowed_agents": [
             "developer", "developer_inspector", "developer_qna",
-            "code_reviewer", "code_fix", "sysinfo_agent", "log_viewer_agent",
+            "code_fix", "sysinfo_agent", "log_viewer_agent",
             "responder",
         ],
         "system_prefix": (
@@ -111,7 +111,6 @@ INTENT_AGENT_MAP: dict[IntentCategory, str] = {
     IntentCategory.CODE_DEVELOPMENT:   "developer",           #← clone / AI-edit / sandbox
     IntentCategory.CODE_INSPECTION:    "developer_inspector",  #← read-only inspect + root cause
     IntentCategory.CODE_UNDERSTANDING: "developer_qna",        #← Q/A tentang isi repo
-    IntentCategory.CODE_REVIEW:        "code_reviewer",        #← read-only quality / security review
     IntentCategory.CODE_FIX:           "code_fix",             #← pipeline: inspect → auto-fix
     IntentCategory.DOCUMENT_CREATION:  "technical_writer",     #← generate PDF/Word dari repo/topik
     IntentCategory.SYSTEM_INFO:       "sysinfo_agent",        #← CPU / RAM / storage host info

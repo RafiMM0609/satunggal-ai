@@ -7,6 +7,7 @@ Supports two LLM providers: OpenRouter (default) and Ollama.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
@@ -77,6 +78,17 @@ class LLMClient:
                 "/chat/completions", json=payload, headers=self._auth_headers()
             )
             logger.debug("LLMClient[openrouter] HTTP status=%s", response.status_code)
+            if response.status_code == 429:
+                logger.warning(
+                    "LLMClient[openrouter] 429 rate-limited — retrying in 5s"
+                )
+                await asyncio.sleep(5)
+                response = await self._http.post(
+                    "/chat/completions", json=payload, headers=self._auth_headers()
+                )
+                logger.debug(
+                    "LLMClient[openrouter] retry HTTP status=%s", response.status_code
+                )
             try:
                 logger.debug("LLMClient[openrouter].raw_response_text=%s", response.text)
             except Exception:

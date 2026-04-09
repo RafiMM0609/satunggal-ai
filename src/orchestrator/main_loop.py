@@ -104,7 +104,6 @@ def _get_pipeline():
         return _history, _agents, _router, _gatekeeper, _tools, _mode_store
 
     from src.agents.code_fix.agent import CodeFixAgent
-    from src.agents.code_reviewer.agent import CodeReviewerAgent
     from src.agents.content_creator.agent import ContentCreatorAgent
     from src.agents.developer.agent import DeveloperAgent
     from src.agents.developer_inspector.agent import DeveloperInspectorAgent
@@ -179,7 +178,6 @@ def _get_pipeline():
         "developer":            DeveloperAgent(_llm),
         "developer_inspector": DeveloperInspectorAgent(llm=_llm, history=_history),
         "developer_qna":        DeveloperQnAAgent(llm=_llm, history=_history),
-        "code_reviewer":        CodeReviewerAgent(llm=_llm, history=_history),
         "code_fix":             CodeFixAgent(llm=_llm),
         "technical_writer":    TechnicalWriterAgent(_history, _llm),
         "sysinfo_agent":       SysInfoAgent(_history, _llm),
@@ -320,7 +318,6 @@ def _format_mode_status(active_mode: str) -> str:
         "developer":          "💻 Developer — clone repo, edit/fix code, Docker sandbox",
         "developer_inspector":"🔍 Inspector — cari bug, root cause analysis (read-only)",
         "developer_qna":      "❓ Dev Q&A — tanya jawab isi repo (API, tech stack, alur)",
-        "code_reviewer":      "📋 Code Reviewer — review kualitas kode, best practice",
         "code_fix":           "🔧 Code Fix — temukan & perbaiki bug secara otomatis",
         "sysinfo_agent":      "🖥️ SysInfo — status CPU, RAM, disk server",
         "log_viewer_agent":   "📜 Log Viewer — tampilkan log bot terbaru",
