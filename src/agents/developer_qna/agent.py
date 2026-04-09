@@ -95,6 +95,11 @@ _EVIDENCE_COMPRESS_TRIGGER = 80_000   # total chars; compression activated above
 _SECTION_CHUNK_SIZE        = 8_000    # max chars per chunk in the map phase
 _SECTION_COMPRESS_TOKENS   = 768      # max output tokens per chunk summary
 
+# ── Concurrency limiter: prevent 429 rate-limit bursts ────────────────────────
+# Shared across all asyncio.gather LLM call sites in this module.
+# Limits simultaneous in-flight LLM requests to avoid exhausting free-tier quota.
+_LLM_CONCURRENCY = asyncio.Semaphore(3)
+
 # ── Q/A Intent display labels ──────────────────────────────────────────────────
 
 _QA_INTENT_LABELS: dict[QAIntent, str] = {
@@ -515,10 +520,14 @@ class DeveloperQnAAgent(RepoAgentBase):
             len(file_list), question[:80],
         )
 
-        # Map phase – all files in parallel.
+        # Map phase – all files in parallel, throttled by _LLM_CONCURRENCY.
+        async def _guarded_map(rel_path: str, content: str) -> str:
+            async with _LLM_CONCURRENCY:
+                return await self._map_file_to_answer(rel_path, content, question)
+
         map_results = await asyncio.gather(
             *[
-                self._map_file_to_answer(rel_path, content, question)
+                _guarded_map(rel_path, content)
                 for rel_path, content in file_list
             ],
             return_exceptions=True,
@@ -621,8 +630,12 @@ class DeveloperQnAAgent(RepoAgentBase):
                 )
                 return ""
 
+        async def _guarded_chunk(idx: int, chunk: str) -> str:
+            async with _LLM_CONCURRENCY:
+                return await _summarize_chunk(idx, chunk)
+
         chunk_results = await asyncio.gather(
-            *[_summarize_chunk(i, chunk) for i, chunk in enumerate(chunks)],
+            *[_guarded_chunk(i, chunk) for i, chunk in enumerate(chunks)],
             return_exceptions=True,
         )
 
@@ -665,11 +678,12 @@ class DeveloperQnAAgent(RepoAgentBase):
             "QnA: compressing %d evidence section(s) for question %r",
             len(keys), question[:80],
         )
+        async def _guarded_section(key: str) -> str:
+            async with _LLM_CONCURRENCY:
+                return await self._compress_section_for_qna(key, evidence[key], question)
+
         results = await asyncio.gather(
-            *[
-                self._compress_section_for_qna(k, evidence[k], question)
-                for k in keys
-            ],
+            *[_guarded_section(k) for k in keys],
             return_exceptions=True,
         )
         compressed: dict[str, str] = {}
@@ -1007,12 +1021,12 @@ class DeveloperQnAAgent(RepoAgentBase):
                 "QnA comparison: gathering evidence for %d targets in parallel",
                 len(search_tasks),
             )
+            async def _guarded_scope(scope: str, query: str) -> str:
+                async with _LLM_CONCURRENCY:
+                    return await self._scan_scope_for_topic(repo_path, scope, query)
+
             evidence_coros = [
-                self._scan_scope_for_topic(
-                    repo_path,
-                    st.get("scope", ""),
-                    st.get("query") or aspect,
-                )
+                _guarded_scope(st.get("scope", ""), st.get("query") or aspect)
                 for st in search_tasks
             ]
             raw_results = await asyncio.gather(*evidence_coros, return_exceptions=True)

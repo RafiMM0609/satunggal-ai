@@ -61,7 +61,6 @@ _INTENT_DESCRIPTIONS: dict[str, str] = {
     "code_development":       "- code_development   (user wants to clone a repo, edit/fix code using AI CLI, or run code in a Docker sandbox)",
     "code_inspection":        "- code_inspection    (user wants to INSPECT a repo, find bugs/issues/root causes, review code quality \u2014 read-only, NO code changes)",
     "code_understanding":     "- code_understanding (user wants to UNDERSTAND or EXPLORE a repo: what APIs exist, what tech stack is used, what are the data models, dependencies, CI/CD setup, main flow, or what a specific function/class does)",
-    "code_review":            "- code_review        (user wants a CODE QUALITY review: style, best practices, security audit, performance anti-patterns, technical debt \u2014 read-only, NOT fixing bugs)",
     "code_fix":               "- code_fix           (user wants to AUTO-DETECT problems AND AUTO-FIX them in one go \u2014 combined inspect+edit pipeline)",
     "document_creation":      "- document_creation  (user wants to generate a technical document, PDF, or Word file \u2014 from a GitHub repo, topic, or data such as WBS/mandays output)",
     "system_info":            "- system_info        (user asks about server/host resource status: CPU usage, RAM, memory, storage, disk space, hardware info of this machine)",
@@ -211,9 +210,6 @@ _INTENT_RULES: list[tuple[str, "frozenset[str] | None"]] = [
         '    \u2502 code_understanding\u2502 ada apa, apa itu, jelaskan, tech stack, API apa,\u2502\n'
         '    \u2502                  \u2502 bagaimana cara kerja, model data, dependency     \u2502\n'
         '    \u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n'
-        '    \u2502 code_review      \u2502 review kualitas, best practice, apakah sudah    \u2502\n'
-        '    \u2502                  \u2502 sesuai standar, security audit, code smell       \u2502\n'
-        '    \u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n'
         '    \u2502 code_fix         \u2502 temukan DAN perbaiki, cari lalu fix, auto-fix,  \u2502\n'
         '    \u2502                  \u2502 otomatis perbaiki semua bug, diagnosa lalu edit  \u2502\n'
         '    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n'
@@ -221,22 +217,9 @@ _INTENT_RULES: list[tuple[str, "frozenset[str] | None"]] = [
         '    \u2717 "ada apa di repo ini?"            \u2192 NEVER code_inspection \u2192 ALWAYS code_understanding\n'
         '    \u2717 "kenapa error?"                   \u2192 NEVER code_development \u2192 ALWAYS code_inspection\n'
         '    \u2717 "perbaiki error ini"              \u2192 NEVER code_inspection \u2192 ALWAYS code_development\n'
-        '    \u2717 "apakah kode ini sudah bagus?"    \u2192 NEVER code_inspection \u2192 ALWAYS code_review\n'
+        '    \u2717 "apakah kode ini sudah bagus?"    \u2192 NEVER code_inspection \u2192 ALWAYS code_understanding\n'
         '    \u2717 "temukan dan fix semua bug"       \u2192 NEVER code_inspection alone \u2192 ALWAYS code_fix',
-        frozenset({"code_development", "code_inspection", "code_understanding", "code_review", "code_fix"}),
-    ),
-    (
-        '13. Use "code_review" when the user wants a quality-focused review of code without executing or changing it:\n'
-        '    - Indonesian: review kualitas kode, cek best practice, apakah kode ini sudah bagus, audit security,\n'
-        '      cari code smell, cek konvensi penulisan, evaluasi arsitektur, apakah sudah sesuai standar,\n'
-        '      technical debt, periksa keamanan kode, cek performa kode, review style kode\n'
-        '    - English: review code quality, check best practices, is this code good, security audit, code smell,\n'
-        '      check coding conventions, evaluate architecture, is this up to standard, technical debt,\n'
-        '      check code security, performance review, style review\n'
-        '    - Key differentiator: user wants an OPINION on CODE QUALITY (style, security, patterns), NOT finding runtime bugs.\n'
-        '      If user says "cari bug" / "kenapa error" \u2192 code_inspection.\n'
-        '      If user says "apakah kode ini bagus?" / "review kualitasnya" \u2192 code_review.',
-        frozenset({"code_review"}),
+        frozenset({"code_development", "code_inspection", "code_understanding", "code_fix"}),
     ),
     (
         '14. Use "code_fix" when the user explicitly wants the system to BOTH identify problems AND automatically fix them:\n'
@@ -383,7 +366,6 @@ _EXAMPLES: dict[str, str] = {
     "code_development":       '  {"intent": "code_development",       "confidence": 0.96, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}',
     "code_inspection":        '  {"intent": "code_inspection",        "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}',
     "code_understanding":     '  {"intent": "code_understanding",     "confidence": 0.94, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": "api_endpoints"}',
-    "code_review":            '  {"intent": "code_review",            "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}',
     "code_fix":               '  {"intent": "code_fix",               "confidence": 0.94, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}',
     "document_creation":      '  {"intent": "document_creation",      "confidence": 0.95, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}',
     "system_info":            '  {"intent": "system_info",            "confidence": 0.97, "tools": [], "needs_clarification": false, "clarification_question": null, "sub_intent": null}',
