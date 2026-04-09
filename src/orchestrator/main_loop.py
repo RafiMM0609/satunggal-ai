@@ -978,7 +978,7 @@ async def process_pdf(
     """
     from src.memory.state import AgentTask
 
-    history, agents, _, gatekeeper, tools = _get_pipeline()
+    history, agents, _, gatekeeper, tools, _ = _get_pipeline()
 
     task = AgentTask(
         session_id=session_id,
@@ -1319,7 +1319,7 @@ async def process_doc_session_message(
     """
     from src.memory.state import AgentTask
 
-    history, agents, _, _, tools = _get_pipeline()
+    history, agents, _, _, tools, _ = _get_pipeline()
 
     history.add(session_id, "user", user_text)
 
@@ -1443,7 +1443,7 @@ async def process_docx(
     """
     from src.memory.state import AgentTask
 
-    history, agents, _, _, tools = _get_pipeline()
+    history, agents, _, _, tools, _ = _get_pipeline()
 
     user_input = user_caption.strip() or f"[DOCX: {original_filename}]"
     task = AgentTask(session_id=session_id, user_input=user_input)
