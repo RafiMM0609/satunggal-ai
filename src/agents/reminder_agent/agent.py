@@ -90,27 +90,62 @@ Hari dan waktu saat ini (UTC+7 / WIB): {now_wib}
 Reminder aktif pengguna saat ini:
 {existing_reminders}
 
-Berdasarkan permintaan pengguna, buatlah SARAN reminder yang lengkap:
+Berdasarkan permintaan pengguna, buatlah 1 hingga 3 SARAN reminder yang berbeda-beda sehingga pengguna bisa memilih yang paling sesuai.
+Setiap saran harus memiliki variasi yang bermakna — misalnya: waktu berbeda, fokus berbeda, atau tingkat detail yang berbeda.
+
+Untuk setiap saran:
 1. Perjelas judul/isi reminder agar spesifik dan actionable (bukan hanya kata kunci)
-2. Tentukan waktu yang paling masuk akal — konversi ke UTC untuk remind_at_iso
+2. Tentukan waktu yang masuk akal — konversi ke UTC untuk remind_at_iso
 3. Tambahkan "notes" berisi tips atau catatan berguna jika relevan, atau null jika tidak perlu
-4. Periksa reminder aktif — tandai sebagai "conflicts" jika waktunya berdekatan (±1 jam dari reminder baru)
-5. Jika ini event penting (meeting, interview, presentasi, penerbangan, ujian, deadline), sarankan satu "prep_reminder" sekitar 30 menit sebelumnya sebagai persiapan; jika tidak relevan, set ke null
+4. Jika ini event penting (meeting, interview, presentasi, penerbangan, ujian, deadline), sertakan "prep_reminder" sekitar 30 menit sebelumnya; jika tidak relevan, set ke null
+
+Selain itu:
+5. Periksa reminder aktif — tandai di "conflicts" jika waktunya berdekatan (±1 jam dari salah satu saran baru)
 
 Balas HANYA dengan JSON, tanpa markdown, tanpa penjelasan:
 {{
-  "primary": {{
-    "message": "<isi reminder yang jelas dan spesifik>",
-    "remind_at_iso": "<ISO-8601 UTC datetime>",
-    "notes": "<catatan berguna atau null>"
-  }},
-  "prep_reminder": {{
-    "message": "<isi reminder persiapan atau null>",
-    "remind_at_iso": "<ISO-8601 UTC datetime atau null>"
-  }},
+  "suggestions": [
+    {{
+      "message": "<isi reminder yang jelas dan spesifik>",
+      "remind_at_iso": "<ISO-8601 UTC datetime>",
+      "notes": "<catatan berguna atau null>",
+      "prep_reminder": {{
+        "message": "<isi reminder persiapan atau null>",
+        "remind_at_iso": "<ISO-8601 UTC datetime atau null>"
+      }}
+    }}
+  ],
   "conflicts": [
     {{"id": <int>, "message": "<isi reminder>", "remind_at_wib": "<tanggal dan jam WIB>"}}
   ]
+}}
+
+Contoh untuk permintaan "ingatkan meeting besok":
+{{
+  "suggestions": [
+    {{
+      "message": "Meeting tim — persiapkan agenda dan materi",
+      "remind_at_iso": "2026-04-11T02:00:00",
+      "notes": "Pastikan koneksi internet stabil sebelum meeting",
+      "prep_reminder": {{
+        "message": "Persiapan meeting: cek agenda dan buka aplikasi video call",
+        "remind_at_iso": "2026-04-11T01:30:00"
+      }}
+    }},
+    {{
+      "message": "Meeting tim besok pagi",
+      "remind_at_iso": "2026-04-10T23:00:00",
+      "notes": "Reminder malam hari agar bisa persiapan dari malam",
+      "prep_reminder": null
+    }},
+    {{
+      "message": "Meeting tim — 15 menit sebelum mulai",
+      "remind_at_iso": "2026-04-11T01:45:00",
+      "notes": null,
+      "prep_reminder": null
+    }}
+  ],
+  "conflicts": []
 }}
 """
 
@@ -148,6 +183,15 @@ _NEGATIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches "pilih 1", "opsi 2", "option 3", "nomor 1", "no 2", or a bare digit word "1"/"2"/"3"
+_SELECTION_RE = re.compile(
+    r"(?:pilih|opsi|option|nomor|no\.?)\s*([1-9])|\b([1-9])\b",
+    re.IGNORECASE,
+)
+
+# Matches "semua", "all", "semuanya" — confirm all suggestions
+_ALL_RE = re.compile(r"\b(semua|semuanya|all)\b", re.IGNORECASE)
+
 _CLARIFICATION_MARKER = "apakah perlu saya bantu detailkan"
 
 
@@ -175,8 +219,12 @@ class ReminderAgent(BaseAgent):
             # ── Check for a pending confirmation (suggestion was already shown) ──
             pending = get_pending_suggestion(task.session_id)
             if pending:
-                if self._is_affirmative(user_input):
-                    reply = await self._confirm_pending(task.session_id, pending, is_office)
+                selected = self._parse_selection(user_input, len(pending.get("suggestions", [])))
+                if selected is not None:
+                    # selected is a list of 0-based indices
+                    reply = await self._confirm_pending(
+                        task.session_id, pending, is_office, selected
+                    )
                     task.mark_done(reply)
                     return task
                 if self._is_negative(user_input):
@@ -254,6 +302,38 @@ class ReminderAgent(BaseAgent):
     def _is_negative(text: str) -> bool:
         return bool(_NEGATIVE_RE.search(text.strip()))
 
+    @staticmethod
+    def _parse_selection(text: str, num_suggestions: int) -> list[int] | None:
+        """Parse user input to determine which suggestion(s) to confirm.
+
+        Returns a list of 0-based indices if the user made a selection or said
+        "ya"/"semua".  Returns None if the input is not a recognisable selection.
+
+        Rules:
+        - "ya" / affirmative (single suggestion or "all") → [0] or all indices
+        - "semua" / "all"  → all indices [0..n-1]
+        - "pilih 1" / "1"  → [0]
+        - "pilih 2,3"      → [1, 2]
+        """
+        stripped = text.strip()
+
+        # "semua" / "all" → confirm every suggestion
+        if _ALL_RE.search(stripped):
+            return list(range(num_suggestions))
+
+        # plain affirmative → confirm all (keeps backwards-compat for single suggestion)
+        if _AFFIRMATIVE_RE.search(stripped):
+            return list(range(num_suggestions))
+
+        # numbered selection, e.g. "pilih 1", "opsi 2", bare "1"
+        found = [int(m.group(1) or m.group(2)) for m in _SELECTION_RE.finditer(stripped)]
+        if found:
+            # convert 1-based to 0-based, clamp to valid range
+            indices = sorted({n - 1 for n in found if 1 <= n <= num_suggestions})
+            return indices if indices else None
+
+        return None
+
     def _get_pre_clarification_request(self, session_id: str) -> str | None:
         """Return the user message that preceded our last clarification question.
 
@@ -283,8 +363,8 @@ class ReminderAgent(BaseAgent):
     async def _handle_suggest(
         self, session_id: str, parsed: dict, is_office: bool
     ) -> str:
-        """Ask LLM to enrich the request into a full suggestion, check conflicts,
-        store it as pending, and return a formatted proposal for user confirmation."""
+        """Ask LLM to generate 1-3 reminder suggestions, check conflicts,
+        store them as pending, and return formatted options for user to choose."""
         now_utc = datetime.now(timezone.utc)
         now_wib = now_utc + timedelta(hours=7)
         now_wib_str = now_wib.strftime("%A, %d %B %Y %H:%M WIB")
@@ -321,14 +401,52 @@ class ReminderAgent(BaseAgent):
         ]
 
         raw = await self._llm.chat(messages)
-        suggestion = self._extract_json(raw)
+        result = self._extract_json(raw)
 
-        primary = suggestion.get("primary") or {}
-        prep = suggestion.get("prep_reminder") or {}
-        conflicts = suggestion.get("conflicts") or []
+        suggestions_raw = result.get("suggestions") or []
+        conflicts = result.get("conflicts") or []
 
-        if not primary.get("message") or not primary.get("remind_at_iso"):
-            # LLM failed to produce a usable suggestion — ask user to be more specific
+        # Validate and normalise each suggestion; skip invalid ones
+        valid_suggestions: list[dict] = []
+        for s in suggestions_raw:
+            msg = s.get("message")
+            iso = s.get("remind_at_iso")
+            if not msg or not iso:
+                continue
+            try:
+                dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            if dt <= now_utc:
+                dt += timedelta(days=1)
+                if dt <= now_utc:
+                    continue
+                iso = dt.replace(tzinfo=None).isoformat()
+
+            # Validate prep reminder if present
+            prep = s.get("prep_reminder") or {}
+            valid_prep: dict | None = None
+            if prep.get("message") and prep.get("remind_at_iso"):
+                try:
+                    prep_dt = datetime.fromisoformat(prep["remind_at_iso"]).replace(
+                        tzinfo=timezone.utc
+                    )
+                    if prep_dt > now_utc:
+                        valid_prep = {
+                            "message": prep["message"],
+                            "remind_at_iso": prep["remind_at_iso"],
+                        }
+                except (ValueError, TypeError):
+                    pass
+
+            valid_suggestions.append({
+                "message": msg,
+                "remind_at_iso": iso,
+                "notes": s.get("notes"),
+                "prep": valid_prep,
+            })
+
+        if not valid_suggestions:
             if is_office:
                 return (
                     "⚠️ Hmm boss, saya kesulitan memahami detail remindernya.\n"
@@ -343,63 +461,46 @@ class ReminderAgent(BaseAgent):
                 "• *reminder minum obat setiap hari jam 08:00*"
             )
 
-        # Validate primary time
-        try:
-            remind_dt = datetime.fromisoformat(primary["remind_at_iso"]).replace(
-                tzinfo=timezone.utc
-            )
-        except (ValueError, TypeError):
-            if is_office:
-                return (
-                    "⚠️ Boss, format waktunya gak kedeteksi nih. "
-                    "Coba tulis lebih spesifik ya, misalnya \"besok jam 10:00\"."
-                )
-            return (
-                "⚠️ Format waktu tidak dapat diproses. "
-                "Coba tulis lebih spesifik, misalnya \"besok jam 10:00\"."
-            )
-
-        if remind_dt <= now_utc:
-            remind_dt += timedelta(days=1)
-            if remind_dt <= now_utc:
-                if is_office:
-                    return "⚠️ Aduh boss, waktunya udah lewat nih. Pilih waktu yang akan datang ya!"
-                return "⚠️ Waktu reminder sudah lewat. Silakan tentukan waktu di masa mendatang."
-            primary["remind_at_iso"] = remind_dt.replace(tzinfo=None).isoformat()
-
-        primary_wib = remind_dt + timedelta(hours=7)
-        primary_time_str = primary_wib.strftime("%A, %d %B %Y pukul %H:%M WIB")
-
         # Build response lines
         lines: list[str] = []
+        is_multi = len(valid_suggestions) > 1
         if is_office:
-            lines.append("🔔 *Berikut saran reminder yang saya siapkan boss:*\n")
+            header = (
+                "🔔 *Berikut beberapa saran reminder boss, pilih yang paling cocok:*\n"
+                if is_multi
+                else "🔔 *Berikut saran reminder yang saya siapkan boss:*\n"
+            )
         else:
-            lines.append("🔔 *Berikut saran reminder dari saya:*\n")
+            header = (
+                "🔔 *Berikut beberapa saran reminder, pilih yang paling sesuai:*\n"
+                if is_multi
+                else "🔔 *Berikut saran reminder dari saya:*\n"
+            )
+        lines.append(header)
 
-        lines.append(f"📌 *Judul:* {primary['message']}")
-        lines.append(f"📅 *Waktu:* {primary_time_str}")
-        if primary.get("notes"):
-            lines.append(f"📝 *Catatan:* {primary['notes']}")
+        for idx, s in enumerate(valid_suggestions, start=1):
+            dt = datetime.fromisoformat(s["remind_at_iso"]).replace(tzinfo=timezone.utc)
+            wib = dt + timedelta(hours=7)
+            time_str = wib.strftime("%A, %d %B %Y pukul %H:%M WIB")
 
-        # Prep reminder
-        has_prep = bool(prep.get("message") and prep.get("remind_at_iso"))
-        if has_prep:
-            try:
-                prep_dt = datetime.fromisoformat(prep["remind_at_iso"]).replace(
+            if is_multi:
+                lines.append(f"*Opsi {idx}*")
+            lines.append(f"📌 *Judul:* {s['message']}")
+            lines.append(f"📅 *Waktu:* {time_str}")
+            if s.get("notes"):
+                lines.append(f"📝 *Catatan:* {s['notes']}")
+            if s.get("prep"):
+                prep_dt = datetime.fromisoformat(s["prep"]["remind_at_iso"]).replace(
                     tzinfo=timezone.utc
                 )
-                if prep_dt > now_utc:
-                    prep_wib = prep_dt + timedelta(hours=7)
-                    prep_time_str = prep_wib.strftime("%A, %d %B %Y pukul %H:%M WIB")
-                    lines.append(
-                        f"\n💡 *Reminder Persiapan:* \"{prep['message']}\"\n"
-                        f"   ⏰ {prep_time_str}"
-                    )
-                else:
-                    has_prep = False
-            except (ValueError, TypeError):
-                has_prep = False
+                prep_wib = prep_dt + timedelta(hours=7)
+                prep_time_str = prep_wib.strftime("%A, %d %B %Y pukul %H:%M WIB")
+                lines.append(
+                    f"💡 *Reminder Persiapan:* \"{s['prep']['message']}\"\n"
+                    f"   ⏰ {prep_time_str}"
+                )
+            if is_multi and idx < len(valid_suggestions):
+                lines.append("")  # blank line between options
 
         # Conflict warnings
         if conflicts:
@@ -411,46 +512,67 @@ class ReminderAgent(BaseAgent):
                 )
 
         lines.append("")
-        if is_office:
-            lines.append("Balas *ya* untuk membuat reminder ini, atau jelaskan perubahannya boss 😊")
+        if is_multi:
+            if is_office:
+                lines.append(
+                    "Balas *pilih 1*, *pilih 2*, dll untuk memilih satu opsi, "
+                    "atau *semua* untuk buat semua reminder sekaligus boss 😊\n"
+                    "Ketik *batal* untuk membatalkan."
+                )
+            else:
+                lines.append(
+                    "Balas *pilih 1*, *pilih 2*, dst untuk memilih opsi tertentu, "
+                    "atau *semua* untuk membuat semua reminder.\n"
+                    "Ketik *batal* untuk membatalkan."
+                )
         else:
-            lines.append(
-                "Balas *ya* untuk membuat reminder ini, "
-                "atau jelaskan perubahan yang diinginkan."
-            )
+            if is_office:
+                lines.append("Balas *ya* untuk membuat reminder ini, atau jelaskan perubahannya boss 😊")
+            else:
+                lines.append(
+                    "Balas *ya* untuk membuat reminder ini, "
+                    "atau jelaskan perubahan yang diinginkan."
+                )
 
-        # Persist pending suggestion in module-level store
-        pending_data: dict = {
-            "primary": {
-                "message": primary["message"],
-                "remind_at_iso": primary["remind_at_iso"],
-            }
-        }
-        if has_prep and prep.get("message") and prep.get("remind_at_iso"):
-            pending_data["prep"] = {
-                "message": prep["message"],
-                "remind_at_iso": prep["remind_at_iso"],
-            }
-        set_pending_suggestion(session_id, pending_data)
+        # Persist suggestions as pending
+        set_pending_suggestion(session_id, {"suggestions": valid_suggestions})
 
         return "\n".join(lines)
 
     async def _confirm_pending(
-        self, session_id: str, pending: dict, is_office: bool
+        self,
+        session_id: str,
+        pending: dict,
+        is_office: bool,
+        selected_indices: list[int] | None = None,
     ) -> str:
-        """Create the reminder(s) stored in the pending suggestion."""
+        """Create reminder(s) for the selected suggestion indices.
+
+        selected_indices: 0-based list; None or empty = all suggestions.
+        """
         clear_pending_suggestion(session_id)
 
-        primary = pending.get("primary", {})
-        prep = pending.get("prep")
+        suggestions = pending.get("suggestions", [])
+        if selected_indices is None:
+            selected_indices = list(range(len(suggestions)))
 
-        primary_reply = await self._handle_set(session_id, primary, is_office)
+        reply_parts: list[str] = []
+        for idx in selected_indices:
+            if idx < 0 or idx >= len(suggestions):
+                continue
+            s = suggestions[idx]
+            primary_reply = await self._handle_set(session_id, s, is_office)
+            reply_parts.append(primary_reply)
+            if s.get("prep"):
+                prep_reply = await self._handle_set(
+                    session_id, s["prep"], is_office, is_prep=True
+                )
+                reply_parts.append(prep_reply)
 
-        if prep and prep.get("message") and prep.get("remind_at_iso"):
-            prep_reply = await self._handle_set(session_id, prep, is_office, is_prep=True)
-            return f"{primary_reply}\n\n{prep_reply}"
-
-        return primary_reply
+        return "\n\n".join(reply_parts) if reply_parts else (
+            "⚠️ Tidak ada reminder yang dibuat." if not is_office
+            else "⚠️ Gak ada reminder yang dibuat boss."
+        )
 
     async def _handle_clarify_and_suggest(
         self, session_id: str, original_request: str, is_office: bool
