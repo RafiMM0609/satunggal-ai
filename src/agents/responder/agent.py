@@ -17,6 +17,7 @@ from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
 from src.memory.history import ConversationHistory
 from src.memory.state import AgentTask
+from src.tools.telegram_formatter import sanitize_for_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class ResponderAgent(BaseAgent):
                 messages.append({"role": "user", "content": task.user_input})
 
             reply = await self._llm.chat(messages)
-            task.mark_done(reply)
+            task.mark_done(sanitize_for_telegram(reply))
             logger.info("Responder done for session=%s", task.session_id)
         except Exception as exc:
             logger.exception("ResponderAgent failed: %s", exc)

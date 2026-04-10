@@ -27,6 +27,7 @@ from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
 from src.memory.history import ConversationHistory
 from src.memory.state import AgentTask
+from src.tools.telegram_formatter import sanitize_for_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,18 @@ Aturan ketat:
 - Di bawah setiap bagian, tuliskan 2–3 sub-poin yang harus dibahas, diawali dengan tanda (-).
 - Jangan jawab pertanyaannya sekarang – hanya buat kerangka rencana.
 - Gunakan bahasa yang sama dengan pertanyaan pengguna.
+"""
+
+# ── Office-mode addendum: appended to the final-answer prompt only. ───────────
+# Internal steps (decompose, plan) are unaffected so their strict QUERY: prefix
+# parsing keeps working.  We only change the *tone* of the user-facing response.
+_OFFICE_TONE_ADDENDUM = """\
+
+Catatan gaya (Mode Office aktif):
+- Sampaikan hasil riset dengan nada santai dan akrab – sapa user sebagai "boss" sekali di pembuka.
+- Tetap gunakan struktur header (## Judul) dan bullet point yang rapi agar mudah dibaca.
+- Sisipkan kata-kata gaul yang wajar: "nih", "dong", "yuk", "mantap", "gaskeun", "okee", dll.
+- Jangan korbankan akurasi atau kelengkapan data demi nada santai.
 """
 
 
@@ -283,6 +296,9 @@ class ResearcherAgent(BaseAgent):
             else:
                 system_content = _SYSTEM_PROMPT
 
+            if task.current_mode == "office":
+                system_content += _OFFICE_TONE_ADDENDUM
+
             if research_plan:
                 system_content += (
                     "\n\n## Rencana Riset (ikuti urutan dan cakupan ini persis)\n\n"
@@ -303,6 +319,7 @@ class ResearcherAgent(BaseAgent):
             reply = await self._llm.chat(messages, max_tokens=8192)
             logger.debug("ResearcherAgent raw reply: %s", reply)
 
+            reply = sanitize_for_telegram(reply)
             task.mark_done(reply)
             logger.info(
                 "Researcher done for session=%s (web_search=%s, sub_queries=%d, plan=%s)",
