@@ -51,6 +51,7 @@ from src.tools.repo_qa import (
     run_qa_extraction,
     _search_config_files_for_keyword,
     _evidence_is_empty,
+    _find_symbol_definition,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,10 @@ _DATA_NEEDED_RE = re.compile(
 
 # Maximum extra files to read in the adaptive deepening retry pass.
 _MAX_ADAPTIVE_FILES = 5
+
+# Maximum number of evidence-gathering + LLM rounds in the deep-search loop.
+# Round 0 is the initial call; rounds 1...N are evidence-enrichment retries.
+_MAX_EVIDENCE_LOOP_ROUNDS = 3
 
 # ── Evidence section compression constants (Item 8) ──────────────────────────
 # When the total assembled evidence string exceeds _EVIDENCE_COMPRESS_TRIGGER,
@@ -435,6 +440,61 @@ def _extract_query_keywords(query: str) -> list[str]:
             seen.add(c)
             result.append(c)
     return result
+
+
+def _extract_symbols_from_response(text: str) -> list:
+    """
+    Extract function/symbol names from an LLM response that need further
+    investigation via ``_find_symbol_definition``.
+
+    Looks for:
+    - Backtick-quoted identifiers that look like function or class names.
+    - Names mentioned next to "tidak ditemukan" / "not found" sentinels.
+
+    Returns a deduplicated list, capped at 10 symbols.
+    """
+    symbols: list = []
+
+    # Backtick-quoted names: `FunctionName`, `HandleRequest`, `ProcessOrder`
+    for m in re.finditer(r'`([A-Za-z_][A-Za-z0-9_]{2,})`', text):
+        name = m.group(1)
+        # Skip file paths (contain '/') and short tokens
+        if "/" not in name and "." not in name:
+            symbols.append(name)
+
+    # "tidak ditemukan: FunctionName" patterns
+    for m in re.finditer(
+        r'(?:tidak\s+ditemukan|not\s+found|TIDAK\s+DITEMUKAN)\s*[:\-]?\s*'
+        r'[`"\'\']?([A-Za-z_][A-Za-z0-9_]{3,})[`"\'\'\']?',
+        text, re.IGNORECASE,
+    ):
+        symbols.append(m.group(1))
+
+    seen: set = set()
+    unique: list = []
+    for s in symbols:
+        if s not in seen:
+            seen.add(s)
+            unique.append(s)
+    return unique[:10]
+
+
+def _validate_response_confidence(response: str) -> bool:
+    """
+    Return True when the LLM response is considered confident.
+
+    A response is *not* confident when:
+    - It contains a [DATA TIDAK CUKUP] / [PERLU DATA TAMBAHAN] marker.
+    - It has no file:line references (e.g. handler.go:42 or main.py:10).
+    - It is empty or very short (< 100 chars).
+    """
+    if not response or len(response.strip()) < 100:
+        return False
+    if _DATA_NEEDED_RE.search(response):
+        return False
+    has_file_ref = bool(re.search(r'\b[\w/.-]+\.\w{1,5}:\d+', response))
+    has_confirmed = bool(re.search(r'\[CONFIRMED\]|\U0001f7e2', response))
+    return has_file_ref or has_confirmed
 
 
 # ── Agent ──────────────────────────────────────────────────────────────────────
@@ -1441,113 +1501,149 @@ class DeveloperQnAAgent(RepoAgentBase):
                     intent.value, task.session_id, req.problem,
                 )
 
-            # ── Adaptive deepening retry (Item 7-extended) ────────────────
-            # If the LLM response signals [DATA TIDAK CUKUP], read any extra
-            # files it mentions and re-run the LLM with the enriched evidence.
-            # This is the same mechanism as inspector's iteration 3, now also
-            # applied to the Q&A agent for pointed questions.
-            if _DATA_NEEDED_RE.search(qa_response):
-                extra_paths: list[str] = re.findall(
+            # ── Multi-round adaptive deepening (looping evidence search) ──────
+            # Round 0 is the initial LLM call above.  Each subsequent round:
+            #   1. Validate whether the response is already confident.
+            #   2. Read explicitly mentioned file paths.
+            #   3. Search for function/symbol definitions mentioned in the response.
+            #   4. Fallback: search config/data files.
+            #   5. If new evidence found, re-run LLM; otherwise stop.
+            # Runs up to _MAX_EVIDENCE_LOOP_ROUNDS - 1 extra retries.
+            current_evidence = evidence.copy()
+            current_user_msg = user_msg
+
+            for _round in range(1, _MAX_EVIDENCE_LOOP_ROUNDS):
+                if _validate_response_confidence(qa_response):
+                    logger.info(
+                        "QnA: response is confident after round %d — stopping loop",
+                        _round - 1,
+                    )
+                    break
+
+                logger.info(
+                    "QnA: response not confident (round %d/%d) — gathering more evidence",
+                    _round, _MAX_EVIDENCE_LOOP_ROUNDS - 1,
+                )
+                new_parts: list[str] = []
+
+                # 1. Read explicitly mentioned file paths
+                extra_paths_found: list[str] = re.findall(
                     r"\[(?:PERLU DATA TAMBAHAN|DATA TIDAK CUKUP)[:\s]*([^\]]+)\]",
                     qa_response,
                     re.IGNORECASE,
                 )
-                extra_paths = [p.strip() for p in extra_paths if p.strip()][:_MAX_ADAPTIVE_FILES]
+                extra_paths_found = [
+                    p.strip() for p in extra_paths_found if p.strip()
+                ][:_MAX_ADAPTIVE_FILES]
 
-                if extra_paths:
-                    logger.info(
-                        "QnA: [DATA TIDAK CUKUP] detected — reading %d extra file(s): %s",
-                        len(extra_paths), extra_paths,
-                    )
-                    added_content: list[str] = []
-                    for rel_path in extra_paths:
-                        abs_path = repo_path / rel_path
-                        if abs_path.exists() and abs_path.is_file():
-                            try:
-                                text = abs_path.read_text(errors="replace")[:MAX_FILE_BYTES]
-                                ext = abs_path.suffix.lstrip(".")
-                                added_content.append(
-                                    f"### 📄 `{rel_path}` (tambahan berdasarkan sinyal DATA TIDAK CUKUP)\n"
-                                    f"```{ext}\n{text}\n```"
-                                )
-                            except OSError as exc:
-                                logger.debug("QnA adaptive retry: cannot read %s: %s", rel_path, exc)
-                        else:
-                            logger.debug("QnA adaptive retry: file not found: %s", rel_path)
-
-                    if added_content:
-                        enriched_evidence = evidence.copy()
-                        enriched_evidence["📎 File Tambahan (Adaptive Deepening)"] = "\n\n".join(added_content)
-                        enriched_text = self._build_evidence_text(enriched_evidence)
-
-                        logger.info(
-                            "QnA: re-running LLM with enriched evidence (%d chars)",
-                            len(enriched_text),
-                        )
-                        retry_user_msg = user_msg + (
-                            f"\n\n---\n\n"
-                            f"**⚠️ TAMBAHAN: File yang diminta sebelumnya telah dibaca.**\n"
-                            f"Gunakan data di bawah untuk melengkapi jawaban:\n\n"
-                            f"{enriched_evidence.get('📎 File Tambahan (Adaptive Deepening)', '')}"
-                        )
+                for rel_path in extra_paths_found:
+                    abs_path = repo_path / rel_path
+                    if abs_path.exists() and abs_path.is_file():
                         try:
-                            retry_response = await self._llm.chat(
-                                messages=[
-                                    {"role": "system", "content": _QA_SYSTEM_PROMPT},
-                                    {"role": "user",   "content": retry_user_msg},
-                                ],
-                                temperature=QNA_TEMPERATURE,
-                                top_p=QNA_TOP_P,
-                                max_tokens=QNA_MAX_TOKENS,
+                            file_text = abs_path.read_text(errors="replace")[:MAX_FILE_BYTES]
+                            ext = abs_path.suffix.lstrip(".")
+                            new_parts.append(
+                                f"### \U0001f4c4 `{rel_path}` (diminta oleh LLM)\n"
+                                f"```{ext}\n{file_text}\n```"
                             )
-                            if retry_response.strip():
-                                qa_response = retry_response
-                                logger.info("QnA: adaptive deepening retry succeeded")
-                        except Exception as retry_exc:
-                            logger.warning(
-                                "QnA: adaptive deepening retry failed (%s); "
-                                "keeping original response",
-                                retry_exc,
-                            )
-                else:
-                    # No explicit file paths mentioned but [DATA TIDAK CUKUP] detected.
-                    # Search config files using the original question keywords as a
-                    # best-effort enrichment.
+                            logger.debug("QnA loop: read extra file %s", rel_path)
+                        except OSError as exc:
+                            logger.debug("QnA loop: cannot read %s: %s", rel_path, exc)
+                    else:
+                        logger.debug("QnA loop: file not found: %s", rel_path)
+
+                # 2. Search for function/symbol definitions mentioned in the response
+                needed_symbols = _extract_symbols_from_response(qa_response)
+                if needed_symbols:
                     logger.info(
-                        "QnA: [DATA TIDAK CUKUP] detected without explicit paths — "
-                        "searching config files as best-effort enrichment"
+                        "QnA loop round %d: searching definitions for symbols=%r",
+                        _round, needed_symbols,
+                    )
+                    sym_results = await asyncio.gather(
+                        *[
+                            _find_symbol_definition(repo_path, sym)
+                            for sym in needed_symbols
+                        ],
+                        return_exceptions=True,
+                    )
+                    for sym, result in zip(needed_symbols, sym_results):
+                        if isinstance(result, Exception):
+                            logger.debug(
+                                "QnA loop: definition lookup error for %r: %s",
+                                sym, result,
+                            )
+                            continue
+                        defn = str(result)
+                        if defn and not _evidence_is_empty(defn):
+                            new_parts.append(
+                                f"### \U0001f50d Definisi: `{sym}` (search-for-definition)\n"
+                                f"{defn}"
+                            )
+                            logger.debug("QnA loop: found definition for %r", sym)
+
+                # 3. Fallback: config/data file search when nothing else worked
+                if not new_parts:
+                    logger.info(
+                        "QnA loop round %d: no new evidence from files/symbols — "
+                        "trying config file search",
+                        _round,
                     )
                     config_enrichment = await _search_config_files_for_keyword(
                         repo_path,
                         symbol_target or (req.problem or task.user_input)[:60],
                         req.problem or task.user_input,
                     )
-                    if config_enrichment and not config_enrichment.startswith("(tidak ditemukan"):
-                        retry_user_msg = user_msg + (
-                            f"\n\n---\n\n"
-                            f"**⚠️ TAMBAHAN: File konfigurasi/data yang relevan:**\n\n"
-                            f"{config_enrichment}"
-                        )
-                        try:
-                            retry_response = await self._llm.chat(
-                                messages=[
-                                    {"role": "system", "content": _QA_SYSTEM_PROMPT},
-                                    {"role": "user",   "content": retry_user_msg},
-                                ],
-                                temperature=QNA_TEMPERATURE,
-                                top_p=QNA_TOP_P,
-                                max_tokens=QNA_MAX_TOKENS,
-                            )
-                            if retry_response.strip():
-                                qa_response = retry_response
-                                logger.info("QnA: config-file enrichment retry succeeded")
-                        except Exception as retry_exc:
-                            logger.warning(
-                                "QnA: config-file enrichment retry failed (%s); "
-                                "keeping original response",
-                                retry_exc,
-                            )
+                    if config_enrichment and not config_enrichment.startswith(
+                        "(tidak ditemukan"
+                    ):
+                        new_parts.append(config_enrichment)
 
+                if not new_parts:
+                    logger.info(
+                        "QnA loop round %d: no additional evidence found — stopping loop",
+                        _round,
+                    )
+                    break
+
+                # 4. Append new evidence and re-run LLM
+                round_evidence_key = f"\U0001f50d Pencarian Tambahan Ronde {_round}"
+                current_evidence[round_evidence_key] = "\n\n".join(new_parts)
+                current_user_msg = current_user_msg + (
+                    f"\n\n---\n\n"
+                    f"**\u26a0\ufe0f TAMBAHAN RONDE {_round}: Evidence baru ditemukan.**\n"
+                    f"Gunakan data berikut untuk melengkapi/memperbaiki jawaban:\n\n"
+                    f"{current_evidence[round_evidence_key]}"
+                )
+
+                logger.info(
+                    "QnA loop: re-running LLM (round %d) with enriched evidence",
+                    _round,
+                )
+                try:
+                    retry_response = await self._llm.chat(
+                        messages=[
+                            {"role": "system", "content": _QA_SYSTEM_PROMPT},
+                            {"role": "user",   "content": current_user_msg},
+                        ],
+                        temperature=QNA_TEMPERATURE,
+                        top_p=QNA_TOP_P,
+                        max_tokens=QNA_MAX_TOKENS,
+                    )
+                    if retry_response.strip():
+                        qa_response = retry_response
+                        logger.info("QnA loop: round %d retry succeeded", _round)
+                    else:
+                        logger.warning(
+                            "QnA loop: round %d LLM returned empty — stopping loop",
+                            _round,
+                        )
+                        break
+                except Exception as retry_exc:
+                    logger.warning(
+                        "QnA loop: round %d retry failed (%s); keeping previous response",
+                        _round, retry_exc,
+                    )
+                    break
             t_total = time.monotonic() - t_start
             logger.info("QnA: done in %.2fs total", t_total)
 
