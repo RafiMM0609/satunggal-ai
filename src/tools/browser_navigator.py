@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import random
 from pathlib import Path
@@ -197,10 +198,33 @@ class BrowserNavigatorTool(BaseTool):
     name = "browser_navigator"
 
     def __init__(self) -> None:
-        self._playwright: Any = None
-        self._browser:    Any = None
-        self._context:    Any = None
-        self._page:       Any = None
+        self._playwright:      Any            = None
+        self._browser:         Any            = None
+        self._context:         Any            = None
+        # ── Multi-tab state ────────────────────────────────────────────────
+        # Replaces the old single ``self._page`` attribute.  All existing code
+        # that reads ``self._page`` goes through the property getter below.
+        self._tabs:            dict[str, Any] = {}   # tab_id → Page
+        self._active_tab_id:   str            = ""   # currently active tab
+        self._tab_counter:     int            = 0    # monotonic id counter
+
+    # ── Active-page property (multi-tab compatibility shim) ───────────────────
+
+    @property
+    def _page(self) -> Any:
+        """Return the currently active tab's Playwright Page, or ``None``."""
+        return self._tabs.get(self._active_tab_id)
+
+    @_page.setter
+    def _page(self, value: Any) -> None:
+        """Assign a page to the active tab slot (used by tests and close())."""
+        if value is None:
+            self._tabs.clear()
+            self._active_tab_id = ""
+        else:
+            if not self._active_tab_id:
+                self._active_tab_id = "tab_1"
+            self._tabs[self._active_tab_id] = value
 
     # ── BaseTool.run interface ────────────────────────────────────────────────
 
@@ -241,6 +265,41 @@ class BrowserNavigatorTool(BaseTool):
                 return await self._action_check_captcha(task)
             elif action == "close_popup":
                 return await self._action_close_popup(task)
+            # ── New actions (upgrade) ──────────────────────────────────────
+            elif action == "open_tab":
+                return await self._action_open_tab(task)
+            elif action == "switch_tab":
+                return await self._action_switch_tab(task)
+            elif action == "close_tab":
+                return await self._action_close_tab(task)
+            elif action == "wait_for_element":
+                return await self._action_wait_for_element(task)
+            elif action == "wait_for_navigation":
+                return await self._action_wait_for_navigation(task)
+            elif action == "fill_form":
+                return await self._action_fill_form(task)
+            elif action == "hover":
+                return await self._action_hover(task)
+            elif action == "drag_drop":
+                return await self._action_drag_drop(task)
+            elif action == "press_key":
+                return await self._action_press_key(task)
+            elif action == "upload_file":
+                return await self._action_upload_file(task)
+            elif action == "scrape_table":
+                return await self._action_scrape_table(task)
+            elif action == "assert_text":
+                return await self._action_assert_text(task)
+            elif action == "load_session":
+                return await self._action_load_session(task)
+            elif action == "clear_session":
+                return await self._action_clear_session(task)
+            elif action == "explore_parallel":
+                return await self._action_explore_parallel(task)
+            elif action == "compare_screenshot":
+                return await self._action_compare_screenshot(task)
+            elif action == "solve_captcha":
+                return await self._action_solve_captcha(task)
             else:
                 return {
                     "error": f"Unknown browser_action: '{action}'",
@@ -256,6 +315,18 @@ class BrowserNavigatorTool(BaseTool):
         """Launch browser + context + page if not already open."""
         if self._page is not None:
             return  # already open
+
+        # If a context exists but all tabs were closed, create a new page
+        # without re-launching the whole browser.
+        if self._context is not None:
+            self._tab_counter += 1
+            tab_id   = f"tab_{self._tab_counter}"
+            new_page = await self._context.new_page()
+            new_page.set_default_timeout(_TIMEOUT_MS)
+            new_page.set_default_navigation_timeout(_TIMEOUT_MS)
+            self._tabs[tab_id]   = new_page
+            self._active_tab_id  = tab_id
+            return
 
         from playwright.async_api import async_playwright  # lazy import
 
@@ -281,9 +352,13 @@ class BrowserNavigatorTool(BaseTool):
 
         await self._context.route("**/*", _block)
 
-        self._page = await self._context.new_page()
-        self._page.set_default_timeout(_TIMEOUT_MS)
-        self._page.set_default_navigation_timeout(_TIMEOUT_MS)
+        self._tab_counter += 1
+        tab_id   = f"tab_{self._tab_counter}"
+        new_page = await self._context.new_page()
+        new_page.set_default_timeout(_TIMEOUT_MS)
+        new_page.set_default_navigation_timeout(_TIMEOUT_MS)
+        self._tabs[tab_id]   = new_page
+        self._active_tab_id  = tab_id
 
     async def close(self) -> None:
         """Close the browser and release all resources."""
@@ -297,10 +372,12 @@ class BrowserNavigatorTool(BaseTool):
         except Exception as exc:
             logger.warning("BrowserNavigatorTool.close: error during cleanup: %s", exc)
         finally:
-            self._playwright = None
-            self._browser    = None
-            self._context    = None
-            self._page       = None
+            self._playwright    = None
+            self._browser       = None
+            self._context       = None
+            self._tabs.clear()
+            self._active_tab_id = ""
+            self._tab_counter   = 0
 
     def has_active_page(self) -> bool:
         """Return True when the browser has an open, non-closed page.
@@ -1486,9 +1563,1031 @@ class BrowserNavigatorTool(BaseTool):
             "message":      f"Session saved to {path}",
         }
 
-    # ── Captcha detection ─────────────────────────────────────────────────────
+    # ── Multi-tab management ──────────────────────────────────────────────────
 
-    async def _detect_captcha(self) -> tuple[bool, str]:
+    async def _action_open_tab(self, task: "AgentTask") -> dict[str, Any]:
+        """Open a new browser tab, optionally navigating it to a URL immediately."""
+        url: str = task.metadata.get("target_url", "").strip()
+
+        await self._ensure_browser()
+        assert self._context is not None  # noqa: S101
+
+        self._tab_counter += 1
+        tab_id   = f"tab_{self._tab_counter}"
+        new_page = await self._context.new_page()
+        new_page.set_default_timeout(_TIMEOUT_MS)
+        new_page.set_default_navigation_timeout(_TIMEOUT_MS)
+        self._tabs[tab_id]   = new_page
+        self._active_tab_id  = tab_id
+
+        result: dict[str, Any] = {
+            "action":  "open_tab",
+            "success": True,
+            "tab_id":  tab_id,
+            "tabs":    list(self._tabs.keys()),
+            "message": f"Opened new tab '{tab_id}'",
+        }
+
+        if url:
+            await new_page.goto(url, wait_until="domcontentloaded")
+            try:
+                await new_page.wait_for_load_state(
+                    "networkidle", timeout=_NETWORK_IDLE_TIMEOUT_MS
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            await self._wait_for_spa_stable()
+            await _random_delay(min_ms=200, max_ms=600)
+            title = await new_page.title()
+            result.update({
+                "url":     new_page.url,
+                "title":   title,
+                "message": f"Opened new tab '{tab_id}' and navigated to {new_page.url}",
+            })
+
+        return result
+
+    async def _action_switch_tab(self, task: "AgentTask") -> dict[str, Any]:
+        """Switch the active tab to the given ``tab_id``."""
+        tab_id: str = task.metadata.get("tab_id", "").strip()
+        if not tab_id:
+            return {"error": "tab_id not provided", "success": False, "action": "switch_tab"}
+        if tab_id not in self._tabs:
+            return {
+                "error":   f"Tab '{tab_id}' does not exist. Available: {list(self._tabs.keys())}",
+                "success": False,
+                "action":  "switch_tab",
+            }
+        self._active_tab_id = tab_id
+        page = self._tabs[tab_id]
+        try:
+            title = await page.title()
+            url   = page.url
+        except Exception:  # noqa: BLE001
+            title, url = "", ""
+        return {
+            "action":  "switch_tab",
+            "success": True,
+            "tab_id":  tab_id,
+            "tabs":    list(self._tabs.keys()),
+            "url":     url,
+            "title":   title,
+            "message": f"Switched to tab '{tab_id}' – {url!r}",
+        }
+
+    async def _action_close_tab(self, task: "AgentTask") -> dict[str, Any]:
+        """Close a tab by ID, or the active tab when no ID is given."""
+        tab_id: str = task.metadata.get("tab_id", self._active_tab_id).strip()
+        if not tab_id or tab_id not in self._tabs:
+            return {
+                "error":   f"Tab '{tab_id}' does not exist",
+                "success": False,
+                "action":  "close_tab",
+            }
+        try:
+            await self._tabs[tab_id].close()
+        except Exception:  # noqa: BLE001
+            pass
+        del self._tabs[tab_id]
+        # Switch to the most recently opened remaining tab, if any
+        if self._tabs:
+            self._active_tab_id = list(self._tabs.keys())[-1]
+        else:
+            self._active_tab_id = ""
+        return {
+            "action":          "close_tab",
+            "success":         True,
+            "closed_tab_id":   tab_id,
+            "active_tab_id":   self._active_tab_id,
+            "tabs":            list(self._tabs.keys()),
+            "message":         (
+                f"Closed tab '{tab_id}'. "
+                f"Active tab: '{self._active_tab_id}'" if self._active_tab_id
+                else f"Closed tab '{tab_id}'. No tabs remaining."
+            ),
+        }
+
+    # ── Wait actions ──────────────────────────────────────────────────────────
+
+    async def _action_wait_for_element(self, task: "AgentTask") -> dict[str, Any]:
+        """Wait until an element matching a text or CSS selector is visible.
+
+        Metadata:
+            ``wait_text``       – visible text to wait for (partial match)
+            ``wait_selector``   – CSS selector to wait for
+            ``wait_timeout_ms`` – max wait time in ms (default 10 000)
+        """
+        text:       str = task.metadata.get("wait_text",     "").strip()
+        selector:   str = task.metadata.get("wait_selector", "").strip()
+        timeout_ms: int = int(task.metadata.get("wait_timeout_ms", 10_000))
+
+        if not text and not selector:
+            return {
+                "error":   "wait_text or wait_selector not provided",
+                "success": False,
+                "action":  "wait_for_element",
+            }
+
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "wait_for_element",
+            }
+
+        try:
+            if selector:
+                await self._page.wait_for_selector(
+                    selector, state="visible", timeout=timeout_ms
+                )
+                found_by = f"selector: {selector}"
+            else:
+                await (
+                    self._page.get_by_text(text, exact=False)
+                    .first.wait_for(state="visible", timeout=timeout_ms)
+                )
+                found_by = f"text: {text!r}"
+            return {
+                "action":   "wait_for_element",
+                "success":  True,
+                "found_by": found_by,
+                "url":      self._page.url,
+                "message":  f"Element visible: {found_by}",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "action":  "wait_for_element",
+                "success": False,
+                "error":   f"Element not visible within {timeout_ms} ms: {exc}",
+            }
+
+    async def _action_wait_for_navigation(self, task: "AgentTask") -> dict[str, Any]:
+        """Wait for the page to finish navigating, optionally matching a URL pattern.
+
+        Metadata:
+            ``wait_url_pattern`` – substring that must appear in the final URL
+            ``wait_timeout_ms``  – max wait time in ms (default 15 000)
+        """
+        url_pattern: str = task.metadata.get("wait_url_pattern", "").strip()
+        timeout_ms:  int = int(task.metadata.get("wait_timeout_ms", 15_000))
+
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "wait_for_navigation",
+            }
+
+        try:
+            await self._page.wait_for_load_state(
+                "domcontentloaded", timeout=timeout_ms
+            )
+            try:
+                await self._page.wait_for_load_state(
+                    "networkidle", timeout=_NETWORK_IDLE_TIMEOUT_MS
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            current_url = self._page.url
+            if url_pattern and url_pattern.lower() not in current_url.lower():
+                return {
+                    "action":  "wait_for_navigation",
+                    "success": False,
+                    "error":   (
+                        f"URL '{current_url}' does not contain pattern '{url_pattern}'"
+                    ),
+                    "url":     current_url,
+                }
+            return {
+                "action":      "wait_for_navigation",
+                "success":     True,
+                "url":         current_url,
+                "title":       await self._page.title(),
+                "url_matched": url_pattern,
+                "message":     f"Navigation completed to {current_url}",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "action":  "wait_for_navigation",
+                "success": False,
+                "error":   f"Navigation wait failed: {exc}",
+            }
+
+    # ── Bulk form fill ────────────────────────────────────────────────────────
+
+    async def _action_fill_form(self, task: "AgentTask") -> dict[str, Any]:
+        """Fill multiple form fields in a single action step.
+
+        Metadata:
+            ``form_fields`` – JSON array (or Python list) of
+                              ``{"label": "...", "selector": "...", "text": "..."}``
+                              dicts.  ``label`` and ``selector`` are both optional
+                              but at least one should be provided per field.
+        """
+        raw_fields = task.metadata.get("form_fields", [])
+        if isinstance(raw_fields, str):
+            try:
+                raw_fields = json.loads(raw_fields)
+            except Exception:
+                return {
+                    "error":   "form_fields must be a JSON array",
+                    "success": False,
+                    "action":  "fill_form",
+                }
+
+        if not raw_fields:
+            return {
+                "error":   "form_fields is empty",
+                "success": False,
+                "action":  "fill_form",
+            }
+
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "fill_form",
+            }
+
+        from src.memory.state import AgentTask as _AgentTask  # local import avoids cycle
+
+        results: list[dict[str, Any]] = []
+        for field in raw_fields:
+            label    = field.get("label",    "")
+            selector = field.get("selector", "")
+            text     = field.get("text",     "")
+
+            sub_task = _AgentTask(
+                user_input=task.user_input, session_id=task.session_id
+            )
+            sub_task.metadata.update({
+                "browser_action": "type",
+                "type_label":     label,
+                "type_selector":  selector,
+                "type_text":      text,
+            })
+            sub_result = await self._action_type(sub_task)
+            results.append({
+                "label":   label or selector or "(auto)",
+                "success": sub_result.get("success", False),
+                "message": sub_result.get("message", sub_result.get("error", "")),
+            })
+            await _random_delay(min_ms=100, max_ms=400)
+
+        filled = sum(1 for r in results if r["success"])
+        return {
+            "action":  "fill_form",
+            "success": all(r["success"] for r in results),
+            "results": results,
+            "filled":  filled,
+            "total":   len(results),
+            "url":     self._page.url,
+            "message": f"Filled {filled}/{len(results)} form fields",
+        }
+
+    # ── Mouse actions ─────────────���───────────────────────────────────────────
+
+    async def _action_hover(self, task: "AgentTask") -> dict[str, Any]:
+        """Hover over an element to reveal dropdown menus or tooltips.
+
+        Metadata:
+            ``hover_text``     – visible text of the element to hover over
+            ``hover_selector`` – CSS selector of the element to hover over
+        """
+        text:     str = task.metadata.get("hover_text",     "").strip()
+        selector: str = task.metadata.get("hover_selector", "").strip()
+
+        if not text and not selector:
+            return {
+                "error":   "hover_text or hover_selector not provided",
+                "success": False,
+                "action":  "hover",
+            }
+
+        await self._ensure_browser()
+        assert self._page is not None  # noqa: S101
+
+        try:
+            if selector:
+                await self._page.hover(selector, timeout=_TIMEOUT_MS)
+                target = f"selector: {selector}"
+            else:
+                await self._page.get_by_text(text, exact=False).first.hover(
+                    timeout=_TIMEOUT_MS
+                )
+                target = f"text: {text!r}"
+            await self._wait_for_spa_stable()
+            await _random_delay(min_ms=200, max_ms=600)
+            return {
+                "action":  "hover",
+                "success": True,
+                "target":  target,
+                "url":     self._page.url,
+                "message": f"Hovered over {target}",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "action":  "hover",
+                "success": False,
+                "error":   f"Hover failed for {text or selector!r}: {exc}",
+            }
+
+    async def _action_drag_drop(self, task: "AgentTask") -> dict[str, Any]:
+        """Drag an element from one location and drop it onto another.
+
+        Metadata:
+            ``drag_selector`` – CSS selector of the element to drag (required)
+            ``drop_selector`` – CSS selector of the drop target (required)
+        """
+        source: str = task.metadata.get("drag_selector", "").strip()
+        target: str = task.metadata.get("drop_selector", "").strip()
+
+        if not source or not target:
+            return {
+                "error":   "drag_selector and drop_selector are both required",
+                "success": False,
+                "action":  "drag_drop",
+            }
+
+        await self._ensure_browser()
+        assert self._page is not None  # noqa: S101
+
+        try:
+            await self._page.drag_and_drop(source, target, timeout=_TIMEOUT_MS)
+            await self._wait_for_spa_stable()
+            await _random_delay(min_ms=200, max_ms=600)
+            return {
+                "action":  "drag_drop",
+                "success": True,
+                "source":  source,
+                "target":  target,
+                "url":     self._page.url,
+                "message": f"Dragged '{source}' onto '{target}'",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "action":  "drag_drop",
+                "success": False,
+                "error":   f"Drag-drop failed: {exc}",
+            }
+
+    # ── Keyboard ──────────────────────────────────────────────────────────────
+
+    async def _action_press_key(self, task: "AgentTask") -> dict[str, Any]:
+        """Press a keyboard key or combination (e.g. ``Enter``, ``Escape``, ``Control+A``).
+
+        Metadata:
+            ``key`` – Playwright key name (required), e.g. ``"Enter"``,
+                      ``"Escape"``, ``"Tab"``, ``"ArrowDown"``, ``"Control+a"``
+        """
+        key: str = task.metadata.get("key", "").strip()
+        if not key:
+            return {"error": "key not provided", "success": False, "action": "press_key"}
+
+        await self._ensure_browser()
+        assert self._page is not None  # noqa: S101
+
+        try:
+            await self._page.keyboard.press(key)
+            await self._wait_for_spa_stable()
+            await _random_delay(min_ms=100, max_ms=400)
+            return {
+                "action":  "press_key",
+                "success": True,
+                "key":     key,
+                "url":     self._page.url,
+                "message": f"Pressed key: {key!r}",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "action":  "press_key",
+                "success": False,
+                "error":   f"Key press failed for {key!r}: {exc}",
+            }
+
+    # ── File upload ───────────────────────────────────────────────────────────
+
+    async def _action_upload_file(self, task: "AgentTask") -> dict[str, Any]:
+        """Set a file input to the specified local file path.
+
+        Metadata:
+            ``upload_filepath`` – absolute path to the file to upload (required)
+            ``upload_selector`` – CSS selector for ``<input type="file">``
+            ``upload_label``    – accessible label text for the upload field
+        """
+        selector: str = task.metadata.get("upload_selector", "").strip()
+        label:    str = task.metadata.get("upload_label",    "").strip()
+        filepath: str = task.metadata.get("upload_filepath", "").strip()
+
+        if not filepath:
+            return {
+                "error":   "upload_filepath not provided",
+                "success": False,
+                "action":  "upload_file",
+            }
+        if not Path(filepath).exists():
+            return {
+                "error":   f"File not found: {filepath}",
+                "success": False,
+                "action":  "upload_file",
+            }
+
+        await self._ensure_browser()
+        assert self._page is not None  # noqa: S101
+
+        try:
+            if selector:
+                await self._page.set_input_files(selector, filepath, timeout=_TIMEOUT_MS)
+                target = selector
+            elif label:
+                loc = self._page.get_by_label(label, exact=False)
+                await loc.first.set_input_files(filepath)
+                target = f"label: {label}"
+            else:
+                await self._page.set_input_files('input[type="file"]', filepath)
+                target = 'input[type="file"] (auto-detected)'
+            await _random_delay(min_ms=200, max_ms=600)
+            return {
+                "action":   "upload_file",
+                "success":  True,
+                "filepath": filepath,
+                "target":   target,
+                "url":      self._page.url,
+                "message":  f"Uploaded '{Path(filepath).name}' to {target}",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "action":  "upload_file",
+                "success": False,
+                "error":   f"File upload failed: {exc}",
+            }
+
+    # ── Structured table extraction ───────────────────────────────────────────
+
+    async def _action_scrape_table(self, task: "AgentTask") -> dict[str, Any]:
+        """Extract an HTML table as a list of row-dicts keyed by column headers.
+
+        Metadata:
+            ``extract_selector`` – CSS selector for the table (default: ``"table"``)
+            ``extract_limit``    – max rows to return (default: 100)
+        """
+        selector: str = (
+            task.metadata.get("extract_selector", "table").strip() or "table"
+        )
+        limit: int = int(task.metadata.get("extract_limit", 100))
+
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "scrape_table",
+            }
+
+        try:
+            rows: list[dict[str, str]] = await self._page.evaluate(
+                """([sel, lim]) => {
+                    const table = document.querySelector(sel);
+                    if (!table) return [];
+                    const headers = [];
+                    const headRow = table.querySelector('thead tr');
+                    if (headRow) {
+                        headRow.querySelectorAll('th, td').forEach(
+                            c => headers.push((c.innerText || c.textContent || '').trim())
+                        );
+                    }
+                    const rows = [];
+                    for (const tr of Array.from(
+                            table.querySelectorAll('tbody tr, tr')
+                        ).slice(0, lim)) {
+                        const cells = tr.querySelectorAll('td, th');
+                        if (cells.length === 0) continue;
+                        const row = {};
+                        cells.forEach((cell, i) => {
+                            const key = (headers[i] !== undefined && headers[i] !== '')
+                                ? headers[i]
+                                : String(i);
+                            row[key] = (cell.innerText || cell.textContent || '').trim();
+                        });
+                        rows.push(row);
+                    }
+                    return rows;
+                }""",
+                [selector, limit],
+            )
+            return {
+                "action":   "scrape_table",
+                "success":  True,
+                "rows":     rows,
+                "count":    len(rows),
+                "selector": selector,
+                "url":      self._page.url,
+                "message":  f"Extracted {len(rows)} rows from table '{selector}'",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "action":  "scrape_table",
+                "success": False,
+                "error":   f"Table extraction failed: {exc}",
+            }
+
+    # ── Text assertion ────────────────────────────────────────────────────────
+
+    async def _action_assert_text(self, task: "AgentTask") -> dict[str, Any]:
+        """Assert that a text string is (or is not) present on the current page.
+
+        Returns ``success: True`` when the assertion passes.  On failure the
+        result contains ``"error"`` so the LLM can trigger re-planning.
+
+        Metadata:
+            ``assert_text_value``   – text to search for (required)
+            ``assert_should_exist`` – ``"true"`` (default) or ``"false"``
+        """
+        text:         str  = task.metadata.get("assert_text_value", "").strip()
+        should_exist: bool = (
+            str(task.metadata.get("assert_should_exist", "true")).lower() != "false"
+        )
+
+        if not text:
+            return {
+                "error":   "assert_text_value not provided",
+                "success": False,
+                "action":  "assert_text",
+            }
+
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "assert_text",
+            }
+
+        try:
+            page_text = await self._extract_page_text()
+            found     = text.lower() in page_text.lower()
+            passed    = (should_exist and found) or (not should_exist and not found)
+            result: dict[str, Any] = {
+                "action":       "assert_text",
+                "success":      passed,
+                "text":         text,
+                "should_exist": should_exist,
+                "found":        found,
+                "url":          self._page.url,
+            }
+            if passed:
+                result["message"] = (
+                    f"PASS: '{text}' {'found' if found else 'not found'} as expected"
+                )
+            else:
+                msg = (
+                    f"FAIL: '{text}' was {'NOT found' if should_exist else 'found'} "
+                    f"on {self._page.url}"
+                )
+                result["message"] = msg
+                result["error"]   = msg
+            return result
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "action":  "assert_text",
+                "success": False,
+                "error":   f"assert_text check failed: {exc}",
+            }
+
+    # ── Session management ────────────────────────────────────────────────────
+
+    async def _action_load_session(self, task: "AgentTask") -> dict[str, Any]:
+        """Explicitly load a saved browser session by URL key.
+
+        Recreates the browser context using the saved cookies/storage so that
+        the agent resumes as a logged-in user on the target website.
+
+        Metadata:
+            ``session_url`` – base URL key used when the session was saved
+                              (e.g. ``"https://example.com"``).
+        """
+        from src.memory.state import BrowserSessionStore
+
+        session_url: str = task.metadata.get("session_url", "").strip()
+        if not session_url and self._page is not None:
+            session_url = self._page.url
+        if not session_url:
+            return {
+                "error":   "session_url not provided",
+                "success": False,
+                "action":  "load_session",
+            }
+
+        store = BrowserSessionStore()
+        path  = store.get_session_path(session_url)
+        if not path.exists():
+            return {
+                "action":      "load_session",
+                "success":     False,
+                "error":       f"No saved session found for '{session_url}'",
+                "session_url": session_url,
+            }
+
+        # Close existing context (if any) and rebuild with the saved session
+        if self._context is not None:
+            try:
+                await self._context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._tabs.clear()
+            self._active_tab_id = ""
+
+        if self._browser is None:
+            if self._playwright is None:
+                from playwright.async_api import async_playwright
+                self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(headless=True)
+
+        context_kwargs: dict[str, Any] = {
+            "java_script_enabled": True,
+            "accept_downloads":    False,
+            "storage_state":       str(path),
+        }
+        self._context = await self._browser.new_context(**context_kwargs)
+
+        async def _block(route, request):  # noqa: ANN001
+            if request.resource_type in _BLOCKED_RESOURCES:
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await self._context.route("**/*", _block)
+
+        self._tab_counter += 1
+        tab_id   = f"tab_{self._tab_counter}"
+        new_page = await self._context.new_page()
+        new_page.set_default_timeout(_TIMEOUT_MS)
+        new_page.set_default_navigation_timeout(_TIMEOUT_MS)
+        self._tabs[tab_id]   = new_page
+        self._active_tab_id  = tab_id
+
+        return {
+            "action":       "load_session",
+            "success":      True,
+            "session_url":  session_url,
+            "session_path": str(path),
+            "tab_id":       tab_id,
+            "message":      f"Session loaded for '{session_url}' from {path}",
+        }
+
+    async def _action_clear_session(self, task: "AgentTask") -> dict[str, Any]:
+        """Delete the saved browser session for a domain.
+
+        Metadata:
+            ``session_url`` – base URL key of the session to delete
+        """
+        from src.memory.state import BrowserSessionStore
+
+        session_url: str = task.metadata.get("session_url", "").strip()
+        if not session_url:
+            return {
+                "error":   "session_url not provided",
+                "success": False,
+                "action":  "clear_session",
+            }
+        store = BrowserSessionStore()
+        store.delete_session(session_url)
+        return {
+            "action":      "clear_session",
+            "success":     True,
+            "session_url": session_url,
+            "message":     f"Session cleared for '{session_url}'",
+        }
+
+    # ── Parallel exploration ──────────────────────────────────────────────────
+
+    async def _action_explore_parallel(self, task: "AgentTask") -> dict[str, Any]:
+        """Open several URLs in parallel tabs and return a content summary of each.
+
+        The LLM can use this to evaluate multiple candidate pages at once and
+        choose the most relevant one without sequential navigation.
+
+        Metadata:
+            ``explore_urls``  – JSON array or comma-separated list of URLs
+                                (maximum 5 to cap resource usage)
+            ``explore_query`` – keyword describing what content is sought
+        """
+        raw_urls = task.metadata.get("explore_urls", [])
+        if isinstance(raw_urls, str):
+            try:
+                raw_urls = json.loads(raw_urls)
+            except Exception:
+                raw_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
+
+        query: str = task.metadata.get("explore_query", "").strip()
+
+        if not raw_urls:
+            return {
+                "error":   "explore_urls not provided",
+                "success": False,
+                "action":  "explore_parallel",
+            }
+
+        urls = list(raw_urls)[:5]   # cap at 5 tabs
+
+        await self._ensure_browser()
+        assert self._context is not None  # noqa: S101
+
+        async def _fetch_url(url: str) -> dict[str, Any]:
+            try:
+                self._tab_counter += 1
+                tid      = f"tab_{self._tab_counter}"
+                pg       = await self._context.new_page()
+                pg.set_default_timeout(_TIMEOUT_MS)
+                pg.set_default_navigation_timeout(_TIMEOUT_MS)
+                self._tabs[tid] = pg
+                await pg.goto(url, wait_until="domcontentloaded")
+                try:
+                    await pg.wait_for_load_state(
+                        "networkidle", timeout=_NETWORK_IDLE_TIMEOUT_MS
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                title = await pg.title()
+                text: str = await pg.evaluate(
+                    """() => {
+                        const clone = document.body.cloneNode(true);
+                        clone.querySelectorAll(
+                            'script, style, noscript, svg'
+                        ).forEach(el => el.remove());
+                        return (clone.innerText || clone.textContent || '')
+                            .replace(/\\s+/g, ' ').trim();
+                    }"""
+                )
+                return {
+                    "url":       pg.url,
+                    "title":     title,
+                    "tab_id":    tid,
+                    "page_text": text[:1500],
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"url": url, "error": str(exc)}
+
+        summaries: list[dict[str, Any]] = list(
+            await asyncio.gather(*(_fetch_url(u) for u in urls))
+        )
+
+        # Switch active tab to the first successfully loaded page
+        for s in summaries:
+            if not s.get("error") and s.get("tab_id") in self._tabs:
+                self._active_tab_id = s["tab_id"]
+                break
+
+        return {
+            "action":  "explore_parallel",
+            "success": True,
+            "query":   query,
+            "results": summaries,
+            "count":   len(summaries),
+            "tabs":    list(self._tabs.keys()),
+            "message": f"Explored {len(summaries)} URLs in parallel",
+        }
+
+    # ── Visual comparison ─────────────────────────────────────────────────────
+
+    async def _action_compare_screenshot(self, task: "AgentTask") -> dict[str, Any]:
+        """Capture a screenshot and compare it with a previously stored baseline.
+
+        On the first call (no baseline exists) the screenshot is saved as the
+        baseline.  On subsequent calls the pixel-level diff ratio is reported so
+        the agent can alert the user when the page has visually changed.
+
+        Metadata:
+            ``compare_url``    – string key for storing the baseline
+                                 (defaults to the current page URL)
+            ``diff_threshold`` – float 0–1; changes above this value trigger
+                                 ``"changed": true`` (default 0.02 = 2 %)
+        """
+        from src.tools.screenshot_store import ScreenshotStore
+
+        compare_key: str   = task.metadata.get("compare_url", "").strip()
+        threshold:   float = float(task.metadata.get("diff_threshold", 0.02))
+
+        if self._page is None:
+            return {
+                "error":   "No page is open; navigate to a URL first",
+                "success": False,
+                "action":  "compare_screenshot",
+            }
+        if not compare_key:
+            compare_key = self._page.url
+
+        try:
+            png_bytes: bytes = await self._page.screenshot(
+                type="png", full_page=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "error":   f"Screenshot capture failed: {exc}",
+                "success": False,
+                "action":  "compare_screenshot",
+            }
+
+        store    = ScreenshotStore()
+        baseline = store.load(compare_key)
+
+        if baseline is None:
+            store.save(compare_key, png_bytes)
+            return {
+                "action":        "compare_screenshot",
+                "success":       True,
+                "changed":       False,
+                "baseline_set":  True,
+                "compare_key":   compare_key,
+                "url":           self._page.url,
+                "message":       f"Baseline screenshot saved for '{compare_key}'",
+            }
+
+        diff_ratio = store.diff_ratio(baseline, png_bytes)
+        changed    = diff_ratio > threshold
+        b64        = base64.b64encode(png_bytes).decode()
+
+        if changed:
+            # Update the baseline to the new snapshot for next comparison
+            store.save(compare_key, png_bytes)
+
+        return {
+            "action":         "compare_screenshot",
+            "success":        True,
+            "changed":        changed,
+            "diff_ratio":     round(diff_ratio, 4),
+            "threshold":      threshold,
+            "compare_key":    compare_key,
+            "url":            self._page.url,
+            "screenshot_b64": b64,
+            "message": (
+                f"⚠️ Visual change detected! diff={diff_ratio:.1%} > threshold={threshold:.1%}"
+                if changed
+                else f"No significant change (diff={diff_ratio:.1%} ≤ {threshold:.1%})"
+            ),
+        }
+
+    # ── Auto CAPTCHA solver ───────────────────────────────────────────────────
+
+    async def _action_solve_captcha(self, task: "AgentTask") -> dict[str, Any]:
+        """Attempt to automatically solve a CAPTCHA using an external solver API.
+
+        Detects reCAPTCHA v2 or hCaptcha on the current page, extracts the site
+        key, submits it to the configured solver service (2captcha / CapMonster),
+        and injects the resulting token back into the page via JavaScript.
+
+        Falls back to requesting manual assistance when:
+          * No ``CAPTCHA_API_KEY`` env var is set.
+          * The site key cannot be extracted from the DOM.
+          * The solver service fails or times out.
+
+        Result keys:
+            ``solved``          – bool, True when token was injected
+            ``captcha_type``    – ``"recaptcha_v2"`` | ``"hcaptcha"`` | ``"unknown"``
+            ``fallback_manual`` – bool, True when human assistance is needed
+        """
+        from src.tools.captcha_solver import solve_recaptcha_v2, solve_hcaptcha
+
+        if self._page is None:
+            return {
+                "error":           "No page is open; navigate to a URL first",
+                "success":         False,
+                "action":          "solve_captcha",
+                "solved":          False,
+                "fallback_manual": True,
+            }
+
+        # ── Detect CAPTCHA type and extract site key ──────────────────────
+        captcha_info: dict[str, str] = await self._page.evaluate(
+            """() => {
+                // reCAPTCHA v2
+                const rcEl = document.querySelector(
+                    '.g-recaptcha, [data-sitekey], iframe[src*="recaptcha"]'
+                );
+                if (rcEl) {
+                    const sk = rcEl.dataset?.sitekey
+                        || rcEl.getAttribute('data-sitekey')
+                        || (rcEl.src?.match(/[?&]k=([^&]+)/) || [])[1]
+                        || '';
+                    return { type: 'recaptcha_v2', site_key: sk };
+                }
+                // hCaptcha
+                const hcEl = document.querySelector(
+                    '.h-captcha, [data-hcaptcha-sitekey], iframe[src*="hcaptcha"]'
+                );
+                if (hcEl) {
+                    const sk = hcEl.dataset?.sitekey
+                        || hcEl.getAttribute('data-hcaptcha-sitekey')
+                        || '';
+                    return { type: 'hcaptcha', site_key: sk };
+                }
+                return { type: '', site_key: '' };
+            }"""
+        )
+
+        captcha_type = captcha_info.get("type", "")
+        site_key     = captcha_info.get("site_key", "")
+        site_url     = self._page.url
+
+        if not captcha_type:
+            detected, _desc = await self._detect_captcha()
+            if not detected:
+                return {
+                    "action":           "solve_captcha",
+                    "success":          True,
+                    "solved":           False,
+                    "captcha_detected":  False,
+                    "fallback_manual":  False,
+                    "message":          "No CAPTCHA detected on the current page.",
+                }
+            captcha_type = "unknown"
+
+        if not site_key:
+            return {
+                "action":           "solve_captcha",
+                "success":          True,
+                "solved":           False,
+                "captcha_type":     captcha_type,
+                "captcha_detected": True,
+                "fallback_manual":  True,
+                "message": (
+                    "⚠️ CAPTCHA terdeteksi tetapi site key tidak dapat diekstrak. "
+                    "Mohon selesaikan CAPTCHA secara manual, lalu ulangi perintah."
+                ),
+            }
+
+        # ── Submit to solver service ──────────────────────────────────────
+        token: Optional[str] = None
+        if captcha_type == "recaptcha_v2":
+            token = await solve_recaptcha_v2(site_url, site_key)
+        elif captcha_type == "hcaptcha":
+            token = await solve_hcaptcha(site_url, site_key)
+
+        if not token:
+            return {
+                "action":           "solve_captcha",
+                "success":          True,
+                "solved":           False,
+                "captcha_type":     captcha_type,
+                "captcha_detected": True,
+                "fallback_manual":  True,
+                "message": (
+                    "⚠️ CAPTCHA terdeteksi. Solver otomatis tidak tersedia atau gagal. "
+                    "Mohon selesaikan CAPTCHA secara manual, lalu ulangi perintah."
+                ),
+            }
+
+        # ── Inject token ──────────────────────────────────────────────────
+        token_js = json.dumps(token)
+        if captcha_type == "hcaptcha":
+            inject_js = f"""() => {{
+                const el = document.querySelector(
+                    'textarea[name="h-captcha-response"], [name="h-captcha-response"]'
+                );
+                if (el) el.value = {token_js};
+            }}"""
+        else:
+            inject_js = f"""() => {{
+                const el = document.querySelector(
+                    '#g-recaptcha-response, [name="g-recaptcha-response"]'
+                );
+                if (el) {{ el.style.display = 'block'; el.value = {token_js}; }}
+                // Trigger page callback if reCAPTCHA framework is present
+                try {{
+                    const cfg = window.___grecaptcha_cfg?.clients;
+                    if (cfg) {{
+                        const first = Object.values(cfg)[0];
+                        if (first?.l?.l?.callback)
+                            first.l.l.callback({token_js});
+                    }}
+                }} catch(e) {{}}
+            }}"""
+
+        try:
+            await self._page.evaluate(inject_js)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("solve_captcha: token injection failed: %s", exc)
+            return {
+                "action":           "solve_captcha",
+                "success":          False,
+                "solved":           False,
+                "captcha_type":     captcha_type,
+                "captcha_detected": True,
+                "fallback_manual":  True,
+                "error":            f"Token injection failed: {exc}",
+            }
+
+        await _random_delay(min_ms=500, max_ms=1200)
+        return {
+            "action":           "solve_captcha",
+            "success":          True,
+            "solved":           True,
+            "captcha_type":     captcha_type,
+            "captcha_detected": True,
+            "fallback_manual":  False,
+            "url":              self._page.url,
+            "message":          f"CAPTCHA ({captcha_type}) solved and token injected.",
+        }
+
+    # ── Captcha detection ─────────────────────────────────────────────────────    async def _detect_captcha(self) -> tuple[bool, str]:
         """Detect whether the current page presents a CAPTCHA challenge.
 
         Checks for:
