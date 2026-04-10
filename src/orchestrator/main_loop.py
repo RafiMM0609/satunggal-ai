@@ -445,7 +445,7 @@ async def process_message(
     # "berikan screenshot" after a previous web_automation turn).
     # Pass None (not an empty list) when there are no prior messages so the
     # gatekeeper skips injecting an empty history section into its prompt.
-    recent_history = history.get_as_llm_messages(session_id)[:-1][-4:] or None
+    recent_history = history.get_as_llm_messages(session_id)[:-1][-6:] or None
     try:
         intent_result = await gatekeeper.classify_intent(
             user_text,

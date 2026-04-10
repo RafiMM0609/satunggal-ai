@@ -302,7 +302,30 @@ _INTENT_RULES: list[tuple[str, "frozenset[str] | None"]] = [
         '    - If the most recent [Asisten] response contains a document analysis report (indicated by phrases such as\n'
         '      "Laporan Analisis Dokumen", "Daftar Isi", "Ringkasan per Bab", or "Tip: Balas pesan ini untuk bertanya"),\n'
         '      AND the current user message is a question or request about the document content (e.g. "jelaskan bab 3",\n'
-        '      "apa maksud X di bab 4", "detail tentang bagian ini", "cek konsistensi"), classify as "doc_audit".',
+        '      "apa maksud X di bab 4", "detail tentang bagian ini", "cek konsistensi"), classify as "doc_audit".\n'
+        '    - PENTING — Deteksi pertanyaan lanjutan (follow-up) generik:\n'
+        '      Jika pesan pengguna saat ini adalah pertanyaan lanjutan atau klarifikasi yang TIDAK menyebut topik\n'
+        '      baru yang sama sekali berbeda — ditandai dengan frasa seperti:\n'
+        '        Indonesian: "jelaskan lebih", "jelaskan lebih lanjut", "lebih lanjut", "detail lagi",\n'
+        '          "apa maksudnya", "apa maksud kamu", "kenapa demikian", "kenapa begitu", "mengapa begitu",\n'
+        '          "bisa elaborasi", "bisa diperjelas", "bisa detail lagi", "tolong jelaskan", "jelaskan ulang",\n'
+        '          "lanjutkan", "bagaimana caranya", "berikan contoh", "contoh dong", "gimana tuh",\n'
+        '          "apa itu", "maksudnya apa", "lanjut dong", "terus?", "trus?", "trus gimana",\n'
+        '          "bisa lebih jelas", "iya terus", "emangnya kenapa", "kenapa harus", "kok bisa",\n'
+        '          "boleh tau kenapa", "explain"\n'
+        '        English: "explain more", "tell me more", "elaborate", "go on", "why is that",\n'
+        '          "how so", "give me an example", "more detail", "can you detail", "what did you mean",\n'
+        '          "explain further", "continue", "what about", "and then", "so what", "really why",\n'
+        '          "can you clarify", "please explain", "how does that work", "what do you mean"\n'
+        '      — DAN respons [Asisten] sebelumnya berasal dari agent spesialis (mengandung hasil riset, analisa\n'
+        '      kode, temuan bug, konten WBS/mandays, data sistem, log, web automation, ringkasan PDF, dll.),\n'
+        '      maka JANGAN klasifikasikan sebagai "general_inquiry". Sebaliknya:\n'
+        '        a. Pertahankan intent yang sama dengan tugas spesialis sebelumnya jika masih relevan\n'
+        '           (misal: respons sebelumnya dari code_inspection → klasifikasi sebagai code_inspection).\n'
+        '        b. Jika tidak ada intent spesialis yang tepat, gunakan "research" agar pertanyaan dijawab\n'
+        '           dengan akses web/tools yang lengkap — BUKAN oleh responder sederhana.\n'
+        '      Tujuan: memastikan pertanyaan lanjutan dijawab oleh agent berkapabilitas penuh, bukan\n'
+        '      hanya oleh responder yang tidak memiliki akses tools.',
         None,  # Always include – context-awareness is universal
     ),
     (
@@ -476,9 +499,11 @@ class GatekeeperLLMClient:
             lines = []
             for msg in history:
                 role = "Pengguna" if msg.get("role") == "user" else "Asisten"
-                # Truncate to 300 chars to keep the prompt within max_tokens budget
-                # while still providing enough context for intent disambiguation.
-                content = msg.get("content", "")[:300]
+                # Give more space to assistant messages – they contain the specialist
+                # agent's findings which are critical for follow-up classification.
+                # User messages are kept shorter to stay within the token budget.
+                max_len = 600 if msg.get("role") == "assistant" else 300
+                content = msg.get("content", "")[:max_len]
                 lines.append(f"[{role}]: {content}")
             system_content = (
                 system_content_base
