@@ -1567,6 +1567,64 @@ _ROUTE_FILE_NAMES = {
     "api.php", "web.php", "routes.rb",
 }
 
+# ── Downstream function call extraction ───────────────────────────────────────
+
+# Identifiers to skip when extracting called function names from handler bodies.
+_FUNC_CALL_SKIP: frozenset = frozenset({
+    "Sprintf", "Printf", "Println", "Fprintf", "Errorf", "Fatalf", "Panicf",
+    "Marshal", "Unmarshal", "MarshalJSON", "UnmarshalJSON",
+    "Error", "String", "Len", "Cap",
+    "Background", "WithCancel", "WithTimeout", "WithDeadline", "WithValue", "TODO",
+    "StatusOK", "StatusBadRequest", "StatusNotFound", "StatusCreated",
+    "StatusInternalServerError", "StatusUnauthorized", "StatusForbidden",
+    "StatusConflict", "StatusNoContent", "StatusAccepted",
+    "JSON", "XML", "HTML", "Data", "File", "Redirect", "Stream",
+    "Bind", "BindJSON", "ShouldBind", "ShouldBindJSON", "ShouldBindQuery",
+    "Abort", "AbortWithError", "AbortWithStatus", "AbortWithStatusJSON",
+    "Param", "Query", "Header", "Cookie", "PostForm", "FormFile",
+    "Set", "Keys", "Next", "Done", "Deadline",
+    "Begin", "Commit", "Rollback", "Save", "Close", "Open",
+    "Exec", "QueryRow", "Prepare", "Scan",
+    "Info", "Debug", "Warn", "Warning", "Fatal", "Panic",
+    "GetLogger", "WithField", "WithFields", "WithError",
+    "New", "Init", "Main", "Make", "Append", "Copy", "Delete",
+    "Parse", "Format", "Convert", "Wrap", "Handle",
+    "Read", "Write", "Flush", "Reset",
+    "Depends", "Response", "HTTPException", "Request",
+    "JSONResponse", "StreamingResponse", "RedirectResponse",
+    "APIRouter", "FastAPI", "Middleware",
+})
+
+# Maximum downstream function definitions to include in Phase 3.
+_MAX_DOWNSTREAM_FUNCS = 8
+
+
+def _extract_called_functions(body: str) -> list:
+    """Extract unique user-defined function names called within *body*.
+
+    Filters stdlib/framework names via _FUNC_CALL_SKIP.
+    Returns names in first-occurrence order, capped at 20.
+    """
+    hits: list = []
+    # Qualified calls: obj.Method(
+    for m in re.finditer(r'\b[a-zA-Z_]\w*\.([A-Za-z_][A-Za-z0-9_]+)\s*\(', body):
+        name = m.group(1)
+        if name not in _FUNC_CALL_SKIP and len(name) >= 4:
+            hits.append(name)
+    # Standalone PascalCase calls (user-defined Go/Java functions)
+    for m in re.finditer(r'(?<![.\w])([A-Z][a-zA-Z0-9]{3,})\s*\(', body):
+        name = m.group(1)
+        if name not in _FUNC_CALL_SKIP:
+            hits.append(name)
+    seen: set = set()
+    unique: list = []
+    for name in hits:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+    return unique[:20]
+
+
 
 
 def _build_path_search_terms(api_path: str) -> list[str]:
@@ -1964,6 +2022,7 @@ async def _trace_api_route(repo_path: Path, api_path: str) -> str:
     # ── Phase 2: Find handler implementations ───────────────────────────────
     if handler_names:
         impl_sections: list[str] = []
+        impl_bodies:   list[str] = []   # raw compressed bodies for Phase 3
         seen_handlers: set[str] = set()
 
         for handler_ref in dict.fromkeys(handler_names):  # deduplicate, preserve order
@@ -1999,9 +2058,10 @@ async def _trace_api_route(repo_path: Path, api_path: str) -> str:
                         rel = str(fpath.relative_to(repo_path))
                         lang = fpath.suffix.lstrip(".")
                         impl_sections.append(
-                            f"### 🔧 Handler: `{simple_name}` — `{rel}` (L{i + 1})\n"
+                            f"### \U0001f527 Handler: `{simple_name}` \u2014 `{rel}` (L{i + 1})\n"
                             f"```{lang}\n{body}\n```"
                         )
+                        impl_bodies.append(body)
                         break  # found in this file
 
                 if len(impl_sections) >= len(seen_handlers):
@@ -2011,7 +2071,50 @@ async def _trace_api_route(repo_path: Path, api_path: str) -> str:
                 break  # cap at 6 handler implementations
 
         if impl_sections:
-            sections.append("## 🔧 Handler Implementation\n\n" + "\n\n".join(impl_sections))
+            sections.append("## \U0001f527 Handler Implementation\n\n" + "\n\n".join(impl_sections))
+
+        # ── Phase 3: Deep trace – definitions of functions called by handler ──
+        # Extract function call names from every collected handler body and look
+        # up their definitions in parallel.  This surfaces service / repository /
+        # utility layers one level deeper than the handler, giving the LLM the
+        # evidence needed to answer "how does this endpoint work end-to-end".
+        if impl_bodies:
+            all_bodies_text = "\n".join(impl_bodies)
+            called_funcs = _extract_called_functions(all_bodies_text)
+            already_traced: set[str] = set(seen_handlers)
+            funcs_to_lookup = [fn for fn in called_funcs if fn not in already_traced]
+
+            if funcs_to_lookup:
+                logger.debug(
+                    "_trace_api_route Phase 3: looking up %d downstream function(s): %r",
+                    len(funcs_to_lookup), funcs_to_lookup[:8],
+                )
+                lookup_results = await asyncio.gather(
+                    *[_find_symbol_definition(repo_path, fn) for fn in funcs_to_lookup],
+                    return_exceptions=True,
+                )
+                downstream_sections: list[str] = []
+                for func_name, result in zip(funcs_to_lookup, lookup_results):
+                    if isinstance(result, Exception):
+                        logger.debug(
+                            "_trace_api_route Phase 3: lookup error for %r: %s",
+                            func_name, result,
+                        )
+                        continue
+                    defn = str(result)
+                    if defn and not _evidence_is_empty(defn):
+                        downstream_sections.append(defn)
+                        logger.debug(
+                            "_trace_api_route Phase 3: found definition for %r", func_name
+                        )
+                    if len(downstream_sections) >= _MAX_DOWNSTREAM_FUNCS:
+                        break
+
+                if downstream_sections:
+                    sections.append(
+                        "## \U0001f517 Downstream Functions (called by handler)\n\n"
+                        + "\n\n".join(downstream_sections)
+                    )
 
     return "\n\n".join(sections) if sections else f"(path `{api_path}` tidak ditemukan di repositori)"
 
