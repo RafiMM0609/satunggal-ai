@@ -1845,7 +1845,7 @@ class BrowserNavigatorTool(BaseTool):
             "message": f"Filled {filled}/{len(results)} form fields",
         }
 
-    # ── Mouse actions ─────────────���───────────────────────────────────────────
+    # ── Mouse actions ────────────────────────────────────────
 
     async def _action_hover(self, task: "AgentTask") -> dict[str, Any]:
         """Hover over an element to reveal dropdown menus or tooltips.
