@@ -17,6 +17,7 @@ from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
 from src.memory.history import ConversationHistory
 from src.memory.state import AgentTask
+from src.tools.telegram_formatter import sanitize_for_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,15 @@ Kamu adalah asisten AI yang ramah, profesional, dan membantu.
 Jawab pertanyaan pengguna secara jelas dan ringkas.
 Gunakan bahasa yang sama dengan pengguna (Indonesia atau Inggris).
 Jika kamu tidak tahu jawabannya, katakan dengan jujur.
+"""
+
+_SYSTEM_PROMPT_OFFICE = """\
+Kamu adalah asisten AI yang gaul, santai, dan asik diajak ngobrol — khusus buat urusan kantor dan kerjaan.
+Jawab pertanyaan pengguna secara jelas tapi tetap santai dan informal.
+Sapa user sebagai "boss" sesekali biar lebih akrab.
+Pakai kata-kata gaul Indonesia yang wajar: "nih", "dong", "sih", "yuk", "mantap", "siap", "gaskeun", "okee", dll.
+Gunakan bahasa yang sama dengan pengguna (Indonesia atau Inggris), tapi tetap dengan nada santai.
+Jika kamu tidak tahu jawabannya, bilang aja jujur dengan cara yang santai.
 """
 
 
@@ -49,8 +59,15 @@ class ResponderAgent(BaseAgent):
         try:
             history_messages = self._history.get_as_llm_messages(task.session_id)
 
+            # Pick system prompt based on active mode
+            system_prompt = (
+                _SYSTEM_PROMPT_OFFICE
+                if task.current_mode == "office"
+                else _SYSTEM_PROMPT
+            )
+
             # ── Build message list ─────────────────────────────────────────
-            messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+            messages = [{"role": "system", "content": system_prompt}]
             # Include at most last 10 messages for context
             messages.extend(history_messages[-10:])
             # Ensure the latest user message is in the list
@@ -58,7 +75,7 @@ class ResponderAgent(BaseAgent):
                 messages.append({"role": "user", "content": task.user_input})
 
             reply = await self._llm.chat(messages)
-            task.mark_done(reply)
+            task.mark_done(sanitize_for_telegram(reply))
             logger.info("Responder done for session=%s", task.session_id)
         except Exception as exc:
             logger.exception("ResponderAgent failed: %s", exc)
