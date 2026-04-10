@@ -172,7 +172,7 @@ class ReminderAgent(BaseAgent):
             )
         return (
             "Permintaan reminder Anda kurang lengkap.\n"
-            "Apakah perlu saya bantu detailkan task dan buatkan remindernya boss?"
+            "Apakah perlu saya bantu detailkan task dan buatkan remindernya?"
         )
 
     @staticmethod
@@ -185,11 +185,18 @@ class ReminderAgent(BaseAgent):
 
         Searches backwards through history for the clarification marker in an
         assistant message, then returns the user message just before it.
+        Skips the most-recent user message (the current affirmative reply).
         """
         messages = self._history.get_as_llm_messages(session_id)
-        # messages[-1] is the current user message (just added by orchestrator)
-        # Walk backwards to find the clarification assistant message
-        for i in range(len(messages) - 2, -1, -1):
+        if not messages:
+            return None
+
+        # Skip the last message if it is the current user turn (the affirmative reply)
+        search_end = len(messages)
+        if messages[-1]["role"] == "user":
+            search_end -= 1
+
+        for i in range(search_end - 1, -1, -1):
             msg = messages[i]
             if msg["role"] == "assistant" and _CLARIFICATION_MARKER in msg["content"].lower():
                 # The user message before this assistant message is what we want
