@@ -91,7 +91,8 @@ async def _run_briefing(chat_id: str, topics: list[str], language: str) -> None:
     from telegram.constants import ParseMode
     from datetime import datetime
 
-    now_wib = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    from datetime import timedelta
+    now_wib = (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M")
     header  = (
         f"☀️ *Briefing Harian — {now_wib} WIB*\n"
         f"{'─' * 30}\n\n"

@@ -72,17 +72,17 @@ async def _get_remote_head(repo_url: str, timeout: int = 30) -> Optional[str]:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "ls-remote", "--head", authed_url, "refs/heads/HEAD",
+            "git", "ls-remote", "--head", authed_url, "HEAD",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         lines = stdout.decode(errors="replace").strip().splitlines()
 
-        # ls-remote tanpa branch spesifik bisa mengembalikan banyak ref;
-        # kita ambil baris pertama yang merupakan HEAD default branch.
+        # ls-remote bisa mengembalikan banyak ref; cari baris yang berakhir dengan HEAD
+        # atau ambil baris pertama yang berisi 40-char SHA
         if not lines:
-            # Coba tanpa filter HEAD
+            # Fallback: symref ke default branch
             proc2 = await asyncio.create_subprocess_exec(
                 "git", "ls-remote", "--symref", authed_url, "HEAD",
                 stdout=asyncio.subprocess.PIPE,
