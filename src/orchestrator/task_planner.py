@@ -119,8 +119,8 @@ Rules:
 - Only use agent names from the catalogue above.
 - Minimum 2 steps if mode is sequential. Maximum 4 steps.
 - Each instruction must be self-contained and written in the same language as the user request.
-- For steps after step 1, begin the instruction with "Berdasarkan hasil langkah sebelumnya:" \
-(Indonesian) or "Based on the previous step results:" (English).
+- For steps after step 1, begin the instruction with "Berdasarkan hasil langkah sebelumnya:"
+  (Indonesian) or "Based on the previous step results:" (English).
 - If you are unsure whether decomposition is needed, return single mode.
 - Return ONLY the JSON. No explanations, no markdown fences.
 """
@@ -137,7 +137,8 @@ The assistant's response:
 Does the response fully and correctly answer the user's request?
 
 If YES → reply with exactly: OK
-If NO (off-topic, obviously truncated, clear factual error, or misses the main point) \
+If NO (off-topic, obviously truncated, clear factual error, or misses the main point)
+→ provide an improved version of the response only.
 → provide an improved version of the response only.
 
 Rules:
@@ -321,8 +322,8 @@ class ConsistencyChecker:
     """
 
     #: Cap context lengths to keep review calls cheap.
-    _MAX_INPUT_CHARS:  int = 800
-    _MAX_RESULT_CHARS: int = 2000
+    MAX_INPUT_CHARS:  int = 800
+    MAX_RESULT_CHARS: int = 2000
 
     def __init__(self, llm: "LLMClient") -> None:
         self._llm = llm
@@ -344,8 +345,8 @@ class ConsistencyChecker:
             return result
 
         system = _CHECKER_SYSTEM_PROMPT.format(
-            user_input=user_input[: self._MAX_INPUT_CHARS],
-            result=result[: self._MAX_RESULT_CHARS],
+            user_input=user_input[: self.MAX_INPUT_CHARS],
+            result=result[: self.MAX_RESULT_CHARS],
         )
         messages = [
             {"role": "system", "content": system},

@@ -105,6 +105,8 @@ def _get_pipeline():
     global _task_planner, _consistency_checker
 
     if _gatekeeper is not None:
+        # _task_planner and _consistency_checker are module-level globals
+        # already set during the first call; callers access them directly.
         return _history, _agents, _router, _gatekeeper, _tools, _mode_store
     from src.agents.code_fix.agent import CodeFixAgent
     from src.agents.content_creator.agent import ContentCreatorAgent
