@@ -542,7 +542,7 @@ class DeveloperAgent(BaseAgent):
           1. Apply all code changes (AI CLI or LLM-direct) – ONCE via CodeEditorTool.
           2. Run Docker sandbox ONCE to verify the result.
           3. If sandbox fails with a library/import error, consult ResearcherAgent,
-             inject the research context, and apply a targeted fix (up to 1 extra attempt).
+             inject the research context, and apply a targeted fix (1 additional sandbox run).
           4. Return SandboxResult.
         """
         repo_path = executor.work_dir

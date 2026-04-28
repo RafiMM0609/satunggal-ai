@@ -105,10 +105,11 @@ def _get_pipeline():
     global _task_planner, _consistency_checker
 
     if _gatekeeper is not None:
-        # _task_planner and _consistency_checker are module-level globals
-        # initialised on the first call; callers in process_message() access
-        # them directly (not via the return tuple), so the early-return here
-        # is safe — they are already set by the time _gatekeeper is non-None.
+        # All module-level globals (_history, _agents, _router, _gatekeeper,
+        # _tools, _mode_store, _task_planner, _consistency_checker) are
+        # initialised on the first call and used internally within main_loop.py.
+        # The early-return is safe — they are already set by the time
+        # _gatekeeper is non-None.
         return _history, _agents, _router, _gatekeeper, _tools, _mode_store
     from src.agents.code_fix.agent import CodeFixAgent
     from src.agents.content_creator.agent import ContentCreatorAgent
@@ -298,6 +299,10 @@ def _detect_natural_mode_command(
         ``None``                     – not a mode command.
     """
     text = user_text.strip()
+    # Guard against ReDoS: mode commands are short by nature; skip matching
+    # when the input is longer than 200 characters.
+    if len(text) > 200:
+        return None
 
     # Status check
     for pat in _MODE_STATUS_PATTERNS:
