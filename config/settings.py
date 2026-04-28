@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # ── REST API ──────────────────────────────────────────────────────────────
     api_host: str = Field("0.0.0.0", alias="API_HOST")
     api_port: int = Field(8000,      alias="API_PORT")
+    # Optional API key for the REST API.  Set REST_API_KEY in .env to enable.
+    # When non-empty, all protected endpoints require the header:
+    #   X-API-Key: <value>
+    # Leave empty (default) to disable authentication (development / Telegram-only deployments).
+    rest_api_key: str = Field("", alias="REST_API_KEY")
 
     # ── Developer / Sandbox ───────────────────────────────────────────────────
     # Base directory where repos are cloned (absolute path string).
