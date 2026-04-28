@@ -70,9 +70,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/start   — Mulai bot\n"
         "/help    — Tampilkan pesan ini\n"
         "/ping    — Cek status bot\n"
-        "/reset   — Hapus riwayat percakapan\n"
-        "/mode    — Pilih mode AI (Developer, Writer, Office, Media, Web, All)\n"
-        "/status  — Tampilkan mode yang sedang aktif\n\n"
+        "/reset   — Hapus riwayat percakapan\n\n"
         "<b>Kemampuan:</b>\n"
         "• Jawab pertanyaan umum\n"
         "• Dukungan teknis &amp; riset\n"
@@ -769,107 +767,6 @@ async def setgitlabtoken(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_chat.send_message(
         f"✅ GitLab access token berhasil disimpan ({masked}).\n"
         "Override akan digunakan untuk semua operasi git GitLab berikutnya tanpa perlu restart bot."
-    )
-
-
-# ── Mode commands ─────────────────────────────────────────────────────────────
-
-async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler /mode — tampilkan menu pilihan mode dan ubah mode aktif."""
-    import asyncio
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    from src.memory.user_mode_store import get_user_mode_store
-    from src.orchestrator.router import MODE_MAP
-    from src.handlers.message import _chat_session_id
-
-    user = update.effective_user
-    chat = update.effective_chat
-    session_id = _chat_session_id(user.id, chat.id)
-    store = get_user_mode_store()
-    current_mode = await asyncio.to_thread(store.get_mode, session_id)
-
-    keyboard: list[list[InlineKeyboardButton]] = []
-    for mode_key, mode_cfg in MODE_MAP.items():
-        label = mode_cfg["label"]
-        if mode_key == current_mode:
-            label = f"✅ {label}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"set_mode:{mode_key}")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"🎛️ <b>Pilih Mode Aktif</b>\n\n"
-        f"Mode saat ini: <b>{MODE_MAP.get(current_mode, {}).get('label', current_mode)}</b>\n\n"
-        "Pilih mode untuk menyesuaikan AI dengan kebutuhan Anda:",
-        parse_mode="HTML",
-        reply_markup=reply_markup,
-    )
-
-
-async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler callback query dari tombol /mode."""
-    import asyncio
-    from src.memory.user_mode_store import get_user_mode_store
-    from src.orchestrator.router import MODE_MAP
-    from src.handlers.message import _chat_session_id
-
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data or ""
-    if not data.startswith("set_mode:"):
-        return
-
-    mode_key = data[len("set_mode:"):]
-    if mode_key not in MODE_MAP:
-        await query.edit_message_text("❌ Mode tidak dikenali.")
-        return
-
-    user = update.effective_user
-    chat = update.effective_chat
-    session_id = _chat_session_id(user.id, chat.id)
-    store = get_user_mode_store()
-    await asyncio.to_thread(store.set_mode, session_id, mode_key)
-
-    mode_label = MODE_MAP[mode_key]["label"]
-    logger.info("User %s set mode to '%s' for session %s", user.id, mode_key, session_id)
-
-    # Rebuild keyboard to reflect new selection.
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    keyboard: list[list[InlineKeyboardButton]] = []
-    for mk, mc in MODE_MAP.items():
-        label = mc["label"]
-        if mk == mode_key:
-            label = f"✅ {label}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"set_mode:{mk}")])
-
-    await query.edit_message_text(
-        f"✅ Mode berhasil diubah ke <b>{mode_label}</b>!\n\n"
-        "AI sekarang akan fokus pada kemampuan yang relevan dengan mode ini.\n"
-        "Ketik /status untuk melihat mode aktif kapan saja.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler /status — tampilkan mode aktif saat ini beserta daftar agent yang tersedia."""
-    import asyncio
-    import telegramify_markdown
-    from telegram.constants import ParseMode
-    from src.memory.user_mode_store import get_user_mode_store
-    from src.handlers.message import _chat_session_id
-    from src.orchestrator.main_loop import _format_mode_status
-
-    user = update.effective_user
-    chat = update.effective_chat
-    session_id = _chat_session_id(user.id, chat.id)
-    store = get_user_mode_store()
-    current_mode = await asyncio.to_thread(store.get_mode, session_id)
-
-    reply_md = _format_mode_status(current_mode)
-    await update.message.reply_text(
-        telegramify_markdown.markdownify(reply_md),
-        parse_mode=ParseMode.MARKDOWN_V2,
     )
 
 

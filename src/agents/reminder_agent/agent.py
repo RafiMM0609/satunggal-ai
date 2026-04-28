@@ -213,7 +213,6 @@ class ReminderAgent(BaseAgent):
 
     async def run(self, task: AgentTask) -> AgentTask:
         try:
-            is_office = task.current_mode == "office"
             user_input = task.user_input.strip()
 
             # ── Check for a pending confirmation (suggestion was already shown) ──
@@ -223,17 +222,14 @@ class ReminderAgent(BaseAgent):
                 if selected is not None:
                     # selected is a list of 0-based indices
                     reply = await self._confirm_pending(
-                        task.session_id, pending, is_office, selected
+                        task.session_id, pending, selected
                     )
                     task.mark_done(reply)
                     return task
                 if self._is_negative(user_input):
                     clear_pending_suggestion(task.session_id)
                     reply = (
-                        "Oke boss, saran remindernya dibatalkan. "
-                        "Kasih tau aja kalau mau buat reminder baru ya! 😊"
-                        if is_office
-                        else "Baik, saran reminder dibatalkan. "
+                        "Baik, saran reminder dibatalkan. "
                         "Silakan beri tahu jika ingin membuat reminder baru."
                     )
                     task.mark_done(reply)
@@ -248,7 +244,7 @@ class ReminderAgent(BaseAgent):
                 original_request = self._get_pre_clarification_request(task.session_id)
                 if original_request:
                     reply = await self._handle_clarify_and_suggest(
-                        task.session_id, original_request, is_office
+                        task.session_id, original_request
                     )
                     task.mark_done(reply)
                     return task
@@ -258,37 +254,28 @@ class ReminderAgent(BaseAgent):
             action = parsed.get("action", "set")
 
             if action == "list":
-                reply = self._handle_list(task.session_id, is_office)
+                reply = self._handle_list(task.session_id)
             elif action == "cancel":
                 cancel_id = parsed.get("cancel_id")
-                reply = self._handle_cancel(task.session_id, cancel_id, is_office)
+                reply = self._handle_cancel(task.session_id, cancel_id)
             elif action == "clarify":
-                reply = self._clarification_question(is_office)
+                reply = self._clarification_question()
             else:
                 # New flow: suggest details and ask for confirmation
-                reply = await self._handle_suggest(task.session_id, parsed, is_office)
+                reply = await self._handle_suggest(task.session_id, parsed)
 
             task.mark_done(reply)
         except Exception as exc:
             logger.exception("ReminderAgent error: %s", exc)
             task.mark_failed(str(exc))
-            task.result = (
-                "Aduh boss, ada error nih pas proses remindernya. Coba lagi ya! 🙏"
-                if task.current_mode == "office"
-                else "Maaf, terjadi kesalahan saat memproses reminder. Silakan coba lagi."
-            )
+            task.result = "Maaf, terjadi kesalahan saat memproses reminder. Silakan coba lagi."
 
         return task
 
     # ── Clarification helpers ─────────────────────────────────────────────────
 
     @staticmethod
-    def _clarification_question(is_office: bool) -> str:
-        if is_office:
-            return (
-                "Hmm, kayaknya requestnya kurang lengkap nih boss 🤔\n"
-                "Apakah perlu saya bantu detailkan task dan buatkan remindernya boss?"
-            )
+    def _clarification_question() -> str:
         return (
             "Permintaan reminder Anda kurang lengkap.\n"
             "Apakah perlu saya bantu detailkan task dan buatkan remindernya?"
@@ -361,7 +348,7 @@ class ReminderAgent(BaseAgent):
     # ── Suggestion flow ───────────────────────────────────────────────────────
 
     async def _handle_suggest(
-        self, session_id: str, parsed: dict, is_office: bool
+        self, session_id: str, parsed: dict
     ) -> str:
         """Ask LLM to generate 1-3 reminder suggestions, check conflicts,
         store them as pending, and return formatted options for user to choose."""
@@ -450,13 +437,6 @@ class ReminderAgent(BaseAgent):
             })
 
         if not valid_suggestions:
-            if is_office:
-                return (
-                    "⚠️ Hmm boss, saya kesulitan memahami detail remindernya.\n"
-                    "Coba tulis lebih spesifik ya, contoh:\n"
-                    "• *ingatkan saya meeting besok jam 10:00*\n"
-                    "• *reminder minum obat setiap hari jam 08:00*"
-                )
             return (
                 "⚠️ Saya kesulitan memahami detail reminder Anda.\n"
                 "Coba tulis lebih spesifik, contoh:\n"
@@ -467,18 +447,11 @@ class ReminderAgent(BaseAgent):
         # Build response lines
         lines: list[str] = []
         is_multi = len(valid_suggestions) > 1
-        if is_office:
-            header = (
-                "🔔 *Berikut beberapa saran reminder boss, pilih yang paling cocok:*\n"
-                if is_multi
-                else "🔔 *Berikut saran reminder yang saya siapkan boss:*\n"
-            )
-        else:
-            header = (
-                "🔔 *Berikut beberapa saran reminder, pilih yang paling sesuai:*\n"
-                if is_multi
-                else "🔔 *Berikut saran reminder dari saya:*\n"
-            )
+        header = (
+            "🔔 *Berikut beberapa saran reminder, pilih yang paling sesuai:*\n"
+            if is_multi
+            else "🔔 *Berikut saran reminder dari saya:*\n"
+        )
         lines.append(header)
 
         for idx, s in enumerate(valid_suggestions, start=1):
@@ -516,26 +489,16 @@ class ReminderAgent(BaseAgent):
 
         lines.append("")
         if is_multi:
-            if is_office:
-                lines.append(
-                    "Balas *pilih 1*, *pilih 2*, dll untuk memilih satu opsi, "
-                    "atau *semua* untuk buat semua reminder sekaligus boss 😊\n"
-                    "Ketik *batal* untuk membatalkan."
-                )
-            else:
-                lines.append(
-                    "Balas *pilih 1*, *pilih 2*, dst untuk memilih opsi tertentu, "
-                    "atau *semua* untuk membuat semua reminder.\n"
-                    "Ketik *batal* untuk membatalkan."
-                )
+            lines.append(
+                "Balas *pilih 1*, *pilih 2*, dst untuk memilih opsi tertentu, "
+                "atau *semua* untuk membuat semua reminder.\n"
+                "Ketik *batal* untuk membatalkan."
+            )
         else:
-            if is_office:
-                lines.append("Balas *ya* untuk membuat reminder ini, atau jelaskan perubahannya boss 😊")
-            else:
-                lines.append(
-                    "Balas *ya* untuk membuat reminder ini, "
-                    "atau jelaskan perubahan yang diinginkan."
-                )
+            lines.append(
+                "Balas *ya* untuk membuat reminder ini, "
+                "atau jelaskan perubahan yang diinginkan."
+            )
 
         # Persist suggestions as pending
         set_pending_suggestion(session_id, {"suggestions": valid_suggestions})
@@ -546,7 +509,6 @@ class ReminderAgent(BaseAgent):
         self,
         session_id: str,
         pending: dict,
-        is_office: bool,
         selected_indices: list[int] | None = None,
     ) -> str:
         """Create reminder(s) for the selected suggestion indices.
@@ -564,21 +526,20 @@ class ReminderAgent(BaseAgent):
             if idx < 0 or idx >= len(suggestions):
                 continue
             s = suggestions[idx]
-            primary_reply = await self._handle_set(session_id, s, is_office)
+            primary_reply = await self._handle_set(session_id, s)
             reply_parts.append(primary_reply)
             if s.get("prep"):
                 prep_reply = await self._handle_set(
-                    session_id, s["prep"], is_office, is_prep=True
+                    session_id, s["prep"], is_prep=True
                 )
                 reply_parts.append(prep_reply)
 
         return "\n\n".join(reply_parts) if reply_parts else (
-            "⚠️ Tidak ada reminder yang dibuat." if not is_office
-            else "⚠️ Gak ada reminder yang dibuat boss."
+            "⚠️ Tidak ada reminder yang dibuat."
         )
 
     async def _handle_clarify_and_suggest(
-        self, session_id: str, original_request: str, is_office: bool
+        self, session_id: str, original_request: str
     ) -> str:
         """Use LLM to elaborate on a vague request, then present as a suggestion."""
         now_utc = datetime.now(timezone.utc)
@@ -592,7 +553,7 @@ class ReminderAgent(BaseAgent):
         ]
         raw = await self._llm.chat(messages)
         parsed = self._extract_json(raw)
-        return await self._handle_suggest(session_id, parsed, is_office)
+        return await self._handle_suggest(session_id, parsed)
 
     # ── Action handlers ───────────────────────────────────────────────────────
 
@@ -600,20 +561,12 @@ class ReminderAgent(BaseAgent):
         self,
         chat_id: str,
         parsed: dict,
-        is_office: bool = False,
         is_prep: bool = False,
     ) -> str:
         message = parsed.get("message")
         remind_at_iso = parsed.get("remind_at_iso")
 
         if not message or not remind_at_iso:
-            if is_office:
-                return (
-                    "⚠️ Hmm boss, kurang jelas nih detail remindernya.\n"
-                    "Coba tulis gini ya:\n"
-                    "• *ingatkan saya meeting jam 14:00*\n"
-                    "• *remind me to take medicine at 08:00 tomorrow*"
-                )
             return (
                 "⚠️ Saya tidak bisa memahami detail reminder Anda.\n"
                 "Coba tulis seperti ini:\n"
@@ -631,8 +584,6 @@ class ReminderAgent(BaseAgent):
             # If time already passed today, it might be intended for tomorrow
             remind_at += timedelta(days=1)
             if remind_at <= now_utc:
-                if is_office:
-                    return "⚠️ Aduh boss, waktunya udah lewat nih. Pilih waktu yang akan datang ya!"
                 return "⚠️ Waktu reminder sudah lewat. Silakan tentukan waktu di masa mendatang."
 
         # Save to DB
@@ -647,29 +598,18 @@ class ReminderAgent(BaseAgent):
         time_str = wib_time.strftime("%d %B %Y pukul %H:%M WIB")
 
         label = "Reminder persiapan" if is_prep else "Reminder"
-        if is_office:
-            return (
-                f"✅ Siap boss! {label}nya udah dibuat nih 🎉\n\n"
-                f"📌 *#{reminder.id}* — {reminder.message}\n"
-                f"⏰ {time_str}"
-            )
         return (
             f"✅ {label} berhasil dibuat!\n\n"
             f"📌 *#{reminder.id}* — {reminder.message}\n"
             f"⏰ {time_str}"
         )
 
-    def _handle_list(self, chat_id: str, is_office: bool = False) -> str:
+    def _handle_list(self, chat_id: str) -> str:
         reminders = self._store.list_pending(chat_id)
         if not reminders:
-            if is_office:
-                return "📭 Kosong boss, belum ada reminder aktif nih."
             return "📭 Tidak ada reminder aktif."
 
-        if is_office:
-            lines = ["📋 *Reminder Aktif Lo Boss:*\n"]
-        else:
-            lines = ["📋 *Daftar Reminder Aktif:*\n"]
+        lines = ["📋 *Daftar Reminder Aktif:*\n"]
 
         for r in reminders:
             wib_time = r.remind_at + timedelta(hours=7)
@@ -677,20 +617,11 @@ class ReminderAgent(BaseAgent):
             lines.append(f"• *#{r.id}* — {r.message}\n  ⏰ {time_str}")
 
         lines.append(f"\n_Total: {len(reminders)} reminder aktif_")
-        if is_office:
-            lines.append("_Mau hapus? Ketik \"hapus reminder #[id]\" ya boss_")
-        else:
-            lines.append("_Untuk menghapus: \"hapus reminder #[id]\"_")
+        lines.append("_Untuk menghapus: \"hapus reminder #[id]\"_")
         return "\n".join(lines)
 
-    def _handle_cancel(self, chat_id: str, cancel_id, is_office: bool = False) -> str:
+    def _handle_cancel(self, chat_id: str, cancel_id) -> str:
         if cancel_id is None:
-            if is_office:
-                return (
-                    "⚠️ ID remindernya mana boss? "
-                    "Ketik `/list reminder` dulu buat liat daftarnya, "
-                    "terus tulis \"hapus reminder #[nomor]\" ya."
-                )
             return (
                 "⚠️ ID reminder tidak ditemukan. "
                 "Gunakan `/list reminder` untuk melihat daftar, lalu "
@@ -708,14 +639,7 @@ class ReminderAgent(BaseAgent):
 
         deleted = self._store.delete(rid, chat_id)
         if deleted:
-            if is_office:
-                return f"🗑️ Beres boss! Reminder *#{rid}* udah dihapus."
             return f"🗑️ Reminder *#{rid}* berhasil dihapus."
-        if is_office:
-            return (
-                f"⚠️ Reminder *#{rid}* gak ketemu boss, "
-                "atau bukan punya lo, atau udah terkirim."
-            )
         return (
             f"⚠️ Reminder *#{rid}* tidak ditemukan atau bukan milik Anda, "
             "atau sudah terkirim."

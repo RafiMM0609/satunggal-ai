@@ -9,7 +9,6 @@ from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     filters,
     MessageHandler,
@@ -25,8 +24,6 @@ from src.handlers import (
     handle_pdf_document,
     handle_photo,
     help_command,
-    mode_callback,
-    mode_command,
     ping,
     reset,
     setapikey,
@@ -39,7 +36,6 @@ from src.handlers import (
     setollamakey,
     setprovider,
     start,
-    status_command,
     unknown_message,
 )
 
@@ -176,8 +172,6 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("ping",      ping))
     app.add_handler(CommandHandler("reset",     reset))
     app.add_handler(CommandHandler("deploy",    deploy))
-    app.add_handler(CommandHandler("mode",      mode_command))
-    app.add_handler(CommandHandler("status",    status_command))
     app.add_handler(CommandHandler("setapikey",    setapikey))
     app.add_handler(CommandHandler("setmaxtokens", setmaxtokens))
     app.add_handler(CommandHandler("setllmmodel",  setllmmodel))
@@ -190,7 +184,6 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("briefing",       briefing_command))
 
     # ── Callback query handlers (InlineKeyboard) ───────────────────────────
-    app.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^set_mode:"))
 
     # ── Message handlers ───────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))

@@ -141,7 +141,6 @@ async def _review_repo(repo_url: str, new_hash: str, old_hash: Optional[str]) ->
     task = AgentTask(
         session_id  = "proactive_repo_watcher",
         user_input  = description,
-        current_mode = "all",
     )
     task.metadata["repo_url"] = repo_url
 

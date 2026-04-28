@@ -120,16 +120,6 @@ Aturan ketat:
 # ── Office-mode addendum: appended to the final-answer prompt only. ───────────
 # Internal steps (decompose, plan) are unaffected so their strict QUERY: prefix
 # parsing keeps working.  We only change the *tone* of the user-facing response.
-_OFFICE_TONE_ADDENDUM = """\
-
-Catatan gaya (Mode Office aktif):
-- Sampaikan hasil riset dengan nada santai dan akrab – sapa user sebagai "boss" sekali di pembuka.
-- Tetap gunakan struktur header (## Judul) dan bullet point yang rapi agar mudah dibaca.
-- Sisipkan kata-kata gaul yang wajar: "nih", "dong", "yuk", "mantap", "gaskeun", "okee", dll.
-- Jangan korbankan akurasi atau kelengkapan data demi nada santai.
-"""
-
-
 class ResearcherAgent(BaseAgent):
     """Provides detailed, research-style answers for technical questions.
 
@@ -370,9 +360,6 @@ class ResearcherAgent(BaseAgent):
                 system_content = _SYSTEM_PROMPT_WITH_SEARCH + "\n\n" + web_context
             else:
                 system_content = _SYSTEM_PROMPT
-
-            if task.current_mode == "office":
-                system_content += _OFFICE_TONE_ADDENDUM
 
             if research_plan:
                 system_content += (
