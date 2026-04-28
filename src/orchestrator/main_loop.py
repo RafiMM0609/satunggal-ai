@@ -105,11 +105,10 @@ def _get_pipeline():
     global _task_planner, _consistency_checker
 
     if _gatekeeper is not None:
-        # All module-level globals (_history, _agents, _router, _gatekeeper,
-        # _tools, _mode_store, _task_planner, _consistency_checker) are
-        # initialised on the first call and used internally within main_loop.py.
-        # The early-return is safe — they are already set by the time
-        # _gatekeeper is non-None.
+        # All module-level globals are initialised on the first call and reused
+        # on subsequent calls.  _task_planner and _consistency_checker are
+        # not part of the return tuple — they are accessed directly as globals
+        # inside process_message() which runs in the same module.
         return _history, _agents, _router, _gatekeeper, _tools, _mode_store
     from src.agents.code_fix.agent import CodeFixAgent
     from src.agents.content_creator.agent import ContentCreatorAgent
