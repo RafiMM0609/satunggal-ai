@@ -126,8 +126,8 @@ class LLMClient:
             finish_reason = None
             try:
                 finish_reason = data["choices"][0].get("finish_reason")
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("LLMClient[openrouter]: could not extract finish_reason: %s", exc)
 
             if finish_reason == "length":
                 logger.warning(

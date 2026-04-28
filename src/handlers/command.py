@@ -236,8 +236,8 @@ async def setapikey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Hapus pesan asli agar key tidak tersimpan di chat history
     try:
         await update.message.delete()
-    except Exception:  # noqa: BLE001
-        pass  # tidak semua chat izinkan penghapusan pesan
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("setapikey: could not delete user message: %s", exc)
 
     await update.effective_chat.send_message(
         f"✅ API key OpenRouter berhasil disimpan ({masked}).\n"
@@ -511,8 +511,8 @@ async def setollamakey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     masked = new_key[:8] + "..." + new_key[-4:] if len(new_key) > 12 else "***"
     try:
         await update.message.delete()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("setollamakey: could not delete user message: %s", exc)
 
     await update.effective_chat.send_message(
         f"✅ API key Ollama berhasil disimpan ({masked}).\n"
@@ -700,8 +700,8 @@ async def setgithubtoken(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     masked = new_token[:4] + "****" if len(new_token) > 4 else "***"
     try:
         await update.message.delete()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("setgithubtoken: could not delete user message: %s", exc)
 
     await update.effective_chat.send_message(
         f"✅ GitHub access token berhasil disimpan ({masked}).\n"
@@ -763,8 +763,8 @@ async def setgitlabtoken(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     masked = new_token[:4] + "****" if len(new_token) > 4 else "***"
     try:
         await update.message.delete()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("setgitlabtoken: could not delete user message: %s", exc)
 
     await update.effective_chat.send_message(
         f"✅ GitLab access token berhasil disimpan ({masked}).\n"

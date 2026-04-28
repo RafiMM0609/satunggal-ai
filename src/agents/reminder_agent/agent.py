@@ -436,8 +436,11 @@ class ReminderAgent(BaseAgent):
                             "message": prep["message"],
                             "remind_at_iso": prep["remind_at_iso"],
                         }
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as exc:
+                    logger.debug(
+                        "ReminderAgent: invalid prep_reminder datetime '%s': %s",
+                        prep.get("remind_at_iso"), exc,
+                    )
 
             valid_suggestions.append({
                 "message": msg,

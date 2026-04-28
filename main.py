@@ -28,6 +28,7 @@ def setup_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 
 def main() -> None:
