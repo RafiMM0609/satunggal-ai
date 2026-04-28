@@ -105,7 +105,7 @@ class WebReaderTool(BaseTool):
         "properties": {
             "title":     {"type": "string", "description": "Page <title>."},
             "url":       {"type": "string", "description": "Final URL after redirects."},
-            "page_text": {"type": "string", "description": "Visible page text (truncated at 8 000 chars)."},
+            "page_text": {"type": "string", "description": "Visible page text (truncated at 8000 chars)."},
             "a11y_tree": {
                 "type": "array",
                 "items": {

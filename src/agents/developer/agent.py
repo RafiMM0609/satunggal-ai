@@ -187,6 +187,9 @@ class DeveloperAgent(BaseAgent):
         "has no attribute",
     )
 
+    # Maximum characters from sandbox error output to include in delegation context.
+    _MAX_ERROR_CONTEXT_CHARS = 2000
+
     def __init__(
         self,
         llm:        LLMClient | None = None,
@@ -566,7 +569,7 @@ class DeveloperAgent(BaseAgent):
         ):
             # Extract the first unrecognised library name from the error output.
             library_match = re.search(
-                r"(?:No module named|ModuleNotFoundError: No module named)\s+'?([A-Za-z0-9_\-]+)'?",
+                r"(?:No module named|ModuleNotFoundError: No module named)\s+'?([A-Za-z0-9_\-\.]+)'?",
                 sandbox_result.output,
             )
             library_name = library_match.group(1) if library_match else "unknown library"
@@ -583,7 +586,7 @@ class DeveloperAgent(BaseAgent):
                 f"## Library Research (from ResearcherAgent)\n"
                 f"Library involved: {library_name}\n\n"
                 f"{research_summary}\n\n"
-                f"## Previous Sandbox Error\n{sandbox_result.output[-2000:]}"
+                f"## Previous Sandbox Error\n{sandbox_result.output[-self._MAX_ERROR_CONTEXT_CHARS:]}"
             )
             logger.info(
                 "DeveloperAgent: applying library-aware fix. session=%s", session_id
