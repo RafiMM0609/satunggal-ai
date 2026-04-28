@@ -1009,6 +1009,7 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
+        time_str = f"{hour:02d}:{minute:02d}"  # normalise ke HH:MM
         set_briefing_time(time_str)
         cfg = reload_briefing_job()
         logger.info("User %s set briefing time to %s.", user.id, time_str)
@@ -1072,7 +1073,7 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         new_chat_id = args[1].strip()
-        if not new_chat_id.lstrip("-").isdigit():
+        if not new_chat_id or not new_chat_id.lstrip("-").isdigit():
             await update.message.reply_html(
                 f"❌ Chat ID tidak valid: <code>{new_chat_id}</code>\n"
                 "Chat ID harus berupa angka."

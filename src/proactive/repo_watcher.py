@@ -58,7 +58,7 @@ async def _get_remote_head(repo_url: str, timeout: int = 30) -> Optional[str]:
     Menggunakan ``git ls-remote`` yang ringan (hanya membaca referensi remote).
 
     Returns:
-        Short SHA-1 (40 chars) atau None jika gagal.
+        Full SHA-1 hash (40 chars) atau None jika gagal.
     """
     from config.settings import get_settings
     from src.tools.git_utils import inject_pat_into_url

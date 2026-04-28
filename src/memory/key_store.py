@@ -330,7 +330,7 @@ def get_briefing_enabled() -> Optional[bool]:
 def set_briefing_enabled(enabled: bool) -> None:
     """Persist whether daily briefing is enabled."""
     data = _load()
-    data[_KEY_BRIEFING_ENABLED] = enabled
+    data[_KEY_BRIEFING_ENABLED] = bool(enabled)
     _save(data)
     logger.info("key_store: briefing_enabled set to %s.", enabled)
 
