@@ -18,6 +18,7 @@ from telegram.ext import (
 from .config import Config
 from config.settings import get_settings
 from src.handlers import (
+    briefing_command,
     deploy,
     echo_text,
     handle_docx_document,
@@ -186,6 +187,7 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("setollamamodel", setollamamodel))
     app.add_handler(CommandHandler("setgithubtoken", setgithubtoken))
     app.add_handler(CommandHandler("setgitlabtoken", setgitlabtoken))
+    app.add_handler(CommandHandler("briefing",       briefing_command))
 
     # ── Callback query handlers (InlineKeyboard) ───────────────────────────
     app.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^set_mode:"))

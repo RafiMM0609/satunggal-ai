@@ -88,7 +88,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/setollamahost — Atur host Ollama (admin)\n"
         "/setollamamodel — Atur nama model Ollama (admin)\n"
         "/setgithubtoken — Atur GitHub Personal Access Token (admin)\n"
-        "/setgitlabtoken — Atur GitLab Personal Access Token (admin)"
+        "/setgitlabtoken — Atur GitLab Personal Access Token (admin)\n"
+        "/briefing       — Atur daily briefing (aktifkan, jam, topik, bahasa) (admin)"
     )
     await update.message.reply_html(help_text)
 
@@ -869,5 +870,265 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(
         telegramify_markdown.markdownify(reply_md),
         parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+# ── Daily Briefing command ────────────────────────────────────────────────────
+
+_BRIEFING_HELP = (
+    "<b>⚙️ Pengaturan Daily Briefing</b>\n\n"
+    "<b>Sub-perintah:</b>\n"
+    "<code>/briefing status</code>              — lihat config aktif\n"
+    "<code>/briefing on</code>                  — aktifkan briefing\n"
+    "<code>/briefing off</code>                 — nonaktifkan briefing\n"
+    "<code>/briefing time HH:MM</code>          — atur jam kirim (zona WIB)\n"
+    "  Contoh: <code>/briefing time 07:30</code>\n"
+    "<code>/briefing topics topik1, topik2</code> — atur topik (pisah koma)\n"
+    "  Contoh: <code>/briefing topics AI terbaru, saham, kripto</code>\n"
+    "<code>/briefing lang id</code>             — bahasa Indonesia\n"
+    "<code>/briefing lang en</code>             — bahasa English\n"
+    "<code>/briefing chat ID</code>             — atur target chat_id\n"
+    "  Contoh: <code>/briefing chat 123456789</code>\n"
+    "<code>/briefing reset</code>               — kembalikan ke default (.env)\n"
+    "<code>/briefing now</code>                 — kirim briefing sekarang (test)\n"
+)
+
+
+async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /briefing — atur daily briefing melalui Telegram (admin only).
+
+    Sub-perintah:
+        /briefing status               — tampilkan config aktif
+        /briefing on | off             — aktifkan / nonaktifkan
+        /briefing time HH:MM           — ubah jam kirim (WIB)
+        /briefing topics t1, t2, ...   — ubah daftar topik
+        /briefing lang id | en         — ubah bahasa laporan
+        /briefing chat <chat_id>       — ubah target chat_id
+        /briefing reset                — hapus semua override (kembali ke .env)
+        /briefing now                  — kirim briefing sekarang untuk testing
+    """
+    settings = get_settings()
+    user     = update.effective_user
+
+    if settings.admin_user_id and user.id != settings.admin_user_id:
+        await update.message.reply_text("⛔ Akses ditolak. Hanya admin yang bisa mengatur daily briefing.")
+        return
+
+    from src.memory.key_store import (
+        get_briefing_enabled,
+        get_briefing_time,
+        get_briefing_topics,
+        get_briefing_language,
+        get_briefing_chat_id,
+        set_briefing_enabled,
+        set_briefing_time,
+        set_briefing_topics,
+        set_briefing_language,
+        set_briefing_chat_id,
+        clear_briefing_overrides,
+    )
+    from src.proactive.daily_briefing import reload_briefing_job, get_current_config, _run_briefing
+
+    args = context.args or []
+
+    if not args:
+        await update.message.reply_html(_BRIEFING_HELP)
+        return
+
+    sub = args[0].lower()
+
+    # ── status ─────────────────────────────────────────────────────────────
+    if sub == "status":
+        cfg = get_current_config()
+        enabled_icon = "✅ Aktif" if cfg["enabled"] else "❌ Nonaktif"
+        topics_str   = ", ".join(cfg["topics"])
+        lang_label   = "Indonesia 🇮🇩" if cfg["language"] == "id" else "English 🇺🇸"
+        store_note   = (
+            "⚡ <i>Beberapa nilai di-override via command (lebih prioritas dari .env)</i>"
+            if any([
+                get_briefing_enabled() is not None,
+                get_briefing_time(),
+                get_briefing_topics(),
+                get_briefing_language(),
+                get_briefing_chat_id(),
+            ])
+            else "📄 <i>Menggunakan nilai dari .env</i>"
+        )
+        await update.message.reply_html(
+            f"<b>📋 Status Daily Briefing</b>\n\n"
+            f"<b>Status   :</b> {enabled_icon}\n"
+            f"<b>Jam Kirim:</b> {cfg['time']} WIB\n"
+            f"<b>Topik    :</b> {topics_str}\n"
+            f"<b>Bahasa   :</b> {lang_label}\n"
+            f"<b>Chat ID  :</b> <code>{cfg['chat_id']}</code>\n\n"
+            f"{store_note}\n\n"
+            "Ketik /briefing untuk melihat daftar sub-perintah."
+        )
+        return
+
+    # ── on / off ───────────────────────────────────────────────────────────
+    if sub in ("on", "off"):
+        enabled = sub == "on"
+        set_briefing_enabled(enabled)
+        cfg = reload_briefing_job()
+        icon = "✅" if enabled else "❌"
+        status_text = "diaktifkan" if enabled else "dinonaktifkan"
+        detail = (
+            f"\n⏰ Jadwal: <b>{cfg['time']} WIB</b>" if enabled else ""
+        )
+        logger.info("User %s set briefing enabled=%s.", user.id, enabled)
+        await update.message.reply_html(
+            f"{icon} Daily briefing <b>{status_text}</b>.{detail}"
+        )
+        return
+
+    # ── time ───────────────────────────────────────────────────────────────
+    if sub == "time":
+        if len(args) < 2:
+            await update.message.reply_html(
+                "❗ Format: <code>/briefing time HH:MM</code>\n"
+                "Contoh  : <code>/briefing time 07:30</code>\n"
+                "<i>Waktu dalam zona WIB (UTC+7)</i>"
+            )
+            return
+
+        time_str = args[1].strip()
+        parts    = time_str.split(":")
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            await update.message.reply_html(
+                f"❌ Format waktu tidak valid: <code>{time_str}</code>\n"
+                "Gunakan format <b>HH:MM</b>, contoh: <code>07:30</code>"
+            )
+            return
+
+        hour, minute = int(parts[0]), int(parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            await update.message.reply_html(
+                f"❌ Waktu tidak valid: <code>{time_str}</code>\n"
+                "Jam: 0–23, Menit: 0–59"
+            )
+            return
+
+        set_briefing_time(time_str)
+        cfg = reload_briefing_job()
+        logger.info("User %s set briefing time to %s.", user.id, time_str)
+        await update.message.reply_html(
+            f"✅ Jam briefing diubah ke <b>{time_str} WIB</b>.\n"
+            f"{'⚡ Briefing aktif.' if cfg['enabled'] else '⚠️ Briefing saat ini nonaktif — aktifkan dengan /briefing on'}"
+        )
+        return
+
+    # ── topics ─────────────────────────────────────────────────────────────
+    if sub == "topics":
+        if len(args) < 2:
+            await update.message.reply_html(
+                "❗ Format: <code>/briefing topics topik1, topik2, topik3</code>\n"
+                "Contoh  : <code>/briefing topics AI terbaru, saham hari ini, startup Indonesia</code>"
+            )
+            return
+
+        raw_topics = " ".join(args[1:])
+        new_topics = [t.strip() for t in raw_topics.split(",") if t.strip()]
+        if not new_topics:
+            await update.message.reply_text("❌ Tidak ada topik valid yang diberikan.")
+            return
+
+        set_briefing_topics(", ".join(new_topics))
+        reload_briefing_job()
+        topics_display = "\n".join(f"  • {t}" for t in new_topics)
+        logger.info("User %s set briefing topics: %s.", user.id, new_topics)
+        await update.message.reply_html(
+            f"✅ Topik briefing diperbarui ({len(new_topics)} topik):\n{topics_display}"
+        )
+        return
+
+    # ── lang ───────────────────────────────────────────────────────────────
+    if sub == "lang":
+        if len(args) < 2 or args[1].lower() not in ("id", "en"):
+            await update.message.reply_html(
+                "❗ Format: <code>/briefing lang id</code> atau <code>/briefing lang en</code>\n"
+                "  <b>id</b> = Bahasa Indonesia\n"
+                "  <b>en</b> = English"
+            )
+            return
+
+        lang = args[1].lower()
+        set_briefing_language(lang)
+        reload_briefing_job()
+        label = "Indonesia 🇮🇩" if lang == "id" else "English 🇺🇸"
+        logger.info("User %s set briefing language to %s.", user.id, lang)
+        await update.message.reply_html(f"✅ Bahasa briefing diubah ke <b>{label}</b>.")
+        return
+
+    # ── chat ───────────────────────────────────────────────────────────────
+    if sub == "chat":
+        if len(args) < 2:
+            await update.message.reply_html(
+                "❗ Format: <code>/briefing chat &lt;chat_id&gt;</code>\n"
+                "Contoh  : <code>/briefing chat 123456789</code>\n\n"
+                "💡 Chat ID Anda saat ini: "
+                f"<code>{update.effective_chat.id}</code>"
+            )
+            return
+
+        new_chat_id = args[1].strip()
+        if not new_chat_id.lstrip("-").isdigit():
+            await update.message.reply_html(
+                f"❌ Chat ID tidak valid: <code>{new_chat_id}</code>\n"
+                "Chat ID harus berupa angka."
+            )
+            return
+
+        set_briefing_chat_id(new_chat_id)
+        reload_briefing_job()
+        logger.info("User %s set briefing chat_id to %s.", user.id, new_chat_id)
+        await update.message.reply_html(
+            f"✅ Target chat ID briefing diubah ke <code>{new_chat_id}</code>."
+        )
+        return
+
+    # ── reset ──────────────────────────────────────────────────────────────
+    if sub == "reset":
+        clear_briefing_overrides()
+        cfg = reload_briefing_job()
+        logger.info("User %s reset briefing config to .env defaults.", user.id)
+        enabled_icon = "✅ Aktif" if cfg["enabled"] else "❌ Nonaktif"
+        await update.message.reply_html(
+            "🔄 <b>Config briefing direset ke nilai .env.</b>\n\n"
+            f"<b>Status   :</b> {enabled_icon}\n"
+            f"<b>Jam Kirim:</b> {cfg['time']} WIB\n"
+            f"<b>Topik    :</b> {', '.join(cfg['topics'])}\n"
+            f"<b>Bahasa   :</b> {'Indonesia 🇮🇩' if cfg['language'] == 'id' else 'English 🇺🇸'}\n"
+            f"<b>Chat ID  :</b> <code>{cfg['chat_id']}</code>"
+        )
+        return
+
+    # ── now ────────────────────────────────────────────────────────────────
+    if sub == "now":
+        cfg = get_current_config()
+        if not cfg["chat_id"] or cfg["chat_id"] == "0":
+            await update.message.reply_text(
+                "❌ Tidak ada chat_id yang dikonfigurasi.\n"
+                "Gunakan /briefing chat <id> atau atur PROACTIVE_BRIEFING_CHAT_ID di .env."
+            )
+            return
+
+        await update.message.reply_text(
+            f"⏳ Menjalankan briefing sekarang...\n"
+            f"Topik: {', '.join(cfg['topics'])}\n"
+            f"Target: chat_id={cfg['chat_id']}"
+        )
+        logger.info("User %s triggered immediate briefing run.", user.id)
+        try:
+            await _run_briefing(cfg["chat_id"], cfg["topics"], cfg["language"])
+        except Exception as exc:
+            logger.error("Immediate briefing failed: %s", exc)
+            await update.message.reply_text(f"❌ Briefing gagal: {exc}")
+        return
+
+    # ── unknown sub-command ────────────────────────────────────────────────
+    await update.message.reply_html(
+        f"❓ Sub-perintah tidak dikenali: <code>{args[0]}</code>\n\n"
+        + _BRIEFING_HELP
     )
 
