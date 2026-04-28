@@ -569,7 +569,7 @@ class DeveloperAgent(BaseAgent):
         ):
             # Extract the first unrecognised library name from the error output.
             library_match = re.search(
-                r"(?:No module named|ModuleNotFoundError: No module named)\s+'?([A-Za-z0-9_.\\-]+)'?",
+                r"(?:No module named|ModuleNotFoundError: No module named)\s+'?([A-Za-z0-9_.-]+)'?",
                 sandbox_result.output,
             )
             library_name = library_match.group(1) if library_match else "unknown library"

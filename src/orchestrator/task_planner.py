@@ -139,7 +139,6 @@ Does the response fully and correctly answer the user's request?
 If YES → reply with exactly: OK
 If NO (off-topic, obviously truncated, clear factual error, or misses the main point)
 → provide an improved version of the response only.
-→ provide an improved version of the response only.
 
 Rules:
 - Do NOT add preambles like "Here is the improved version:".
