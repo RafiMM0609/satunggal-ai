@@ -227,9 +227,55 @@ OPENROUTER_MODEL=openai/gpt-4o              # lebih pintar
 ```
 Daftar model tersedia di [openrouter.ai/models](https://openrouter.ai/models).
 
+## 9. Fase 4 – Proactive Mode (Background Jobs)
+
+Bot dapat menjalankan tugas secara **proaktif** tanpa menunggu pesan dari user.
+
+### 9.1 Daily Briefing (Ringkasan Berita Harian)
+
+ResearcherAgent mengumpulkan berita dari Tavily dan mengirimnya ke Telegram setiap hari pada waktu yang dikonfigurasi.
+
+```dotenv
+# Aktifkan daily briefing
+PROACTIVE_BRIEFING_ENABLED=true
+
+# Target chat ID Telegram (kosongkan = gunakan ADMIN_USER_ID)
+PROACTIVE_BRIEFING_CHAT_ID=123456789
+
+# Jam kirim dalam format HH:MM zona WIB (UTC+7)
+PROACTIVE_BRIEFING_TIME=07:00
+
+# Topik yang akan diriset, dipisah koma
+PROACTIVE_BRIEFING_TOPICS=AI terbaru, berita teknologi, startup Indonesia
+
+# Bahasa laporan: id (Indonesia) atau en (English)
+PROACTIVE_BRIEFING_LANGUAGE=id
+```
+
+> **Catatan:** Fitur ini membutuhkan `TAVILY_API_KEY` yang valid.
+
+### 9.2 Repo Watcher (Pemantau Repository Otomatis)
+
+Memantau satu atau lebih repository GitHub/GitLab secara berkala. Jika ada commit baru, DeveloperInspectorAgent akan melakukan code review dan mengirimkan laporan ke Telegram.
+
+```dotenv
+# Aktifkan repo watcher
+PROACTIVE_REPO_WATCHER_ENABLED=true
+
+# Target chat ID Telegram (kosongkan = gunakan ADMIN_USER_ID)
+PROACTIVE_REPO_WATCHER_CHAT_ID=123456789
+
+# Daftar URL repo yang dipantau, dipisah koma
+PROACTIVE_REPO_WATCHER_REPOS=https://github.com/org/repo1,https://github.com/org/repo2
+
+# Interval polling dalam menit (default: 60)
+PROACTIVE_REPO_WATCHER_INTERVAL=60
+```
+
+> **Catatan:** Untuk repo private, pastikan `GITHUB_PAT` atau `GITLAB_PAT` sudah dikonfigurasi.
+
 ---
 
-## 8. Struktur File Penting
 
 ```
 advance_ai/

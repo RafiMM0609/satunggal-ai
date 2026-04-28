@@ -110,6 +110,15 @@ async def _send_startup_notification(app: Application) -> None:
     start_scheduler()
     await reschedule_pending_on_startup()
 
+    # ── Fase 4: Proactive jobs ──────────────────────────────────────────────
+    # Daily Briefing: ResearcherAgent mengirim ringkasan berita terjadwal.
+    from src.proactive.daily_briefing import start_briefing_job
+    start_briefing_job(app.bot)
+
+    # Repo Watcher: Pantau commit baru di repo dan kirim laporan auto.
+    from src.proactive.repo_watcher import start_repo_watcher_job
+    start_repo_watcher_job(app.bot)
+
     settings = get_settings()
     if not settings.admin_user_id:
         logger.info("ADMIN_USER_ID tidak dikonfigurasi, startup notification dilewati.")
@@ -133,6 +142,10 @@ async def _send_startup_notification(app: Application) -> None:
 async def _shutdown_scheduler(app: Application) -> None:
     """Stop APScheduler when the bot shuts down."""
     from src.agents.reminder_agent.scheduler import stop_scheduler
+    from src.proactive.daily_briefing import stop_briefing_job
+    from src.proactive.repo_watcher import stop_repo_watcher_jobs
+    stop_briefing_job()
+    stop_repo_watcher_jobs()
     stop_scheduler()
 
 
