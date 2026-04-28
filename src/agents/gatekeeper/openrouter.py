@@ -43,7 +43,25 @@ logger = logging.getLogger(__name__)
 # _build_system_prompt(allowed_intents) assembles the final prompt.
 # When allowed_intents is None (mode="all") it returns the full prompt.
 
-_PREAMBLE = "You are an intent classifier for a customer service AI routing system.\n\nClassify the user's PRIMARY intent into EXACTLY ONE of:\n"
+_PREAMBLE = """\
+You are an intent classifier for a customer service AI routing system.
+
+IMPORTANT – Input Language & Slang Awareness:
+The user may write in Indonesian formal language, Gen Z slang, or a mix of both.
+Do NOT be confused by non-formal vocabulary. Map slang verbs/nouns to their technical equivalents:
+  • "cooking / sikat / gas / eksekusi / gercep" → Execute / Process / Run
+  • "intip / teropong / cek / kepoin" → Review / Inspect / Check
+  • "berantakan / red flag / blunder / error-an / kacau" → Bug / Error / Issue
+  • "spill / bisikin / kasih tau" → Get Information / Explain / Tutorial
+  • "fix / beresin / beneran / benerin" → Fix / Repair / Debug
+  • "draf / bikin / create / gas cooking" → Create / Generate / Draft
+  • "anw / btw" → "by the way" (informational aside, keep focus on main action)
+Focus on: (1) What is the OBJECT? (code, news, schedule, document)
+          (2) What is the ACTION? (fix, search, create, review, explain)
+Translate any human language (formal or slang) into the correct technical intent below.
+
+Classify the user's PRIMARY intent into EXACTLY ONE of:
+"""
 
 # Ordered so the final prompt reads logically (generic → specialised).
 _INTENT_DESCRIPTIONS: dict[str, str] = {
@@ -354,6 +372,19 @@ _INTENT_RULES: list[tuple[str, "frozenset[str] | None"]] = [
         '      If user says "buat diagram dari diskusi kita" / "gambarkan alur dari analisa" \u2192 diagram_from_analysis.\n'
         '      If user says "jelaskan" / "apa maksud" \u2192 doc_audit.',
         frozenset({"diagram_from_analysis"}),
+    ),
+    (
+        '25. SLANG & NON-FORMAL INPUT (applies to ALL intents):\n'
+        '    Indonesian slang / Gen Z vocabulary that must be recognised and mapped:\n'
+        '    • "gas cooking [WBS/draf/...]"  → wbs_planning / mandays_planning / content_creation / code_development\n'
+        '    • "teropong / intip / kepoin repo"  → code_inspection\n'
+        '    • "blunder / red flag / error-an / berantakan di repo"  → code_inspection or code_fix\n'
+        '    • "spill cara pakenya / bisikin caranya"  → general_inquiry or technical_support\n'
+        '    • "sikat / eksekusi / fix sekarang"  → code_development or code_fix\n'
+        '    • "anw, info berita/loker dong"  → research\n'
+        '    Do NOT lower the confidence because of slang. If the intent is clear despite non-formal language,\n'
+        '    classify with normal confidence (≥ 0.85).',
+        None,
     ),
 ]
 

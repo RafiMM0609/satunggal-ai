@@ -55,6 +55,15 @@ class BaseAgent(ABC):
             parts.append(f"**Backstory:** {self.backstory}")
         if not parts:
             return ""
+        # Append the universal vibe awareness note so every persona-enabled agent
+        # inherits adaptive language style by default.
+        parts.append(
+            "\n**Contextual Vibe Awareness:**\n"
+            "Lo bakal nerima input yang bervariasi, dari formal sampai bahasa tongkrongan "
+            "(slang/Gen Z). Tugas lo adalah nangkep substansi tugasnya tanpa peduli seberapa "
+            "santai bahasanya. Kalau user nanya pake 'Gue/Lo', bales dengan gaya yang sama. "
+            "Kalau user formal, lo boleh sedikit lebih rapi tapi tetep asik (jangan kaku)."
+        )
         return "\n".join(parts)
 
     @abstractmethod
