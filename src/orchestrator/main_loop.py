@@ -83,26 +83,29 @@ _RATE_LIMIT_REPLY = (
 
 if TYPE_CHECKING:
     from src.memory.state import AgentTask
+    from src.orchestrator.task_planner import TaskPlan
 
 
 # ── Lazy singletons ────────────────────────────────────────────────────────────
 
-_history    = None
-_llm        = None
-_agents     = None
-_router     = None
-_gatekeeper = None
-_tools      = None   # dict[str, BaseTool]
-_mode_store = None   # UserModeStore
+_history             = None
+_llm                 = None
+_agents              = None
+_router              = None
+_gatekeeper          = None
+_tools               = None   # dict[str, BaseTool]
+_mode_store          = None   # UserModeStore
+_task_planner        = None   # TaskPlanner  (Phase 2)
+_consistency_checker = None   # ConsistencyChecker  (Phase 2)
 
 
 def _get_pipeline():
     """Lazily create and cache all pipeline components."""
     global _history, _llm, _agents, _router, _gatekeeper, _tools, _mode_store
+    global _task_planner, _consistency_checker
 
     if _gatekeeper is not None:
         return _history, _agents, _router, _gatekeeper, _tools, _mode_store
-
     from src.agents.code_fix.agent import CodeFixAgent
     from src.agents.content_creator.agent import ContentCreatorAgent
     from src.agents.developer.agent import DeveloperAgent
@@ -199,6 +202,11 @@ def _get_pipeline():
     _agents["doc_editor"]  = _agents["doc_agent"]
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
+
+    # ── Phase 2: TaskPlanner + ConsistencyChecker ─────────────────────────
+    from src.orchestrator.task_planner import TaskPlanner, ConsistencyChecker  # noqa: PLC0415
+    _task_planner        = TaskPlanner(agents=_agents, llm=_llm)
+    _consistency_checker = ConsistencyChecker(llm=_llm)
 
     logger.info(
         "Pipeline initialised: %d agents, %d tools registered.",
@@ -375,6 +383,138 @@ def _format_mode_changed(new_mode: str) -> str:
     )
 
 
+# ── Phase 2: Sequential multi-step plan executor ──────────────────────────────
+
+async def _execute_plan(
+    plan:            "TaskPlan",
+    task:            "AgentTask",
+    agents:          dict,
+    tools:           dict,
+    status_callback: "StatusCallback",
+    history,
+) -> "AgentTask":
+    """Execute a sequential ``TaskPlan``, forwarding each step's output to the next.
+
+    Args:
+        plan:            The decomposed plan from ``TaskPlanner.plan()``.
+        task:            The original ``AgentTask`` (session_id, mode, metadata are read).
+        agents:          The registered agent dict from ``_get_pipeline()``.
+        tools:           The registered tool dict from ``_get_pipeline()``.
+        status_callback: Optional live-update callback for the interface layer.
+        history:         ConversationHistory (not written to – caller handles that).
+
+    Returns:
+        The mutated *task* with ``task.result`` set to the final step's output.
+    """
+    from src.memory.state import AgentTask as _AgentTask  # noqa: PLC0415
+    from src.orchestrator.task_planner import TaskPlan    # noqa: PLC0415
+
+    total_steps      = len(plan.steps)
+    accumulated_ctx  = ""  # grows as steps complete; injected into following steps
+    final_result     = ""
+
+    for step in plan.steps:
+        agent = agents.get(step.agent_name)
+        if agent is None:
+            logger.warning(
+                "_execute_plan: agent '%s' not found; skipping step %d",
+                step.agent_name, step.step_id,
+            )
+            continue
+
+        # Enrich instruction with context from previous steps
+        instruction = step.instruction
+        if accumulated_ctx:
+            instruction = (
+                instruction
+                + "\n\n---\n## Hasil dari langkah sebelumnya (gunakan sebagai konteks):\n"
+                + accumulated_ctx
+            )
+
+        # Create a fresh sub-task so we don't mutate the original task's user_input
+        step_task = _AgentTask(
+            session_id   = task.session_id,
+            user_input   = instruction,
+            current_mode = task.current_mode,
+            metadata     = {
+                **task.metadata,
+                "plan_step":       step.step_id,
+                "is_planned_step": True,
+            },
+        )
+
+        await _notify(
+            status_callback,
+            f"⚙️ **Langkah {step.step_id}/{total_steps}**: {step.description}",
+        )
+        logger.info(
+            "_execute_plan: step %d/%d agent=%s session=%s",
+            step.step_id, total_steps, agent.name, task.session_id,
+        )
+
+        try:
+            step_task.mark_processing(agent.name)
+            step_task = await agent.run(step_task)
+        except Exception as exc:
+            logger.exception(
+                "_execute_plan: step %d agent '%s' raised: %s",
+                step.step_id, agent.name, exc,
+            )
+            task.mark_failed(f"Langkah {step.step_id} gagal: {exc}")
+            task.result = (
+                f"❌ Proses multi-langkah gagal pada langkah {step.step_id} "
+                f"({step.description}): {exc}"
+            )
+            return task
+
+        # Drain pending tools produced by this step's agent
+        for tool_name in list(step_task.pending_tools):
+            tool = tools.get(tool_name)
+            if tool is None:
+                logger.warning(
+                    "_execute_plan: pending tool '%s' not in registry; skipping.", tool_name
+                )
+                continue
+            try:
+                tool_output = await tool.run(step_task)
+                step_task.tool_results[tool_name] = tool_output
+                # Propagate file paths back to the main task
+                for key in ("excel_path", "document_path", "html_path"):
+                    if key in tool_output:
+                        task.metadata[key] = tool_output[key]
+            except Exception as exc:
+                logger.exception("_execute_plan: post-step tool '%s' raised: %s", tool_name, exc)
+        step_task.pending_tools.clear()
+
+        # Propagate metadata keys back to the main task
+        for key in ("excel_path", "document_path", "html_path"):
+            if key in step_task.metadata:
+                task.metadata[key] = step_task.metadata[key]
+
+        # Accumulate step result as context for subsequent steps
+        if step_task.result:
+            final_result = step_task.result
+            accumulated_ctx += (
+                f"\n\n### Langkah {step.step_id}: {step.description}\n{step_task.result}"
+            )
+
+        logger.info(
+            "_execute_plan: step %d done status=%s session=%s",
+            step.step_id, step_task.status.value, task.session_id,
+        )
+
+    # Store the full execution trace in metadata for debugging
+    task.metadata["plan_trace"] = accumulated_ctx
+
+    if final_result:
+        task.mark_done(final_result)
+    else:
+        task.mark_failed("All plan steps produced empty results.")
+        task.result = "❌ Proses multi-langkah tidak menghasilkan output."
+
+    return task
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def process_message(
@@ -495,6 +635,39 @@ async def process_message(
         tracker.advance("done")
         await _notify(status_callback, tracker.render())
         return task
+
+    # 3c. TaskPlanner (Phase 2) – detect compound/multi-step requests and
+    #     orchestrate them sequentially before falling back to single-agent routing.
+    if _task_planner is not None and _task_planner.should_plan(user_text):
+        logger.info("TaskPlanner triggered: compound request detected. session=%s", session_id)
+        plan = await _task_planner.plan(user_text, session_id=session_id)
+
+        if plan.is_multi_step:
+            tracker.advance("task_planner")
+            await _notify(status_callback, "🗂️ **Merancang rencana kerja multi-langkah...**")
+            task.agent_trace.append(
+                f"task_planner → sequential plan ({len(plan.steps)} steps)"
+            )
+
+            task = await _execute_plan(plan, task, agents, tools, status_callback, history)
+
+            # Consistency check: Manager reviews the composed answer before delivery
+            if task.result and _consistency_checker is not None:
+                task.result = await _consistency_checker.check(
+                    user_input=user_text,
+                    result=task.result,
+                    session_id=session_id,
+                )
+
+            history.add(session_id, "assistant", task.result or "")
+            tracker.advance("done")
+            await _notify(status_callback, tracker.render())
+            logger.info(
+                "Multi-step plan done: session=%s steps=%d status=%s",
+                session_id, len(plan.steps), task.status.value,
+            )
+            return task
+        # else: plan.mode == "single" → fall through to normal single-agent routing
 
     # 4. Execute tools declared by gatekeeper (before calling specialist agent)
     for tool_name in intent_result.tools:
