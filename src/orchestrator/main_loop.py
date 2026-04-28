@@ -97,12 +97,13 @@ _tools               = None   # dict[str, BaseTool]
 _mode_store          = None   # UserModeStore
 _task_planner        = None   # TaskPlanner  (Phase 2)
 _consistency_checker = None   # ConsistencyChecker  (Phase 2)
+_manager_agent       = None   # ManagerAgent (Phase 3 – Hierarchical Manager Pattern)
 
 
 def _get_pipeline():
     """Lazily create and cache all pipeline components."""
     global _history, _llm, _agents, _router, _gatekeeper, _tools, _mode_store
-    global _task_planner, _consistency_checker
+    global _task_planner, _consistency_checker, _manager_agent
 
     if _gatekeeper is not None:
         # All module-level globals are initialised on the first call and reused
@@ -215,6 +216,10 @@ def _get_pipeline():
     from src.orchestrator.task_planner import TaskPlanner, ConsistencyChecker  # noqa: PLC0415
     _task_planner        = TaskPlanner(agents=_agents, llm=_llm)
     _consistency_checker = ConsistencyChecker(llm=_llm)
+
+    # ── Phase 3 (Hierarchical Manager): ManagerAgent reviews every agent output
+    from src.agents.manager.agent import ManagerAgent  # noqa: PLC0415
+    _manager_agent = ManagerAgent(llm=_llm)
 
     logger.info(
         "Pipeline initialised: %d agents, %d tools registered.",
@@ -804,6 +809,16 @@ async def process_message(
     # 7. Build final reply text (stored on task for callers)
     if not task.result:
         task.result = "Maaf, saya tidak dapat memproses permintaan Anda saat ini."
+
+    # 7b. Hierarchical Manager review – ManagerAgent mereview output sebelum
+    #     dikirim ke user (non-fatal: output asli dikembalikan jika review gagal).
+    if _manager_agent is not None and task.result:
+        task.result = await _manager_agent.review(
+            user_input   = user_text,
+            agent_name   = agent.name,
+            agent_output = task.result,
+            session_id   = session_id,
+        )
 
     # 8. Record assistant turn in history
     history.add(session_id, "assistant", task.result)
