@@ -25,7 +25,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from pydantic import BaseModel  # noqa: F401 (kept for subclass compatibility)
 
@@ -50,6 +50,10 @@ from src.tools.git_utils import (
     repo_name_from_url  as _repo_name_from_url,
 )
 from src.tools.sandbox_runner import SandboxResult, SandboxRunner
+
+if TYPE_CHECKING:
+    from src.agents.developer_inspector.agent import DeveloperInspectorAgent
+    from src.agents.researcher.agent import ResearcherAgent
 
 logger = logging.getLogger(__name__)
 
@@ -155,10 +159,44 @@ class DeveloperAgent(BaseAgent):
 
     name = "developer"
 
+    # ── Persona ───────────────────────────────────────────────────────────────
+    role = "Senior Developer Orchestrator"
+    goal = (
+        "Receive code change or feature requests, apply them via AI CLI (Claude/GitHub Copilot), "
+        "verify correctness inside a Docker sandbox, commit on success, and report honestly."
+    )
+    backstory = (
+        "You are a battle-hardened senior engineer who never guesses and never declares victory "
+        "before a green sandbox run. You inspect the repository structure before every edit, "
+        "use the available AI CLI tools as your coding assistants, and when you encounter an "
+        "unfamiliar library or technology, you proactively consult the ResearcherAgent to "
+        "learn the correct API before writing any code."
+    )
+
+    # ── Delegation registry ───────────────────────────────────────────────────
+    delegates_to = ["researcher", "developer_inspector"]
+
+    # ── Library error detection patterns ─────────────────────────────────────
+    # When sandbox output contains these, DeveloperAgent will ask ResearcherAgent
+    # for library/API information before attempting the next fix.
+    _LIBRARY_ERROR_PATTERNS = (
+        "ModuleNotFoundError",
+        "ImportError",
+        "No module named",
+        "cannot import name",
+        "AttributeError",
+        "has no attribute",
+    )
+
+    # Maximum characters from sandbox error output to include in delegation context.
+    _MAX_ERROR_CONTEXT_CHARS = 2000
+
     def __init__(
         self,
-        llm:       LLMClient | None = None,
-        repos_dir: Path | str | None = None,
+        llm:        LLMClient | None = None,
+        repos_dir:  Path | str | None = None,
+        researcher: "ResearcherAgent | None" = None,
+        inspector:  "DeveloperInspectorAgent | None" = None,
     ) -> None:
         from config.settings import get_settings
         _settings          = get_settings()
@@ -178,6 +216,12 @@ class DeveloperAgent(BaseAgent):
         self._git_user_email = _settings.git_user_email
         self._repos_dir.mkdir(parents=True, exist_ok=True)
         self._tracker      = RepoTracker()
+        # ResearcherAgent for library/API delegation (injected or lazy-created)
+        self._researcher   = researcher
+        # DeveloperInspectorAgent for post-change code review (Phase 3 collaboration).
+        # When set, the inspector is automatically called after a successful sandbox run
+        # to review the git diff before the report is returned to the user.
+        self._inspector    = inspector
         # Detect which AI CLI can actually edit files non-interactively.
         # gh copilot suggest is excluded – it cannot write files.
         self._ai_cli = _detect_available_cli()
@@ -193,6 +237,42 @@ class DeveloperAgent(BaseAgent):
             ai_cli=self._ai_cli,
             timeout=self._timeout,
         )
+
+    # ── Delegation helpers ────────────────────────────────────────────────────
+
+    def _looks_like_library_error(self, error_output: str) -> bool:
+        """Return True when sandbox output suggests an unknown library / import error."""
+        return any(pat in error_output for pat in self._LIBRARY_ERROR_PATTERNS)
+
+    async def _delegate_to_researcher(
+        self,
+        library_name: str,
+        session_id: str,
+    ) -> str:
+        """Ask ResearcherAgent for concise usage information about a library.
+
+        Lazy-imports ResearcherAgent to avoid circular imports.  Creates a
+        throw-away instance if none was injected at construction time.
+
+        Returns:
+            A short research summary to be injected into the next fix prompt.
+        """
+        if self._researcher is None:
+            from src.agents.researcher.agent import ResearcherAgent  # noqa: PLC0415
+            from src.memory.history import ConversationHistory         # noqa: PLC0415
+            self._researcher = ResearcherAgent(
+                history=ConversationHistory(max_messages=10),
+                llm=self._llm,
+            )
+        query = (
+            f"How do I correctly install and use the Python library '{library_name}'? "
+            f"Provide: pip install command, correct import statement, and a minimal usage example."
+        )
+        logger.info(
+            "DeveloperAgent: delegating library research → ResearcherAgent query=%r session=%s",
+            library_name, session_id,
+        )
+        return await self._researcher.research_for_delegation(query, session_id=session_id)
 
     # ── BaseAgent contract ────────────────────────────────────────────────────
 
@@ -296,7 +376,8 @@ class DeveloperAgent(BaseAgent):
 
             # Apply AI CLI changes then verify in sandbox.
             sandbox_result = await self._apply_and_verify(
-                dev_task, executor, sandbox, max_retries=self._max_retries
+                dev_task, executor, sandbox, max_retries=self._max_retries,
+                session_id=task.session_id
             )
 
             # Commit & push only when sandbox is green.
@@ -315,6 +396,30 @@ class DeveloperAgent(BaseAgent):
             diff   = await git_mgr.get_diff()
             report = self._build_report(dev_task, sandbox_result, diff, commit_hash, push_result)
             report = f"🌿 **Branch:** `{branch}`\n\n" + report
+
+            # ── Phase 3: Inspector Code Review ────────────────────────────────
+            # When a DeveloperInspectorAgent is available, ask it to review the
+            # git diff of the changes just committed.  Failures are non-fatal
+            # (the agent already reported success; the review is advisory only).
+            if self._inspector is not None and sandbox_result.succeeded and diff:
+                try:
+                    review = await self._inspector.inspect_diff(
+                        diff_text=diff,
+                        task_description=dev_task,
+                        session_id=task.session_id,
+                    )
+                    if review:
+                        report += f"\n\n---\n\n## 🕵️ Code Review oleh DeveloperInspector\n\n{review}"
+                        logger.info(
+                            "DeveloperAgent: inspector review appended (%d chars). session=%s",
+                            len(review), task.session_id,
+                        )
+                except Exception as _review_exc:
+                    logger.warning(
+                        "DeveloperAgent: inspector review failed (non-fatal): %s session=%s",
+                        _review_exc, task.session_id,
+                    )
+
             task.mark_done(report)
 
         except Exception as exc:
@@ -339,8 +444,10 @@ class DeveloperAgent(BaseAgent):
             branch is empty string when not explicitly specified.
         """
         prompt = _EXTRACT_PROMPT.format(user_input=user_input)
+        persona = self.get_persona_prompt()
+        system  = (persona + "\n\n" + _SYSTEM_PROMPT) if persona else _SYSTEM_PROMPT
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user",   "content": prompt},
         ]
         raw = await self._llm.chat(messages, max_tokens=300)
@@ -456,6 +563,7 @@ class DeveloperAgent(BaseAgent):
         sandbox:     SandboxRunner,
         *,
         max_retries: int = MAX_SANDBOX_RETRIES,
+        session_id:  str = "unknown",
     ) -> SandboxResult:
         """
         Apply code changes first (single pass), then verify in Docker sandbox.
@@ -463,7 +571,9 @@ class DeveloperAgent(BaseAgent):
         Flow:
           1. Apply all code changes (AI CLI or LLM-direct) – ONCE via CodeEditorTool.
           2. Run Docker sandbox ONCE to verify the result.
-          3. Return SandboxResult.
+          3. If sandbox fails with a library/import error, consult ResearcherAgent,
+             inject the research context, and apply a targeted fix (1 additional sandbox run).
+          4. Return SandboxResult.
         """
         repo_path = executor.work_dir
 
@@ -480,6 +590,44 @@ class DeveloperAgent(BaseAgent):
             sandbox_result.succeeded,
             sandbox_result.phase,
         )
+
+        # ── Step 3: Library delegation – retry with research context ──────
+        if (
+            not sandbox_result.succeeded
+            and sandbox_result.output
+            and self._looks_like_library_error(sandbox_result.output)
+        ):
+            # Extract the first unrecognised library name from the error output.
+            library_match = re.search(
+                r"(?:No module named|ModuleNotFoundError: No module named)\s+'?([A-Za-z0-9_.-]+)'?",
+                sandbox_result.output,
+            )
+            library_name = library_match.group(1) if library_match else "unknown library"
+
+            logger.info(
+                "DeveloperAgent: library error detected ('%s') – delegating to ResearcherAgent. session=%s",
+                library_name, session_id,
+            )
+            research_summary = await self._delegate_to_researcher(library_name, session_id)
+
+            # Build an enriched fix task that includes the research context.
+            enriched_task = (
+                f"{dev_task}\n\n"
+                f"## Library Research (from ResearcherAgent)\n"
+                f"Library involved: {library_name}\n\n"
+                f"{research_summary}\n\n"
+                f"## Previous Sandbox Error\n{sandbox_result.output[-self._MAX_ERROR_CONTEXT_CHARS:].lstrip()}"
+            )
+            logger.info(
+                "DeveloperAgent: applying library-aware fix. session=%s", session_id
+            )
+            await self._editor.apply_changes(enriched_task, repo_path)
+            sandbox_result = await sandbox.run(max_attempts=1)
+            logger.info(
+                "DeveloperAgent: post-delegation sandbox | succeeded=%s phase=%s session=%s",
+                sandbox_result.succeeded, sandbox_result.phase, session_id,
+            )
+
         return sandbox_result
 
     # ── CLI mode helpers ──────────────────────────────────────────────────────

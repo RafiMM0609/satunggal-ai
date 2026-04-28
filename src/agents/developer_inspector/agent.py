@@ -707,6 +707,104 @@ class DeveloperInspectorAgent(RepoAgentBase):
 
         return task
 
+    # ── Phase 3: Lightweight diff review (called by DeveloperAgent) ───────────
+
+    #: Maximum diff characters forwarded to the review LLM.
+    _MAX_DIFF_REVIEW_CHARS: int = 6_000
+
+    _DIFF_REVIEW_SYSTEM_PROMPT = """\
+Kamu adalah **Senior Code Reviewer** yang bertugas mereview perubahan kode (git diff) \
+yang baru saja diterapkan oleh DeveloperAgent.
+
+Fokusmu HANYA pada diff yang diberikan — bukan keseluruhan codebase.
+
+Berikan review singkat dan actionable dengan format berikut:
+
+---
+
+## 🔍 Code Review — Ringkasan Perubahan
+
+### ✅ Hal yang Sudah Baik
+(daftar singkat poin positif dari perubahan)
+
+### ⚠️ Potensi Masalah
+(daftar masalah yang ditemukan — HANYA berdasarkan bukti nyata di diff)
+- **Lokasi**: nama file + baris jika terlihat di diff
+- **Masalah**: penjelasan singkat
+- **Kepercayaan**: 🟢 CONFIRMED / 🟡 LIKELY
+
+### 💡 Saran Lanjutan
+(opsional — saran peningkatan jika ada, jika tidak ada cukup tulis "Tidak ada.")
+
+---
+
+Aturan:
+- Jika diff kosong atau tidak signifikan, jawab: "✅ Tidak ada perubahan signifikan untuk direview."
+- Gunakan bahasa yang sama dengan deskripsi task (Indonesia atau Inggris).
+- Jangan mengarang temuan yang tidak terlihat dalam diff.
+- Maksimal 5 butir per seksi.
+"""
+
+    async def inspect_diff(
+        self,
+        diff_text:        str,
+        task_description: str,
+        session_id:       str = "unknown",
+    ) -> str:
+        """Lightweight code review of a git diff produced by DeveloperAgent.
+
+        Phase 3 Collaboration: called automatically after DeveloperAgent applies
+        changes and the Docker sandbox passes.  This gives the Inspector a chance
+        to catch style issues, potential bugs, or security concerns in the exact
+        lines that were changed — without running a full repository inspection.
+
+        Args:
+            diff_text:        The output of ``git diff HEAD~1 HEAD`` (or similar).
+            task_description: The original coding task so the LLM has context.
+            session_id:       For logging only.
+
+        Returns:
+            A Markdown-formatted review string. Returns an empty string on error
+            so the caller can decide whether to include it in the report.
+        """
+        if not diff_text or not diff_text.strip():
+            logger.debug(
+                "Inspector.inspect_diff: empty diff — skipping review. session=%s", session_id
+            )
+            return ""
+
+        # Cap to avoid overlong prompts for very large diffs.
+        diff_capped = diff_text[: self._MAX_DIFF_REVIEW_CHARS]
+        if len(diff_text) > self._MAX_DIFF_REVIEW_CHARS:
+            diff_capped += "\n... [diff dipotong karena terlalu panjang]"
+
+        user_msg = (
+            f"**Task yang dikerjakan DeveloperAgent:**\n{task_description[:500]}\n\n"
+            f"**Git diff hasil perubahan:**\n```diff\n{diff_capped}\n```"
+        )
+
+        try:
+            review = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": self._DIFF_REVIEW_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=INSPECTOR_TEMPERATURE,
+                top_p=INSPECTOR_TOP_P,
+                max_tokens=1024,
+            )
+            logger.info(
+                "Inspector.inspect_diff: review complete (%d chars). session=%s",
+                len(review), session_id,
+            )
+            return review.strip()
+        except Exception as exc:
+            logger.warning(
+                "Inspector.inspect_diff: LLM call failed (%s) — skipping review. session=%s",
+                exc, session_id,
+            )
+            return ""
+
     # ── Main run ───────────────────────────────────────────────────────────────
 
     async def run(self, task: AgentTask) -> AgentTask:

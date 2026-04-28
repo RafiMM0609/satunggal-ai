@@ -44,6 +44,31 @@ class PDFParserTool(BaseTool):
     """
 
     name = "pdf_parser"
+    description = (
+        "Extract clean text from a PDF file using PyMuPDF (fitz). "
+        "Splits the text into chunks of ~2 000 words for LLM context management. "
+        "Set task.metadata['pdf_path'] to the absolute path of the PDF before calling."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "pdf_path": {
+                "type": "string",
+                "description": "Absolute path to the PDF file (set in task.metadata['pdf_path']).",
+            },
+        },
+        "required": ["pdf_path"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "chunks":      {"type": "array", "items": {"type": "string"}, "description": "Text chunks ready for LLM processing."},
+            "total_pages": {"type": "integer", "description": "Total number of pages in the PDF."},
+            "total_words": {"type": "integer", "description": "Estimated total word count."},
+            "filename":    {"type": "string",  "description": "Original file name."},
+            "error":       {"type": "string",  "description": "Present only on failure."},
+        },
+    }
 
     async def run(self, task: "AgentTask") -> dict[str, Any]:
         pdf_path: str = task.metadata.get("pdf_path", "")

@@ -1,6 +1,7 @@
 """Handlers package — command & message handlers."""
 
 from .command import (
+    briefing_command,
     deploy,
     help_command,
     mode_callback,
@@ -22,6 +23,7 @@ from .command import (
 from .message import echo_text, handle_docx_document, handle_pdf_document, handle_photo, unknown_message
 
 __all__ = [
+    "briefing_command",
     "start",
     "help_command",
     "ping",

@@ -308,3 +308,95 @@ def effective_gitlab_pat(env_pat: str) -> str:
     """Return the GitLab PAT to use, preferring the store over ``env_pat``."""
     stored = get_gitlab_pat()
     return stored if stored else env_pat
+
+
+# ── Daily Briefing overrides ─────────────────────────────────────────────────
+
+_KEY_BRIEFING_ENABLED  = "briefing_enabled"
+_KEY_BRIEFING_TIME     = "briefing_time"
+_KEY_BRIEFING_TOPICS   = "briefing_topics"
+_KEY_BRIEFING_LANGUAGE = "briefing_language"
+_KEY_BRIEFING_CHAT_ID  = "briefing_chat_id"
+
+
+def get_briefing_enabled() -> Optional[bool]:
+    """Return the stored briefing enabled override, or None if not set."""
+    val = _load().get(_KEY_BRIEFING_ENABLED)
+    if val is None:
+        return None
+    return bool(val)
+
+
+def set_briefing_enabled(enabled: bool) -> None:
+    """Persist whether daily briefing is enabled."""
+    data = _load()
+    data[_KEY_BRIEFING_ENABLED] = bool(enabled)
+    _save(data)
+    logger.info("key_store: briefing_enabled set to %s.", enabled)
+
+
+def get_briefing_time() -> Optional[str]:
+    """Return the stored briefing time override (HH:MM WIB), or None if not set."""
+    return _load().get(_KEY_BRIEFING_TIME) or None
+
+
+def set_briefing_time(time_str: str) -> None:
+    """Persist briefing time as HH:MM (WIB)."""
+    data = _load()
+    data[_KEY_BRIEFING_TIME] = time_str.strip()
+    _save(data)
+    logger.info("key_store: briefing_time set to %s.", time_str)
+
+
+def get_briefing_topics() -> Optional[str]:
+    """Return the stored briefing topics override (comma-separated), or None if not set."""
+    return _load().get(_KEY_BRIEFING_TOPICS) or None
+
+
+def set_briefing_topics(topics: str) -> None:
+    """Persist briefing topics as a comma-separated string."""
+    data = _load()
+    data[_KEY_BRIEFING_TOPICS] = topics.strip()
+    _save(data)
+    logger.info("key_store: briefing_topics updated.")
+
+
+def get_briefing_language() -> Optional[str]:
+    """Return the stored briefing language override ('id' or 'en'), or None if not set."""
+    return _load().get(_KEY_BRIEFING_LANGUAGE) or None
+
+
+def set_briefing_language(lang: str) -> None:
+    """Persist briefing language ('id' or 'en')."""
+    data = _load()
+    data[_KEY_BRIEFING_LANGUAGE] = lang.strip().lower()
+    _save(data)
+    logger.info("key_store: briefing_language set to %s.", lang)
+
+
+def get_briefing_chat_id() -> Optional[str]:
+    """Return the stored briefing chat_id override, or None if not set."""
+    return _load().get(_KEY_BRIEFING_CHAT_ID) or None
+
+
+def set_briefing_chat_id(chat_id: str) -> None:
+    """Persist briefing chat_id override."""
+    data = _load()
+    data[_KEY_BRIEFING_CHAT_ID] = chat_id.strip()
+    _save(data)
+    logger.info("key_store: briefing_chat_id set to %s.", chat_id)
+
+
+def clear_briefing_overrides() -> None:
+    """Remove all briefing overrides so .env values are used again."""
+    data = _load()
+    for key in (
+        _KEY_BRIEFING_ENABLED,
+        _KEY_BRIEFING_TIME,
+        _KEY_BRIEFING_TOPICS,
+        _KEY_BRIEFING_LANGUAGE,
+        _KEY_BRIEFING_CHAT_ID,
+    ):
+        data.pop(key, None)
+    _save(data)
+    logger.info("key_store: all briefing overrides cleared.")

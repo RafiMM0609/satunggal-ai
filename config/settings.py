@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # ── REST API ──────────────────────────────────────────────────────────────
     api_host: str = Field("0.0.0.0", alias="API_HOST")
     api_port: int = Field(8000,      alias="API_PORT")
+    # Optional API key for the REST API.  Set REST_API_KEY in .env to enable.
+    # When non-empty, all protected endpoints require the header:
+    #   X-API-Key: <value>
+    # Leave empty (default) to disable authentication (development / Telegram-only deployments).
+    rest_api_key: str = Field("", alias="REST_API_KEY")
 
     # ── Developer / Sandbox ───────────────────────────────────────────────────
     # Base directory where repos are cloned (absolute path string).
@@ -91,6 +96,36 @@ class Settings(BaseSettings):
     # ── Admin ─────────────────────────────────────────────────────────────────
     # Telegram user_id yang boleh menjalankan /deploy. Kosongkan untuk disable.
     admin_user_id: int = Field(0, alias="ADMIN_USER_ID")
+
+    # ── Proactive Mode – Fase 4 ───────────────────────────────────────────────
+    # Daily Briefing: ResearcherAgent mengirim ringkasan berita/topik secara terjadwal.
+    #
+    # PROACTIVE_BRIEFING_ENABLED   – aktifkan ("true") atau nonaktifkan ("false").
+    # PROACTIVE_BRIEFING_CHAT_ID   – Telegram chat_id tujuan (default ke ADMIN_USER_ID).
+    # PROACTIVE_BRIEFING_TIME      – waktu kirim dalam format "HH:MM" zona WIB (UTC+7).
+    # PROACTIVE_BRIEFING_TOPICS    – topik yang diriset, dipisah koma.
+    #                                Contoh: "AI terbaru, berita teknologi, startup Indonesia"
+    # PROACTIVE_BRIEFING_LANGUAGE  – bahasa laporan: "id" (Indonesia) atau "en" (English).
+    proactive_briefing_enabled:  bool = Field(False,  alias="PROACTIVE_BRIEFING_ENABLED")
+    proactive_briefing_chat_id:  str  = Field("",     alias="PROACTIVE_BRIEFING_CHAT_ID")
+    proactive_briefing_time:     str  = Field("07:00",alias="PROACTIVE_BRIEFING_TIME")
+    proactive_briefing_topics:   str  = Field(
+        "AI terbaru, berita teknologi, startup Indonesia",
+        alias="PROACTIVE_BRIEFING_TOPICS",
+    )
+    proactive_briefing_language: str  = Field("id",   alias="PROACTIVE_BRIEFING_LANGUAGE")
+
+    # Repo Watcher: Memantau repository GitHub/GitLab, auto code-review jika ada commit baru.
+    #
+    # PROACTIVE_REPO_WATCHER_ENABLED   – aktifkan ("true") atau nonaktifkan ("false").
+    # PROACTIVE_REPO_WATCHER_CHAT_ID   – Telegram chat_id tujuan laporan.
+    # PROACTIVE_REPO_WATCHER_REPOS     – daftar URL repo dipisah koma untuk dipantau.
+    #                                    Contoh: "https://github.com/org/repo1,https://..."
+    # PROACTIVE_REPO_WATCHER_INTERVAL  – interval polling dalam menit (default: 60).
+    proactive_repo_watcher_enabled:  bool = Field(False, alias="PROACTIVE_REPO_WATCHER_ENABLED")
+    proactive_repo_watcher_chat_id:  str  = Field("",    alias="PROACTIVE_REPO_WATCHER_CHAT_ID")
+    proactive_repo_watcher_repos:    str  = Field("",    alias="PROACTIVE_REPO_WATCHER_REPOS")
+    proactive_repo_watcher_interval: int  = Field(60,    alias="PROACTIVE_REPO_WATCHER_INTERVAL")
 
     # ── App Metadata ──────────────────────────────────────────────────────────
     app_name: str = Field("AdvanceAI", alias="APP_NAME")

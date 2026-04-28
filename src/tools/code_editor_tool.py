@@ -248,9 +248,8 @@ async def apply_patches_to_disk(
                 bak_path = target.with_suffix(target.suffix + ".bak")
                 try:
                     bak_path.write_bytes(target.read_bytes())
-                except Exception:  # noqa: BLE001
-                    pass
-            target.write_text(patch.content, encoding="utf-8")
+                except Exception as _exc:  # noqa: BLE001
+                    logger.debug("CodeEditorTool: backup creation failed for %s: %s", target, _exc)
             logger.info("CodeEditorTool: wrote patch → %s", target)
         else:
             logger.warning(
@@ -532,8 +531,10 @@ class CodeEditorTool:
                         patches.append(
                             CodePatch(path=item.path, content=item.content, diff=item.diff)
                         )
-                    except ValidationError:
-                        pass
+                    except ValidationError as _ve:
+                        logger.debug(
+                            "_parse_code_patches: Tier 4 skipped item (%s errors)", _ve.error_count()
+                        )
         except Exception as exc:  # noqa: BLE001
             logger.error("_parse_code_patches: Tier 4 LLM retry failed (%s)", exc)
 

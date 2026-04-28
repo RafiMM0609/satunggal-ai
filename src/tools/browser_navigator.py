@@ -196,6 +196,56 @@ class BrowserNavigatorTool(BaseTool):
     """
 
     name = "browser_navigator"
+    description = (
+        "Stateful headless browser that maintains an open Playwright session across multiple calls. "
+        "Supports navigate, click, type, scroll, screenshot, get_content, get_full_content, "
+        "get_links, extract_data, save_session, select_option, check_captcha, and close_popup actions. "
+        "Use web_reader first to obtain page content, then use this tool for interactive steps."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "browser_action": {
+                "type": "string",
+                "enum": [
+                    "navigate", "click", "type", "scroll", "screenshot",
+                    "get_content", "get_full_content", "get_links",
+                    "extract_data", "save_session", "select_option",
+                    "check_captcha", "close_popup",
+                ],
+                "description": "The browser action to perform (set in task.metadata['browser_action']).",
+            },
+            "target_url":        {"type": "string", "description": "URL for 'navigate' action."},
+            "click_text":        {"type": "string", "description": "Visible text of the element to click."},
+            "type_selector":     {"type": "string", "description": "CSS selector of the input field to type into."},
+            "type_label":        {"type": "string", "description": "Label/placeholder text of the input field."},
+            "type_text":         {"type": "string", "description": "Text to type into the field."},
+            "scroll_direction":  {"type": "string", "enum": ["down", "up"], "description": "Direction to scroll."},
+            "session_url":       {"type": "string", "description": "Base URL used as key when saving a session."},
+            "extract_selector":  {"type": "string", "description": "CSS selector for data extraction."},
+            "extract_attribute": {"type": "string", "description": "Attribute to extract ('text' or 'href')."},
+            "extract_limit":     {"type": "integer", "description": "Maximum number of items to extract."},
+            "option_text":       {"type": "string", "description": "Visible text of the option to select."},
+            "option_selector":   {"type": "string", "description": "CSS selector of the <select> element."},
+        },
+        "required": ["browser_action"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "action":         {"type": "string", "description": "Action that was performed."},
+            "success":        {"type": "boolean", "description": "Whether the action succeeded."},
+            "screenshot_b64": {"type": "string", "description": "Base64-encoded PNG screenshot (screenshot action only)."},
+            "session_path":   {"type": "string", "description": "Path to saved session file (save_session only)."},
+            "page_text":      {"type": "string", "description": "Visible page text (get_content / get_full_content)."},
+            "a11y_tree":      {"type": "array",  "description": "Accessibility tree nodes."},
+            "full_page":      {"type": "boolean", "description": "True only for get_full_content."},
+            "scroll_steps":   {"type": "integer", "description": "Scroll iterations used (get_full_content only)."},
+            "items":          {"type": "array",  "description": "Extracted data items (extract_data only)."},
+            "message":        {"type": "string", "description": "Human-readable outcome description."},
+            "error":          {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     def __init__(self) -> None:
         self._playwright:      Any            = None

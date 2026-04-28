@@ -351,7 +351,11 @@ class DocIndex:
         for r in rows:
             try:
                 ops = _json.loads(r["edit_ops_json"])
-            except Exception:
+            except Exception as _exc:
+                logger.warning(
+                    "doc_index: failed to parse edit_ops_json for session=%s order=%s: %s",
+                    session_id, r["edit_order"], _exc,
+                )
                 ops = []
             result.append({
                 "edit_order":  r["edit_order"],

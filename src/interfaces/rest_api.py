@@ -9,9 +9,10 @@ Or mount inside the Telegram webhook Starlette app (see interfaces/webhook.py).
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
+from src.interfaces.auth import require_api_key
 from src.orchestrator.main_loop import clear_session, process_message
 
 app = FastAPI(
@@ -47,7 +48,10 @@ async def health() -> dict:
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+async def chat(
+    req: ChatRequest,
+    _: None = Depends(require_api_key),
+) -> ChatResponse:
     """
     Send a message and receive a reply.
 
@@ -62,7 +66,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
 
 @app.delete("/session/{session_id}", response_model=ClearResponse)
-async def reset_session(session_id: str) -> ClearResponse:
+async def reset_session(
+    session_id: str,
+    _: None = Depends(require_api_key),
+) -> ClearResponse:
     """Clear conversation history for a session."""
     await clear_session(session_id)
     return ClearResponse(session_id=session_id, status="cleared")

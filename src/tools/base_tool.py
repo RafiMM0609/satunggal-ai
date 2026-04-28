@@ -20,6 +20,46 @@ class BaseTool(ABC):
 
     name: str = "base_tool"
 
+    # ── Self-describing schema ────────────────────────────────────────────────
+    # Sub-classes should override these so LLMs can reason about when and how
+    # to call the tool via Tool Calling / Function Calling.
+
+    #: Human-readable explanation of what this tool does.
+    description: str = ""
+
+    #: JSON Schema dict describing the inputs the tool reads from AgentTask.
+    #: Use ``{"type": "object", "properties": {...}, "required": [...]}`` format.
+    input_schema: dict[str, Any] = {}
+
+    #: JSON Schema dict describing the dict this tool returns from ``run()``.
+    output_schema: dict[str, Any] = {}
+
+    # ── Schema helper ─────────────────────────────────────────────────────────
+
+    def get_tool_schema(self) -> dict[str, Any]:
+        """Return the full OpenAI-style function-calling schema for this tool.
+
+        The returned dict is compatible with the ``tools`` parameter accepted
+        by OpenAI chat-completion and OpenRouter endpoints::
+
+            {
+              "type": "function",
+              "function": {
+                "name": "<tool_name>",
+                "description": "<description>",
+                "parameters": { ... input_schema ... }
+              }
+            }
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description or f"Tool: {self.name}",
+                "parameters": self.input_schema or {"type": "object", "properties": {}},
+            },
+        }
+
     @abstractmethod
     async def run(self, task: "AgentTask") -> dict[str, Any]:
         """Execute the tool for *task* and return a result dict.

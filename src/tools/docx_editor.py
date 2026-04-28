@@ -473,6 +473,52 @@ class DocxEditorTool(BaseTool):
     """
 
     name = "docx_editor"
+    description = (
+        "Edit a Word (.docx) file at XML level with precision. Supports: replace_text, "
+        "add_paragraph, delete_paragraph, and replace_paragraph operations. "
+        "Set task.metadata['docx_path'] and task.metadata['docx_edits'] before calling."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "docx_path": {
+                "type": "string",
+                "description": "Absolute path to the .docx file to edit (set in task.metadata['docx_path']).",
+            },
+            "docx_edits": {
+                "type": "array",
+                "description": "List of edit operations (set in task.metadata['docx_edits']).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op":               {"type": "string", "enum": ["replace_text", "add_paragraph", "delete_paragraph", "replace_paragraph"]},
+                        "find":             {"type": "string"},
+                        "replace":          {"type": "string"},
+                        "text":             {"type": "string"},
+                        "new_text":         {"type": "string"},
+                        "paragraph_index":  {"type": "integer"},
+                        "after_paragraph_index": {"type": "integer"},
+                        "style_from_index": {"type": "integer"},
+                    },
+                    "required": ["op"],
+                },
+            },
+            "output_docx_path": {
+                "type": "string",
+                "description": "Optional output path. Defaults to auto-generated path.",
+            },
+        },
+        "required": ["docx_path", "docx_edits"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "edited_docx_path": {"type": "string", "description": "Path to the edited .docx file."},
+            "changes_made":     {"type": "integer", "description": "Number of edits applied."},
+            "details":          {"type": "array", "items": {"type": "string"}, "description": "Per-edit log messages."},
+            "error":            {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     async def run(self, task: "AgentTask") -> dict[str, Any]:
         docx_path: str | None = task.metadata.get("docx_path")

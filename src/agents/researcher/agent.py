@@ -140,6 +140,21 @@ class ResearcherAgent(BaseAgent):
 
     name = "researcher"
 
+    # ── Persona ───────────────────────────────────────────────────────────────
+    role = "Web Research Specialist & Technical Analyst"
+    goal = (
+        "Deliver accurate, up-to-date, and comprehensive research reports by "
+        "decomposing complex questions into focused sub-queries, gathering "
+        "multi-source web evidence, and synthesising it into structured answers."
+    )
+    backstory = (
+        "You are a meticulous research analyst who never stops at the first result. "
+        "You decompose every question into 3–4 orthogonal search angles, verify "
+        "facts across multiple sources, and always cite your references. "
+        "When consulted by other agents, you provide concise, actionable summaries "
+        "focused on what the calling agent needs to know."
+    )
+
     _MAX_SUB_QUERIES      = 4    # hard cap on parallel Tavily calls per request
     _DECOMPOSE_MAX_TOKENS = 8192  # reasoning models need budget before producing answers
     _PLAN_MAX_TOKENS      = 512  # budget for building the research outline
@@ -250,6 +265,66 @@ class ResearcherAgent(BaseAgent):
         except Exception as exc:
             logger.warning("Multi-point Tavily search failed (non-fatal): %s", exc)
             return None
+
+    async def research_for_delegation(
+        self,
+        query: str,
+        session_id: str = "delegation",
+    ) -> str:
+        """Lightweight research entry-point for inter-agent delegation.
+
+        Called by other agents (e.g. DeveloperAgent) that need a quick,
+        focused research result without going through the full task pipeline.
+
+        Args:
+            query:      The specific question or topic to research.
+            session_id: Caller's session ID (used for logging; no history stored).
+
+        Returns:
+            A concise, plain-text research summary the calling agent can inject
+            into its own prompt.  Returns a short error message on failure so
+            the caller can continue gracefully.
+        """
+        logger.info(
+            "ResearcherAgent.research_for_delegation: query=%r session=%s",
+            query[:120], session_id,
+        )
+        try:
+            sub_queries = await self._decompose_query(query)
+            web_context = await self._search_sub_queries(sub_queries)
+
+            system = (
+                _SYSTEM_PROMPT_WITH_SEARCH + "\n\n" + web_context
+                if web_context
+                else _SYSTEM_PROMPT
+            )
+            # Persona block to keep the LLM in researcher mode
+            persona = self.get_persona_prompt()
+            if persona:
+                system = persona + "\n\n" + system
+
+            messages = [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": (
+                        "Berikan ringkasan singkat dan actionable untuk pertanyaan berikut "
+                        "(fokus pada informasi yang dibutuhkan oleh agen lain, bukan jawaban panjang):\n\n"
+                        + query
+                    ),
+                },
+            ]
+            summary = await self._llm.chat(messages, max_tokens=1024)
+            logger.info(
+                "ResearcherAgent.research_for_delegation: done (%d chars) session=%s",
+                len(summary), session_id,
+            )
+            return summary.strip()
+        except Exception as exc:
+            logger.warning(
+                "ResearcherAgent.research_for_delegation failed: %s session=%s", exc, session_id
+            )
+            return f"[Research unavailable: {exc}]"
 
     async def run(self, task: AgentTask) -> AgentTask:
         try:
