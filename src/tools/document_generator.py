@@ -120,6 +120,34 @@ class DocumentGeneratorTool(BaseTool):
     """Compile Markdown + gambar menjadi PDF atau Word (.docx)."""
 
     name = "document_generator"
+    description = (
+        "Compile a Markdown document (stored in task.metadata['document_markdown']) "
+        "into a PDF or Word (.docx) file. Format is determined by task.metadata['output_format'] "
+        "(default: 'pdf'). Called by the orchestrator after DiagramRendererTool."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "document_markdown": {
+                "type": "string",
+                "description": "Full Markdown content to compile (set in task.metadata['document_markdown']).",
+            },
+            "output_format": {
+                "type": "string",
+                "enum": ["pdf", "docx"],
+                "description": "Output file format. Defaults to 'pdf'.",
+            },
+        },
+        "required": ["document_markdown"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "document_path": {"type": "string", "description": "Absolute path to the generated document file."},
+            "format":        {"type": "string", "description": "Actual output format used ('pdf' or 'docx')."},
+            "error":         {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     async def run(self, task: "AgentTask") -> dict[str, Any]:
         markdown: str = task.metadata.get("document_markdown", "")

@@ -77,6 +77,49 @@ class WebReaderTool(BaseTool):
     """
 
     name = "web_reader"
+    description = (
+        "Open a URL in a headless Chromium browser and extract visible page text, "
+        "the accessibility tree (interactive elements), and page title. "
+        "Use this before interacting with a page via browser_navigator."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "target_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "The URL to fetch (set in task.metadata['target_url']).",
+            },
+            "session_path": {
+                "type": "string",
+                "description": (
+                    "Optional path to a Playwright storage-state JSON file for "
+                    "authenticated browsing (set in task.metadata['session_path'])."
+                ),
+            },
+        },
+        "required": ["target_url"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "title":     {"type": "string", "description": "Page <title>."},
+            "url":       {"type": "string", "description": "Final URL after redirects."},
+            "page_text": {"type": "string", "description": "Visible page text (truncated at 8 000 chars)."},
+            "a11y_tree": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                },
+                "description": "Accessibility-tree snapshot of interactive elements.",
+            },
+            "error": {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     async def run(self, task: "AgentTask") -> dict[str, Any]:
         """Fetch a URL and return structured page content.

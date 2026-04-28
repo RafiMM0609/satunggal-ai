@@ -169,13 +169,14 @@ def _get_pipeline():
         logger.warning("TAVILY_API_KEY not configured – tavily_search tool disabled.")
 
     # ── Agent registry ─────────────────────────────────────────────────────
+    _researcher_agent = ResearcherAgent(_history, _llm)
     _agents = {
         "responder":         ResponderAgent(_history, _llm),
-        "researcher":        ResearcherAgent(_history, _llm),
+        "researcher":        _researcher_agent,
         "content_creator":   ContentCreatorAgent(_history, _llm),
         "wbs_agent":         WBSAgent(_llm),
         "mandays_agent":     MandaysAgent(_llm),
-        "developer":            DeveloperAgent(_llm),
+        "developer":            DeveloperAgent(_llm, researcher=_researcher_agent),
         "developer_inspector": DeveloperInspectorAgent(llm=_llm, history=_history),
         "developer_qna":        DeveloperQnAAgent(llm=_llm, history=_history),
         "code_fix":             CodeFixAgent(llm=_llm),

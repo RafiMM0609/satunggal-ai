@@ -283,6 +283,45 @@ class DocxParserTool(BaseTool):
     """
 
     name = "docx_parser"
+    description = (
+        "Parse a Word (.docx) file into structured sections based on Heading styles. "
+        "Returns the document title, a list of section dicts (index, title, level, content), "
+        "total section/word counts, and the detection method used ('formal' or 'heuristic'). "
+        "Set task.metadata['docx_path'] to the absolute file path before calling."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "docx_path": {
+                "type": "string",
+                "description": "Absolute path to the .docx file to parse (set in task.metadata['docx_path']).",
+            },
+        },
+        "required": ["docx_path"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "doc_title":        {"type": "string"},
+            "sections": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index":        {"type": "integer"},
+                        "title":        {"type": "string"},
+                        "level":        {"type": "integer"},
+                        "content":      {"type": "string"},
+                        "is_heuristic": {"type": "boolean"},
+                    },
+                },
+            },
+            "total_sections":   {"type": "integer"},
+            "total_words":      {"type": "integer"},
+            "detection_method": {"type": "string", "enum": ["formal", "heuristic"]},
+            "error":            {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     async def run(self, task: AgentTask) -> dict[str, Any]:
         docx_path: str | None = task.metadata.get("docx_path")

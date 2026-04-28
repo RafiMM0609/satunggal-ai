@@ -33,6 +33,29 @@ class WBSGeneratorTool(BaseTool):
     """Converts a WBS JSON dict (already in task.metadata) into an Excel file."""
 
     name = "wbs_generator"
+    description = (
+        "Generate a Work Breakdown Structure (WBS) Excel spreadsheet from a structured "
+        "JSON definition stored in task.metadata['wbs_json_data']. "
+        "Called by the orchestrator after WBSAgent has produced the WBS JSON."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "wbs_json_data": {
+                "type": "object",
+                "description": "Structured WBS definition (set in task.metadata['wbs_json_data'] by WBSAgent).",
+            },
+        },
+        "required": ["wbs_json_data"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "excel_path":   {"type": "string", "description": "Absolute path to the generated Excel file."},
+            "project_name": {"type": "string", "description": "Name of the project extracted from the WBS data."},
+            "error":        {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     async def run(self, task: "AgentTask") -> dict[str, Any]:
         """
