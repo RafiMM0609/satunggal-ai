@@ -130,6 +130,7 @@ def _get_pipeline():
     from src.agents.wbs_agent.agent import WBSAgent
     from src.agents.web_automation.agent import WebAutomationAgent
     from src.memory.history import ConversationHistory
+    from src.memory.persistent_history import PersistentConversationHistory
     from src.memory.user_mode_store import get_user_mode_store
     from src.orchestrator.router import AgentRouter
     from src.tools.browser_navigator import BrowserNavigatorTool
@@ -143,7 +144,9 @@ def _get_pipeline():
     from src.tools.web_reader import WebReaderTool
     from src.tools.wbs_generator import WBSGeneratorTool
 
-    _history    = ConversationHistory(max_messages=30)
+    # Phase 3: Use SQLite-backed persistent history so conversations survive restarts.
+    # PersistentConversationHistory is a drop-in replacement with identical public API.
+    _history    = PersistentConversationHistory(max_messages=30)
     _llm        = LLMClient()
     _mode_store = get_user_mode_store()
 
