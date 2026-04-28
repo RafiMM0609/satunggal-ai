@@ -52,6 +52,7 @@ from src.tools.git_utils import (
 from src.tools.sandbox_runner import SandboxResult, SandboxRunner
 
 if TYPE_CHECKING:
+    from src.agents.developer_inspector.agent import DeveloperInspectorAgent
     from src.agents.researcher.agent import ResearcherAgent
 
 logger = logging.getLogger(__name__)
@@ -173,7 +174,7 @@ class DeveloperAgent(BaseAgent):
     )
 
     # ── Delegation registry ───────────────────────────────────────────────────
-    delegates_to = ["researcher"]
+    delegates_to = ["researcher", "developer_inspector"]
 
     # ── Library error detection patterns ─────────────────────────────────────
     # When sandbox output contains these, DeveloperAgent will ask ResearcherAgent
@@ -195,6 +196,7 @@ class DeveloperAgent(BaseAgent):
         llm:        LLMClient | None = None,
         repos_dir:  Path | str | None = None,
         researcher: "ResearcherAgent | None" = None,
+        inspector:  "DeveloperInspectorAgent | None" = None,
     ) -> None:
         from config.settings import get_settings
         _settings          = get_settings()
@@ -216,6 +218,10 @@ class DeveloperAgent(BaseAgent):
         self._tracker      = RepoTracker()
         # ResearcherAgent for library/API delegation (injected or lazy-created)
         self._researcher   = researcher
+        # DeveloperInspectorAgent for post-change code review (Phase 3 collaboration).
+        # When set, the inspector is automatically called after a successful sandbox run
+        # to review the git diff before the report is returned to the user.
+        self._inspector    = inspector
         # Detect which AI CLI can actually edit files non-interactively.
         # gh copilot suggest is excluded – it cannot write files.
         self._ai_cli = _detect_available_cli()
@@ -390,6 +396,30 @@ class DeveloperAgent(BaseAgent):
             diff   = await git_mgr.get_diff()
             report = self._build_report(dev_task, sandbox_result, diff, commit_hash, push_result)
             report = f"🌿 **Branch:** `{branch}`\n\n" + report
+
+            # ── Phase 3: Inspector Code Review ────────────────────────────────
+            # When a DeveloperInspectorAgent is available, ask it to review the
+            # git diff of the changes just committed.  Failures are non-fatal
+            # (the agent already reported success; the review is advisory only).
+            if self._inspector is not None and sandbox_result.succeeded and diff:
+                try:
+                    review = await self._inspector.inspect_diff(
+                        diff_text=diff,
+                        task_description=dev_task,
+                        session_id=task.session_id,
+                    )
+                    if review:
+                        report += f"\n\n---\n\n## 🕵️ Code Review oleh DeveloperInspector\n\n{review}"
+                        logger.info(
+                            "DeveloperAgent: inspector review appended (%d chars). session=%s",
+                            len(review), task.session_id,
+                        )
+                except Exception as _review_exc:
+                    logger.warning(
+                        "DeveloperAgent: inspector review failed (non-fatal): %s session=%s",
+                        _review_exc, task.session_id,
+                    )
+
             task.mark_done(report)
 
         except Exception as exc:
