@@ -80,7 +80,6 @@ def _detect_vibe(text: str) -> str:
     Returns one of:
         "genz_panic" – slang with panic/urgency markers
         "genz"       – clear Gen Z / slang vocabulary
-        "office"     – mode handled separately by caller
         "formal"     – default professional style
     """
     has_genz = bool(
@@ -121,23 +120,18 @@ class ResponderAgent(BaseAgent):
         try:
             history_messages = self._history.get_as_llm_messages(task.session_id)
 
-            # Pick system prompt: office mode always uses office prompt;
-            # other modes use dynamic vibe detection for language mirroring.
-            if task.current_mode == "office":
-                system_prompt = _SYSTEM_PROMPT_OFFICE
-                vibe = "office"
+            # Pick system prompt via dynamic vibe detection for language mirroring.
+            vibe = _detect_vibe(task.user_input)
+            if vibe == "genz_panic":
+                system_prompt = _SYSTEM_PROMPT_GENZ_PANIC
+            elif vibe == "genz":
+                system_prompt = _SYSTEM_PROMPT_GENZ
             else:
-                vibe = _detect_vibe(task.user_input)
-                if vibe == "genz_panic":
-                    system_prompt = _SYSTEM_PROMPT_GENZ_PANIC
-                elif vibe == "genz":
-                    system_prompt = _SYSTEM_PROMPT_GENZ
-                else:
-                    system_prompt = _SYSTEM_PROMPT_FORMAL
+                system_prompt = _SYSTEM_PROMPT_FORMAL
 
             logger.debug(
-                "ResponderAgent vibe=%s mode=%s session=%s",
-                vibe, task.current_mode, task.session_id,
+                "ResponderAgent vibe=%s session=%s",
+                vibe, task.session_id,
             )
 
             # ── Build message list ─────────────────────────────────────────

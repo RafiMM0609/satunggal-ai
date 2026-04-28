@@ -33,15 +33,13 @@ logger = logging.getLogger(__name__)
 # Structure:
 #   _PREAMBLE            – system role + "Classify into EXACTLY ONE of:" header
 #   _INTENT_DESCRIPTIONS – per-intent description lines (ordered dict)
-#   _RESPONDER_INTENTS   – intents always present regardless of mode (fallback to responder)
 #   _PRE_AGENT_TOOLS     – tools section (unchanged)
 #   _SCHEMA_RULES        – rules 1–4a (always included)
 #   _INTENT_RULES        – list of (rule_text, applicable_intents | None)
 #                          None = always include; frozenset = include when any intent overlaps
-#   _EXAMPLES            – example JSON responses (filtered per mode)
+#   _EXAMPLES            – example JSON responses
 #
-# _build_system_prompt(allowed_intents) assembles the final prompt.
-# When allowed_intents is None (mode="all") it returns the full prompt.
+# _build_system_prompt() assembles the final prompt with all intents included.
 
 _PREAMBLE = """\
 You are an intent classifier for a customer service AI routing system.
@@ -93,13 +91,6 @@ _INTENT_DESCRIPTIONS: dict[str, str] = {
     "reminder":               "- reminder           (user wants to set a timed reminder/alarm, list their reminders, or cancel/delete a reminder)",
     "unknown":                "- unknown",
 }
-
-# These intents route to the "responder" agent and are always included in every
-# mode so the bot can still handle greetings / clarifications.
-_RESPONDER_INTENTS: frozenset[str] = frozenset({
-    "general_inquiry", "product_question", "complaint", "order_status",
-    "billing", "unknown", "technical_support", "image_query",
-})
 
 _PRE_AGENT_TOOLS = """\
 
@@ -415,43 +406,20 @@ _EXAMPLES: dict[str, str] = {
 }
 
 
-def _build_system_prompt(allowed_intents: "list[str] | None" = None) -> str:
-    """Assemble a mode-aware gatekeeper system prompt.
+def _build_system_prompt() -> str:
+    """Assemble the gatekeeper system prompt with all intents.
 
-    When *allowed_intents* is ``None`` (mode ``"all"``), the full prompt is
-    returned.  For any other mode, only the intent descriptions and rules that
-    are relevant to the allowed agent set are included, shrinking the LLM's
-    option space and reducing intent misclassification.
-
-    Responder-backed fallback intents (general_inquiry, unknown, etc.) are
-    always included regardless of mode so the bot can handle greetings and
-    clarifications in every mode.
+    Returns the full prompt including all intent descriptions, rules, and examples.
+    The LLM gatekeeper always has access to the complete set of intents so it
+    can route to the correct specialist agent without manual mode restrictions.
     """
-    if allowed_intents is None:
-        active_intents = set(_INTENT_DESCRIPTIONS.keys())
-    else:
-        # Ensure responder fallback intents are always present.
-        active_intents = set(allowed_intents) | _RESPONDER_INTENTS
+    intent_lines = list(_INTENT_DESCRIPTIONS.values())
 
-    # 1. Intent list – preserve original ordering via dict insertion order.
-    intent_lines = [
-        desc
-        for intent, desc in _INTENT_DESCRIPTIONS.items()
-        if intent in active_intents
-    ]
-
-    # 2. Rules – include only rules relevant to at least one active intent.
     rule_parts: list[str] = []
-    for rule_text, applicable in _INTENT_RULES:
-        if applicable is None or (applicable & active_intents):
-            rule_parts.append(rule_text)
+    for rule_text, _applicable in _INTENT_RULES:
+        rule_parts.append(rule_text)
 
-    # 3. Examples – include only those for active intents.
-    example_lines = [
-        line
-        for intent, line in _EXAMPLES.items()
-        if intent in active_intents
-    ]
+    example_lines = list(_EXAMPLES.values())
 
     return (
         _PREAMBLE
@@ -488,17 +456,13 @@ class GatekeeperLLMClient:
         self,
         user_text: str,
         history: "list[dict] | None" = None,
-        allowed_intents: "list[str] | None" = None,
     ) -> LLMIntentResponse:
         # Inject current date/time (WIB, UTC+7) so the LLM is never anchored to
         # its training-data cutoff when answering time-sensitive questions.
         wib = timezone(timedelta(hours=7))
         now_str = datetime.now(tz=wib).strftime("%A, %d %B %Y %H:%M WIB")
 
-        # Build a mode-scoped prompt: only the intent descriptions and rules
-        # relevant to the active mode are sent, reducing the LLM option space
-        # and minimising intent misclassification.
-        system_content_base = _build_system_prompt(allowed_intents) + f"\n\nWaktu saat ini: {now_str}"
+        system_content_base = _build_system_prompt() + f"\n\nWaktu saat ini: {now_str}"
 
         # Inject recent conversation history into system prompt so the LLM can
         # correctly classify follow-up commands (e.g. "berikan screenshot" after
