@@ -361,6 +361,42 @@ class WebQuizBuilderTool(BaseTool):
     """
 
     name = "web_quiz_builder"
+    description = (
+        "Convert a list of quiz questions (stored in task.metadata['quiz_questions']) "
+        "into a standalone interactive HTML quiz file. "
+        "Called by the orchestrator after QuizAgent has generated and validated all questions."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "quiz_questions": {
+                "type": "array",
+                "description": "List of validated question objects from QuizAgent (set in task.metadata['quiz_questions']).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "options":  {"type": "array", "items": {"type": "string"}},
+                        "answer":   {"type": "string"},
+                        "explanation": {"type": "string"},
+                    },
+                    "required": ["question", "options", "answer"],
+                },
+            },
+            "quiz_title": {
+                "type": "string",
+                "description": "Optional title for the quiz (set in task.metadata['quiz_title']).",
+            },
+        },
+        "required": ["quiz_questions"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "html_path": {"type": "string", "description": "Absolute path to the generated .html quiz file."},
+            "error":     {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     async def run(self, task: "AgentTask") -> dict[str, Any]:
         questions: list[dict] = task.metadata.get("quiz_questions", [])

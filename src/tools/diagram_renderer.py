@@ -49,6 +49,34 @@ class DiagramRendererTool(BaseTool):
     """Render blok Mermaid di dalam Markdown menjadi gambar PNG."""
 
     name = "diagram_renderer"
+    description = (
+        "Extract Mermaid diagram blocks from a Markdown document and render each one "
+        "as a PNG image using mermaid-cli (mmdc). Replaces the raw Mermaid blocks in "
+        "task.metadata['document_markdown'] with Markdown image references. "
+        "Called by the orchestrator after TechnicalWriterAgent finishes."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "document_markdown": {
+                "type": "string",
+                "description": "Full Markdown text containing Mermaid code blocks (set in task.metadata['document_markdown']).",
+            },
+        },
+        "required": ["document_markdown"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "diagram_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Paths to the rendered PNG files.",
+            },
+            "diagram_count": {"type": "integer", "description": "Number of diagrams rendered."},
+            "error":         {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     async def run(self, task: "AgentTask") -> dict[str, Any]:
         markdown: str = task.metadata.get("document_markdown", "")

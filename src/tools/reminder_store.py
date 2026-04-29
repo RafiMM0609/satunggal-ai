@@ -157,3 +157,29 @@ def get_reminder_store() -> ReminderStore:
     if _store is None:
         _store = ReminderStore()
     return _store
+
+
+# ── Pending suggestion store (in-memory, keyed by session_id) ─────────────────
+
+import threading as _threading
+
+_pending_suggestions: dict[str, dict] = {}
+_pending_lock = _threading.Lock()
+
+
+def set_pending_suggestion(session_id: str, suggestion: dict) -> None:
+    """Store a pending reminder suggestion awaiting user confirmation."""
+    with _pending_lock:
+        _pending_suggestions[session_id] = suggestion
+
+
+def get_pending_suggestion(session_id: str) -> dict | None:
+    """Retrieve a pending reminder suggestion for a session, or None."""
+    with _pending_lock:
+        return _pending_suggestions.get(session_id)
+
+
+def clear_pending_suggestion(session_id: str) -> None:
+    """Remove a pending reminder suggestion for a session."""
+    with _pending_lock:
+        _pending_suggestions.pop(session_id, None)

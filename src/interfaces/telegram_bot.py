@@ -9,7 +9,6 @@ from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     filters,
     MessageHandler,
@@ -18,14 +17,13 @@ from telegram.ext import (
 from .config import Config
 from config.settings import get_settings
 from src.handlers import (
+    briefing_command,
     deploy,
     echo_text,
     handle_docx_document,
     handle_pdf_document,
     handle_photo,
     help_command,
-    mode_callback,
-    mode_command,
     ping,
     reset,
     setapikey,
@@ -38,7 +36,6 @@ from src.handlers import (
     setollamakey,
     setprovider,
     start,
-    status_command,
     unknown_message,
 )
 
@@ -110,6 +107,15 @@ async def _send_startup_notification(app: Application) -> None:
     start_scheduler()
     await reschedule_pending_on_startup()
 
+    # ── Fase 4: Proactive jobs ──────────────────────────────────────────────
+    # Daily Briefing: ResearcherAgent mengirim ringkasan berita terjadwal.
+    from src.proactive.daily_briefing import start_briefing_job
+    start_briefing_job(app.bot)
+
+    # Repo Watcher: Pantau commit baru di repo dan kirim laporan auto.
+    from src.proactive.repo_watcher import start_repo_watcher_job
+    start_repo_watcher_job(app.bot)
+
     settings = get_settings()
     if not settings.admin_user_id:
         logger.info("ADMIN_USER_ID tidak dikonfigurasi, startup notification dilewati.")
@@ -133,6 +139,10 @@ async def _send_startup_notification(app: Application) -> None:
 async def _shutdown_scheduler(app: Application) -> None:
     """Stop APScheduler when the bot shuts down."""
     from src.agents.reminder_agent.scheduler import stop_scheduler
+    from src.proactive.daily_briefing import stop_briefing_job
+    from src.proactive.repo_watcher import stop_repo_watcher_jobs
+    stop_briefing_job()
+    stop_repo_watcher_jobs()
     stop_scheduler()
 
 
@@ -162,8 +172,6 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("ping",      ping))
     app.add_handler(CommandHandler("reset",     reset))
     app.add_handler(CommandHandler("deploy",    deploy))
-    app.add_handler(CommandHandler("mode",      mode_command))
-    app.add_handler(CommandHandler("status",    status_command))
     app.add_handler(CommandHandler("setapikey",    setapikey))
     app.add_handler(CommandHandler("setmaxtokens", setmaxtokens))
     app.add_handler(CommandHandler("setllmmodel",  setllmmodel))
@@ -173,9 +181,9 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("setollamamodel", setollamamodel))
     app.add_handler(CommandHandler("setgithubtoken", setgithubtoken))
     app.add_handler(CommandHandler("setgitlabtoken", setgitlabtoken))
+    app.add_handler(CommandHandler("briefing",       briefing_command))
 
     # ── Callback query handlers (InlineKeyboard) ───────────────────────────
-    app.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^set_mode:"))
 
     # ── Message handlers ───────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))

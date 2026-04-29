@@ -74,6 +74,53 @@ class TavilySearchTool(BaseTool):
     """
 
     name = "tavily_search"
+    description = (
+        "Search the web for up-to-date information using the Tavily search engine. "
+        "Returns ranked results with titles, URLs, and content snippets. "
+        "Use this tool when you need recent news, documentation, or factual data not in your training data."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query string (plain-language question or keywords).",
+            },
+            "search_depth": {
+                "type": "string",
+                "enum": ["basic", "advanced"],
+                "description": "Search depth. 'advanced' uses more credits but returns richer context.",
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "description": "Maximum number of search results to return.",
+            },
+        },
+        "required": ["query"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "query":   {"type": "string", "description": "The original search query."},
+            "answer":  {"type": "string", "description": "AI-generated answer from Tavily (may be null)."},
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title":   {"type": "string"},
+                        "url":     {"type": "string", "format": "uri"},
+                        "content": {"type": "string"},
+                        "score":   {"type": "number"},
+                    },
+                },
+                "description": "Ranked list of web search results.",
+            },
+            "error": {"type": "string", "description": "Present only on failure."},
+        },
+    }
 
     def __init__(self) -> None:
         settings = get_settings()

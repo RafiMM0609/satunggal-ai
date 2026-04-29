@@ -249,6 +249,7 @@ Bot secara otomatis mendeteksi maksud pesan pengguna dan meneruskannya ke agent 
 | `SANDBOX_REPOS_DIR` | Direktori clone repo (default: `~/sandbox_repos`) |
 | `PORT` | Port webhook (default: `8443`) |
 | `API_PORT` | Port REST API (default: `8000`) |
+| `REST_API_KEY` | API key untuk REST API (`X-API-Key` header). Kosongkan untuk nonaktifkan autentikasi. |
 
 ---
 
@@ -274,8 +275,8 @@ Bot secara otomatis mendeteksi maksud pesan pengguna dan meneruskannya ke agent 
 
 ### Prioritas Tinggi
 
-- [ ] **Persistensi Memori** — simpan riwayat percakapan ke database agar tidak hilang saat bot restart.
-- [ ] **Autentikasi REST API** — tambahkan API key atau JWT untuk mengamankan endpoint REST API.
+- [x] **Persistensi Memori** — simpan riwayat percakapan ke database agar tidak hilang saat bot restart.
+- [x] **Autentikasi REST API** — tambahkan API key atau JWT untuk mengamankan endpoint REST API.
 - [ ] **Confidence Threshold** — tolak atau minta klarifikasi jika confidence intent terlalu rendah (< 0.5).
 - [ ] **Error Recovery** — jika LLM menghasilkan JSON tidak valid, lakukan retry otomatis dengan prompt koreksi.
 - [ ] **Unit & Integration Tests** — tambahkan test suite untuk semua agent dan tools.

@@ -272,8 +272,8 @@ class RepoAgentBase(BaseAgent):
                 try:
                     text = fpath.read_text(errors="replace")[:MAX_FILE_BYTES]
                     snippets.append(f"### {name}\n```\n{text}\n```")
-                except OSError:
-                    pass
+                except OSError as _exc:
+                    logger.debug("repo_agent_base: could not read %s: %s", fpath, _exc)
         return "\n\n".join(snippets) if snippets else "(no key files found)"
 
     async def _find_error_logs(self, repo_path: Path) -> str:

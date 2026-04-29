@@ -142,7 +142,15 @@ pengguna menjadi serangkaian langkah browsing yang terurut dan dapat dieksekusi.
 Setiap langkah HARUS berupa JSON object dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll", \
 "screenshot", "get_content", "get_full_content", "get_links", "extract_data", \
-"save_session", "select_option", "check_captcha", "close_popup", "done"]
+"save_session", "select_option", "check_captcha", "close_popup",
+"open_tab", "switch_tab", "close_tab",
+"wait_for_element", "wait_for_navigation",
+"fill_form", "hover", "drag_drop", "press_key", "upload_file",
+"scrape_table", "assert_text",
+"load_session", "clear_session",
+"explore_parallel", "compare_screenshot", "solve_captcha",
+"schedule_task", "list_scheduled_tasks", "cancel_scheduled_task",
+"done"]
   "params": object parameter yang sesuai dengan action:
     - read_url:          {"url": "..."}
     - navigate:          {"url": "..."}
@@ -170,6 +178,27 @@ Setiap langkah HARUS berupa JSON object dengan field berikut:
     - close_popup:       {}
                          (tutup pop-up, modal, overlay, atau banner iklan yang menghalangi form;
                           gunakan sebelum mencoba klik/isi form jika ada overlay yang menghalangi)
+    - open_tab:          {"url": "..."}  (buka tab baru, opsional navigate)
+    - switch_tab:        {"tab_id": "tab_1"}
+    - close_tab:         {"tab_id": "tab_1"}
+    - wait_for_element:  {"text": "...", "selector": "...", "timeout_ms": 10000}
+    - wait_for_navigation: {"url_pattern": "...", "timeout_ms": 15000}
+    - fill_form:         {"fields": [{"label": "...", "selector": "...", "text": "..."}, ...]}
+                         (isi banyak field form sekaligus – lebih efisien dari type berulang)
+    - hover:             {"text": "...", "selector": "..."}
+    - drag_drop:         {"drag_selector": "...", "drop_selector": "..."}
+    - press_key:         {"key": "Enter"|"Escape"|"Tab"|"ArrowDown"|"Control+a"|...}
+    - upload_file:       {"filepath": "/abs/path", "selector": "...", "label": "..."}
+    - scrape_table:      {"selector": "table", "limit": 100}
+    - assert_text:       {"text": "...", "should_exist": true|false}
+    - load_session:      {"url": "https://example.com"}
+    - clear_session:     {"url": "https://example.com"}
+    - explore_parallel:  {"urls": ["url1", "url2"], "query": "topik yang dicari"}
+    - compare_screenshot: {"url": "key_str", "threshold": 0.02}
+    - solve_captcha:     {}
+    - schedule_task:     {"label": "nama", "user_input": "...", "interval_s": 3600}
+    - list_scheduled_tasks: {}
+    - cancel_scheduled_task: {"task_id": 1}
     - done:              {"summary": "ringkasan hasil untuk pengguna"}
 
 Kapan menggunakan "get_content" vs "get_full_content":
@@ -344,7 +373,15 @@ Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
   "action": satu dari ["read_url", "navigate", "click", "type", "scroll",
             "screenshot", "get_content", "get_full_content", "get_links",
             "extract_data", "save_session", "select_option",
-            "check_captcha", "close_popup", "done"]
+            "check_captcha", "close_popup",
+            "open_tab", "switch_tab", "close_tab",
+            "wait_for_element", "wait_for_navigation",
+            "fill_form", "hover", "drag_drop", "press_key", "upload_file",
+            "scrape_table", "assert_text",
+            "load_session", "clear_session",
+            "explore_parallel", "compare_screenshot", "solve_captcha",
+            "schedule_task", "list_scheduled_tasks", "cancel_scheduled_task",
+            "done"]
   "params": parameter yang sesuai dengan action:
     - read_url:          {"url": "..."}
     - navigate:          {"url": "..."}
@@ -358,15 +395,33 @@ Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
     - extract_data:      {"selector": "...", "attribute": "text"|"href", "limit": 50}
     - save_session:      {"url": "..."}
     - select_option:     {"text": "...", "selector": "..."}
-                         (text = teks opsi yang ingin dipilih, contoh: "Kopi & Teh";
-                          selector = CSS selector elemen <select> opsional;
-                          GUNAKAN untuk memilih kategori, radio button, toggle button kustom)
     - check_captcha:     {}
-                         (periksa apakah halaman menampilkan CAPTCHA;
-                          hasil berisi "captcha_detected": true/false)
     - close_popup:       {}
-                         (tutup pop-up, modal, overlay, atau banner yang menghalangi;
-                          gunakan sebagai RE-PLAN ketika klik/type gagal karena ada overlay)
+    - open_tab:          {"url": "..."}  (url opsional, langsung navigate jika diberikan)
+    - switch_tab:        {"tab_id": "tab_1"}
+    - close_tab:         {"tab_id": "tab_1"}  (tab_id opsional, tutup tab aktif jika kosong)
+    - wait_for_element:  {"text": "...", "selector": "...", "timeout_ms": 10000}
+    - wait_for_navigation: {"url_pattern": "...", "timeout_ms": 15000}
+    - fill_form:         {"fields": [{"label": "...", "selector": "...", "text": "..."}, ...]}
+                         (isi beberapa field form sekaligus dalam satu langkah)
+    - hover:             {"text": "...", "selector": "..."}
+    - drag_drop:         {"drag_selector": "...", "drop_selector": "..."}
+    - press_key:         {"key": "Enter"|"Escape"|"Tab"|"ArrowDown"|"Control+a"|...}
+    - upload_file:       {"filepath": "/path/to/file", "selector": "...", "label": "..."}
+    - scrape_table:      {"selector": "table", "limit": 100}
+    - assert_text:       {"text": "...", "should_exist": true|false}
+    - load_session:      {"url": "https://example.com"}
+    - clear_session:     {"url": "https://example.com"}
+    - explore_parallel:  {"urls": ["url1", "url2", ...], "query": "topik yang dicari"}
+                         (buka hingga 5 URL sekaligus di tab berbeda dan bandingkan isi)
+    - compare_screenshot: {"url": "key_str", "threshold": 0.02}
+                          (simpan screenshot baseline atau bandingkan dengan sebelumnya)
+    - solve_captcha:     {}
+                          (coba selesaikan CAPTCHA otomatis; fallback ke manual jika gagal)
+    - schedule_task:     {"label": "nama_task", "user_input": "...", "interval_s": 3600}
+                          (jadwalkan task web automation berulang setiap interval_s detik)
+    - list_scheduled_tasks: {}
+    - cancel_scheduled_task: {"task_id": 1}  (atau {"label": "nama_task"})
     - done:              {"summary": "ringkasan lengkap hasil untuk pengguna"}
   "reasoning": penjelasan singkat mengapa langkah ini dipilih (1-2 kalimat)
 
@@ -395,6 +450,25 @@ Strategi Locator Efisien (Hemat Token – WAJIB DIIKUTI):
     ({role, name}) dari Accessibility Tree. Gunakan "name" sebagai "text" pada "click"
     atau "label" pada "type" untuk langkah berikutnya. JANGAN baca page_text hanya untuk
     mencari nama tombol; gunakan "locators" yang jauh lebih ringkas.
+
+Panduan aksi baru:
+  • "fill_form" – gunakan untuk mengisi banyak field form sekaligus alih-alih memanggil
+    "type" berulang-ulang. Lebih efisien untuk form panjang (registrasi, checkout, dll.).
+  • "hover"     – gunakan sebelum "click" ketika menu/dropdown hanya muncul saat di-hover.
+  • "press_key" – gunakan "Enter" untuk submit form, "Escape" untuk tutup modal, "Tab"
+    untuk pindah antar field.
+  • "wait_for_element" – gunakan setelah navigasi ke SPA agar menunggu elemen muncul
+    sebelum berinteraksi, menghindari klik terlalu dini.
+  • "assert_text" – gunakan setelah login atau submit untuk memverifikasi keberhasilan.
+    Jika hasil "success": false, langkah berikutnya harus RE-PLAN (bukan langsung "done").
+  • "explore_parallel" – gunakan ketika ada banyak link kandidat dan ingin memilih yang
+    paling relevan tanpa membuka satu per satu secara sekuensial.
+  • "compare_screenshot" – gunakan untuk monitoring visual; jika "changed": true, laporkan
+    perubahan kepada pengguna.
+  • "solve_captcha" – coba dulu sebelum minta bantuan manual. Jika "solved": false dan
+    "fallback_manual": true, output "done" dengan pesan minta bantuan.
+  • "schedule_task" – gunakan ketika pengguna meminta monitoring berkala (misalnya "cek
+    harga setiap jam", "pantau stok setiap 30 menit").
 
 Panduan eksplorasi halaman dokumentasi / pencarian konten:
   • Saat diminta mengeksplor, mencari, atau menemukan konten tertentu dalam sebuah halaman:
@@ -439,21 +513,18 @@ Panduan pembuatan akun dan registrasi (WAJIB DIIKUTI):
   • Jika hasil langkah sebelumnya ("read_url" atau "get_content") menampilkan field
     "locators" berisi elemen bertipe textbox, checkbox, atau radio (artinya halaman
     memiliki form isian), dan permintaan pengguna adalah untuk mendaftar/registrasi,
-    JANGAN output "done". Langkah berikutnya WAJIB berupa "type" untuk mengisi field
-    form tersebut. Isi semua field yang tersedia berdasarkan nama/label dari "locators",
-    kemudian "click" tombol submit, dan baru output "done" dengan data yang digunakan.
+    JANGAN output "done". Langkah berikutnya WAJIB berupa "type" atau "fill_form" untuk
+    mengisi field form tersebut. Isi semua field yang tersedia berdasarkan nama/label dari
+    "locators", kemudian "click" tombol submit, dan baru output "done" dengan data yang digunakan.
 
 Penanganan CAPTCHA – Re-planning (WAJIB):
-  • Jika hasil "check_captcha" menunjukkan "captcha_detected": true:
-    - SEGERA output "done" dengan pesan bantuan manusia:
-      "⚠️ CAPTCHA terdeteksi. Saya memerlukan bantuan manusia untuk mengisi CAPTCHA
-       sebelum dapat melanjutkan. Mohon selesaikan CAPTCHA secara manual, lalu ulangi
-       perintah Anda."
-    - JANGAN mencoba menyelesaikan CAPTCHA sendiri.
-  • Gunakan "check_captcha" setelah navigasi ke halaman registrasi/login jika situs
-    berpotensi menampilkan CAPTCHA (situs besar, situs dengan bot-protection ketat).
-  • Jika halaman tiba-tiba tidak dapat diinteraksi dan ada teks seperti "verify",
-    "robot", "captcha" di konten – jalankan "check_captcha" untuk konfirmasi.
+  • Jika terdapat CAPTCHA pada halaman, pertama coba "solve_captcha" untuk menyelesaikan otomatis.
+  • Jika "solve_captcha" mengembalikan "solved": true – lanjutkan task seperti biasa.
+  • Jika "solve_captcha" mengembalikan "fallback_manual": true – output "done" dengan pesan:
+    "⚠️ CAPTCHA terdeteksi. Solver otomatis tidak tersedia. Mohon selesaikan CAPTCHA secara
+     manual, lalu ulangi perintah Anda."
+  • "check_captcha" tetap tersedia untuk sekadar memeriksa keberadaan CAPTCHA tanpa
+    mencoba menyelesaikannya.
 
 Penanganan Pop-up dan Iklan – Re-planning (WAJIB):
   • Jika langkah "click" atau "type" gagal (error atau elemen tidak ditemukan) dan
@@ -482,6 +553,7 @@ Aturan:
 """
 
 _MAX_REACT_STEPS       = 20    # max number of tool-execution steps in the ReAct loop
+_MAX_STEP_RETRIES      = 2     # max immediate LLM re-plan retries on a failed step
 _MAX_TOKENS            = 8192
 _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
 _FULL_PAGE_SUMMARISE_TEXT_CHARS = 8_000  # higher budget for get_full_content results
@@ -612,18 +684,90 @@ class WebAutomationAgent(BaseAgent):
                 # Track the last navigated URL per session for follow-up commands.
                 # get_content, get_full_content, and get_links also return the current
                 # page URL, which keeps the session URL accurate even when no navigation occurred.
-                if action in ("navigate", "read_url", "get_content", "get_full_content", "get_links"):
+                _URL_TRACKING_ACTIONS = frozenset({
+                    "navigate", "read_url", "get_content", "get_full_content",
+                    "get_links", "open_tab", "switch_tab",
+                })
+                if action in _URL_TRACKING_ACTIONS:
                     visited_url = tool_result.get("url") or params.get("url", "")
                     if visited_url and not tool_result.get("error"):
                         _session_last_url[task.session_id] = visited_url
 
-                if tool_result.get("error"):
+                # ── Retry with re-planning on failure ─────────────────────────
+                # When a step fails the LLM gets immediate feedback and can choose
+                # a different approach (e.g. close_popup before retrying a click).
+                # At most _MAX_STEP_RETRIES additional attempts are made.
+                is_failure = bool(tool_result.get("error")) and not tool_result.get(
+                    "success", True
+                )
+                if is_failure:
                     logger.warning(
-                        "WebAutomationAgent: step %d failed: %s",
+                        "WebAutomationAgent: step %d failed: %s – triggering re-plan",
                         i, tool_result["error"],
                     )
-                    action_log.append(f"  ⚠ Gagal: {tool_result['error']}")
-                    # Continue to next step instead of aborting (best-effort)
+                    action_log.append(f"  ⚠ Gagal: {tool_result['error'][:_MAX_ERROR_MSG_CHARS]}")
+
+                    # Build failure-aware context for re-planning
+                    retry_context = steps_done + [{
+                        "step":   action,
+                        "params": params,
+                        "result": _compact_result(tool_result),
+                    }]
+
+                    for retry_n in range(1, _MAX_STEP_RETRIES + 1):
+                        retry_step = await self._plan_next_step(
+                            task.user_input, task.session_id, retry_context,
+                            identity=identity, follow_parent=follow_parent_active,
+                        )
+                        r_action = retry_step.get("action", "done")
+                        r_params = retry_step.get("params", {})
+
+                        if r_action == "done":
+                            action_log.append(
+                                f"  ↺ retry[{retry_n}]: LLM memilih selesai setelah gagal"
+                            )
+                            action = "done"
+                            break
+
+                        r_log, r_result = await self._execute_step(
+                            action=r_action, params=r_params, task=task,
+                            reader=reader, navigator=navigator, step_num=i,
+                        )
+                        action_log.append(f"  ↺ retry[{retry_n}]: {r_log}")
+                        task.tool_results[f"step_{i}_retry{retry_n}_{r_action}"] = r_result
+
+                        # Track URL from retry actions too
+                        if r_action in _URL_TRACKING_ACTIONS:
+                            v_url = r_result.get("url") or r_params.get("url", "")
+                            if v_url and not r_result.get("error"):
+                                _session_last_url[task.session_id] = v_url
+
+                        # If retry succeeded, adopt its result and move on
+                        r_is_failure = bool(r_result.get("error")) and not r_result.get(
+                            "success", True
+                        )
+                        if not r_is_failure:
+                            tool_result = r_result
+                            action      = r_action
+                            params      = r_params
+                            break
+
+                        # Still failing – extend context with this failure too
+                        retry_context = retry_context + [{
+                            "step":   r_action,
+                            "params": r_params,
+                            "result": _compact_result(r_result),
+                        }]
+
+                    if action == "done":
+                        break
+                elif tool_result.get("error"):
+                    # Soft failure (error present but success=True or indeterminate)
+                    logger.warning(
+                        "WebAutomationAgent: step %d warning: %s",
+                        i, tool_result["error"],
+                    )
+                    action_log.append(f"  ⚠ Peringatan: {tool_result['error'][:_MAX_ERROR_MSG_CHARS]}")
 
                 # Build a compact result for the ReAct context (strips screenshots
                 # and large a11y trees to keep token usage manageable)
@@ -972,11 +1116,357 @@ class WebAutomationAgent(BaseAgent):
                 f"{result.get('message', result.get('error', '?'))}"
             )
 
+        # ── New actions (upgrade) ─────────────────────────────────────────────
+
+        elif action == "open_tab":
+            url = params.get("url", "")
+            task.metadata.update({"browser_action": "open_tab", "target_url": url})
+            result = await navigator.run(task)
+            if result.get("url") and not result.get("error"):
+                _session_last_url[task.session_id] = result["url"]
+            log = (
+                f"[{step_num}] open_tab → "
+                f"tab={result.get('tab_id', '?')} "
+                f"url={result.get('url', '(empty)')!r}"
+            )
+
+        elif action == "switch_tab":
+            task.metadata.update({
+                "browser_action": "switch_tab",
+                "tab_id":         params.get("tab_id", ""),
+            })
+            result = await navigator.run(task)
+            if result.get("url") and not result.get("error"):
+                _session_last_url[task.session_id] = result["url"]
+            log = (
+                f"[{step_num}] switch_tab → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "close_tab":
+            task.metadata.update({
+                "browser_action": "close_tab",
+                "tab_id":         params.get("tab_id", ""),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] close_tab → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "wait_for_element":
+            task.metadata.update({
+                "browser_action":  "wait_for_element",
+                "wait_text":       params.get("text", ""),
+                "wait_selector":   params.get("selector", ""),
+                "wait_timeout_ms": params.get("timeout_ms", 10_000),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] wait_for_element → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "wait_for_navigation":
+            task.metadata.update({
+                "browser_action":    "wait_for_navigation",
+                "wait_url_pattern":  params.get("url_pattern", ""),
+                "wait_timeout_ms":   params.get("timeout_ms", 15_000),
+            })
+            result = await navigator.run(task)
+            if result.get("url") and not result.get("error"):
+                _session_last_url[task.session_id] = result["url"]
+            log = (
+                f"[{step_num}] wait_for_navigation → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "fill_form":
+            task.metadata.update({
+                "browser_action": "fill_form",
+                "form_fields":    params.get("fields", []),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] fill_form → "
+                f"filled={result.get('filled', 0)}/{result.get('total', 0)} fields "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "hover":
+            task.metadata.update({
+                "browser_action": "hover",
+                "hover_text":     params.get("text", ""),
+                "hover_selector": params.get("selector", ""),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] hover '{params.get('text', '') or params.get('selector', '')}' → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "drag_drop":
+            task.metadata.update({
+                "browser_action": "drag_drop",
+                "drag_selector":  params.get("drag_selector", ""),
+                "drop_selector":  params.get("drop_selector", ""),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] drag_drop → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "press_key":
+            key = params.get("key", "")
+            task.metadata.update({"browser_action": "press_key", "key": key})
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] press_key {key!r} → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "upload_file":
+            task.metadata.update({
+                "browser_action":  "upload_file",
+                "upload_filepath": params.get("filepath", ""),
+                "upload_selector": params.get("selector", ""),
+                "upload_label":    params.get("label", ""),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] upload_file '{params.get('filepath', '')}' → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "scrape_table":
+            task.metadata.update({
+                "browser_action":  "scrape_table",
+                "extract_selector": params.get("selector", "table"),
+                "extract_limit":   params.get("limit", 100),
+            })
+            result = await navigator.run(task)
+            if result.get("url") and not result.get("error"):
+                _session_last_url[task.session_id] = result["url"]
+            log = (
+                f"[{step_num}] scrape_table selector={params.get('selector', 'table')!r} → "
+                f"{result.get('count', 0)} rows"
+            )
+
+        elif action == "assert_text":
+            should_exist = params.get("should_exist", True)
+            task.metadata.update({
+                "browser_action":       "assert_text",
+                "assert_text_value":    params.get("text", ""),
+                "assert_should_exist":  str(should_exist).lower(),
+            })
+            result = await navigator.run(task)
+            passed = result.get("success", False)
+            log = (
+                f"[{step_num}] assert_text '{params.get('text', '')}' "
+                f"should_exist={should_exist} → "
+                f"{'✓ PASS' if passed else '✗ FAIL'}: "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "load_session":
+            task.metadata.update({
+                "browser_action": "load_session",
+                "session_url":    params.get("url", ""),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] load_session → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "clear_session":
+            task.metadata.update({
+                "browser_action": "clear_session",
+                "session_url":    params.get("url", ""),
+            })
+            result = await navigator.run(task)
+            log = (
+                f"[{step_num}] clear_session → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "explore_parallel":
+            task.metadata.update({
+                "browser_action": "explore_parallel",
+                "explore_urls":   params.get("urls", []),
+                "explore_query":  params.get("query", ""),
+            })
+            result = await navigator.run(task)
+            if result.get("results"):
+                for r in result["results"]:
+                    if r.get("url") and not r.get("error"):
+                        _session_last_url[task.session_id] = r["url"]
+                        break
+            log = (
+                f"[{step_num}] explore_parallel → "
+                f"{result.get('count', 0)} URLs explored"
+            )
+
+        elif action == "compare_screenshot":
+            task.metadata.update({
+                "browser_action": "compare_screenshot",
+                "compare_url":    params.get("url", ""),
+                "diff_threshold": params.get("threshold", 0.02),
+            })
+            result = await navigator.run(task)
+            changed = result.get("changed", False)
+            log = (
+                f"[{step_num}] compare_screenshot → "
+                f"{'⚠ CHANGED' if changed else 'no change'} "
+                f"diff={result.get('diff_ratio', 'N/A')}"
+            )
+
+        elif action == "solve_captcha":
+            task.metadata["browser_action"] = "solve_captcha"
+            result = await navigator.run(task)
+            solved = result.get("solved", False)
+            log = (
+                f"[{step_num}] solve_captcha → "
+                f"{'✓ solved' if solved else '⚠ manual needed'} "
+                f"({result.get('captcha_type', '')})"
+            )
+
+        elif action == "schedule_task":
+            result = await self._handle_schedule_task(params, task)
+            log = (
+                f"[{step_num}] schedule_task → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
+        elif action == "list_scheduled_tasks":
+            result = await self._handle_list_scheduled_tasks(task)
+            log = (
+                f"[{step_num}] list_scheduled_tasks → "
+                f"{result.get('count', 0)} tasks"
+            )
+
+        elif action == "cancel_scheduled_task":
+            result = await self._handle_cancel_scheduled_task(params, task)
+            log = (
+                f"[{step_num}] cancel_scheduled_task → "
+                f"{result.get('message', result.get('error', '?'))}"
+            )
+
         else:
             result = {"error": f"Unknown action: {action}"}
             log    = f"[{step_num}] unknown action: {action}"
 
         return log, result
+
+    # ── Scheduling helpers ────────────────────────────────────────────────────
+
+    async def _handle_schedule_task(
+        self, params: dict[str, Any], task: "AgentTask"
+    ) -> dict[str, Any]:
+        """Register a recurring web-automation task in the WebTaskStore."""
+        from src.memory.web_task_store import get_web_task_store
+        import asyncio as _asyncio
+
+        label      = str(params.get("label", "")).strip()
+        user_input = str(params.get("user_input", "")).strip()
+        interval_s = int(params.get("interval_s", 3600))
+
+        if not label or not user_input:
+            return {
+                "error":   "label and user_input are required for schedule_task",
+                "success": False,
+                "action":  "schedule_task",
+            }
+        if interval_s < 60:
+            return {
+                "error":   "interval_s must be at least 60 seconds",
+                "success": False,
+                "action":  "schedule_task",
+            }
+
+        store   = get_web_task_store()
+        task_id = await _asyncio.to_thread(
+            store.add_task,
+            task.session_id,
+            label,
+            user_input,
+            interval_s,
+        )
+        return {
+            "action":     "schedule_task",
+            "success":    True,
+            "task_id":    task_id,
+            "label":      label,
+            "interval_s": interval_s,
+            "message": (
+                f"Task '{label}' dijadwalkan setiap {interval_s} detik "
+                f"(task_id={task_id}). "
+                "Gunakan 'cancel_scheduled_task' untuk membatalkan."
+            ),
+        }
+
+    async def _handle_list_scheduled_tasks(
+        self, task: "AgentTask"
+    ) -> dict[str, Any]:
+        """Return all active scheduled tasks for this session."""
+        from src.memory.web_task_store import get_web_task_store
+        import asyncio as _asyncio
+
+        store = get_web_task_store()
+        tasks = await _asyncio.to_thread(store.list_tasks, task.session_id)
+        lines = [
+            f"  #{t['id']} [{t['label']}]: setiap {t['interval_s']}s – \"{t['user_input'][:60]}\""
+            for t in tasks
+        ]
+        return {
+            "action":  "list_scheduled_tasks",
+            "success": True,
+            "tasks":   tasks,
+            "count":   len(tasks),
+            "message": (
+                f"{len(tasks)} task terjadwal:\n" + "\n".join(lines)
+                if tasks
+                else "Tidak ada task terjadwal untuk sesi ini."
+            ),
+        }
+
+    async def _handle_cancel_scheduled_task(
+        self, params: dict[str, Any], task: "AgentTask"
+    ) -> dict[str, Any]:
+        """Cancel a scheduled task by ID or label."""
+        from src.memory.web_task_store import get_web_task_store
+        import asyncio as _asyncio
+
+        store    = get_web_task_store()
+        task_id  = params.get("task_id")
+        label    = str(params.get("label", "")).strip()
+
+        if task_id is not None:
+            await _asyncio.to_thread(store.cancel_task, int(task_id))
+            return {
+                "action":  "cancel_scheduled_task",
+                "success": True,
+                "task_id": task_id,
+                "message": f"Task id={task_id} berhasil dibatalkan.",
+            }
+        elif label:
+            count = await _asyncio.to_thread(
+                store.cancel_by_label, task.session_id, label
+            )
+            return {
+                "action":  "cancel_scheduled_task",
+                "success": True,
+                "label":   label,
+                "count":   count,
+                "message": f"{count} task dengan label '{label}' berhasil dibatalkan.",
+            }
+        else:
+            return {
+                "error":   "task_id or label required for cancel_scheduled_task",
+                "success": False,
+                "action":  "cancel_scheduled_task",
+            }
 
     # ── Summariser ────────────────────────────────────────────────────────────
 
@@ -1032,6 +1522,34 @@ class WebAutomationAgent(BaseAgent):
                     f"[{key}] {val.get('count', len(val['links']))} links "
                     f"dari {val.get('url', '')}:\n{links_text}"
                 )
+            # Table rows from scrape_table
+            if val.get("action") == "scrape_table" and val.get("rows"):
+                import json as _json
+                rows_preview = val["rows"][:10]
+                rows_text = _json.dumps(rows_preview, ensure_ascii=False, indent=2)
+                extracted_data.append(
+                    f"[{key}] {val.get('count', 0)} baris tabel "
+                    f"dari '{val.get('selector', 'table')}' di {val.get('url', '')}:\n{rows_text}"
+                )
+            # Parallel exploration results
+            if val.get("action") == "explore_parallel" and val.get("results"):
+                for r in val["results"][:5]:
+                    if r.get("page_text") and not r.get("error"):
+                        header = f"[{key}/{r.get('tab_id','?')}] {r.get('title','')} ({r.get('url','')})"
+                        page_snippets.append(f"{header}:\n{r['page_text'][:800]}")
+            # Screenshot comparison
+            if val.get("action") == "compare_screenshot":
+                change_note = (
+                    f"⚠️ Visual change detected (diff={val.get('diff_ratio','?')})"
+                    if val.get("changed")
+                    else f"No visual change (diff={val.get('diff_ratio','?')})"
+                )
+                page_snippets.append(
+                    f"[{key}] compare_screenshot @ {val.get('url','')} → {change_note}"
+                )
+            # Scheduled task info
+            if val.get("action") in ("schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"):
+                page_snippets.append(f"[{key}] {val.get('message', '')}")
 
         context = f"Log aksi:\n{log_text}"
         if current_url:

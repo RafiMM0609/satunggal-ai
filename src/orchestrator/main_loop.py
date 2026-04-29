@@ -83,26 +83,33 @@ _RATE_LIMIT_REPLY = (
 
 if TYPE_CHECKING:
     from src.memory.state import AgentTask
+    from src.orchestrator.task_planner import TaskPlan
 
 
 # ── Lazy singletons ────────────────────────────────────────────────────────────
 
-_history    = None
-_llm        = None
-_agents     = None
-_router     = None
-_gatekeeper = None
-_tools      = None   # dict[str, BaseTool]
-_mode_store = None   # UserModeStore
+_history             = None
+_llm                 = None
+_agents              = None
+_router              = None
+_gatekeeper          = None
+_tools               = None   # dict[str, BaseTool]
+_task_planner        = None   # TaskPlanner  (Phase 2)
+_consistency_checker = None   # ConsistencyChecker  (Phase 2)
+_manager_agent       = None   # ManagerAgent (Phase 3 – Hierarchical Manager Pattern)
 
 
 def _get_pipeline():
     """Lazily create and cache all pipeline components."""
-    global _history, _llm, _agents, _router, _gatekeeper, _tools, _mode_store
+    global _history, _llm, _agents, _router, _gatekeeper, _tools
+    global _task_planner, _consistency_checker, _manager_agent
 
     if _gatekeeper is not None:
-        return _history, _agents, _router, _gatekeeper, _tools, _mode_store
-
+        # All module-level globals are initialised on the first call and reused
+        # on subsequent calls.  _task_planner and _consistency_checker are
+        # not part of the return tuple — they are accessed directly as globals
+        # inside process_message() which runs in the same module.
+        return _history, _agents, _router, _gatekeeper, _tools
     from src.agents.code_fix.agent import CodeFixAgent
     from src.agents.content_creator.agent import ContentCreatorAgent
     from src.agents.developer.agent import DeveloperAgent
@@ -125,7 +132,7 @@ def _get_pipeline():
     from src.agents.wbs_agent.agent import WBSAgent
     from src.agents.web_automation.agent import WebAutomationAgent
     from src.memory.history import ConversationHistory
-    from src.memory.user_mode_store import get_user_mode_store
+    from src.memory.persistent_history import PersistentConversationHistory
     from src.orchestrator.router import AgentRouter
     from src.tools.browser_navigator import BrowserNavigatorTool
     from src.tools.diagram_renderer import DiagramRendererTool
@@ -138,9 +145,10 @@ def _get_pipeline():
     from src.tools.web_reader import WebReaderTool
     from src.tools.wbs_generator import WBSGeneratorTool
 
-    _history    = ConversationHistory(max_messages=30)
-    _llm        = LLMClient()
-    _mode_store = get_user_mode_store()
+    # Phase 3: Use SQLite-backed persistent history so conversations survive restarts.
+    # PersistentConversationHistory is a drop-in replacement with identical public API.
+    _history = PersistentConversationHistory(max_messages=30)
+    _llm     = LLMClient()
 
     # ── Tool registry ──────────────────────────────────────────────────────
     # Keyed by tool name (same string used in intent_result.tools and
@@ -169,14 +177,16 @@ def _get_pipeline():
         logger.warning("TAVILY_API_KEY not configured – tavily_search tool disabled.")
 
     # ── Agent registry ─────────────────────────────────────────────────────
+    _researcher_agent  = ResearcherAgent(_history, _llm)
+    _inspector_agent   = DeveloperInspectorAgent(llm=_llm, history=_history)
     _agents = {
         "responder":         ResponderAgent(_history, _llm),
-        "researcher":        ResearcherAgent(_history, _llm),
+        "researcher":        _researcher_agent,
         "content_creator":   ContentCreatorAgent(_history, _llm),
         "wbs_agent":         WBSAgent(_llm),
         "mandays_agent":     MandaysAgent(_llm),
-        "developer":            DeveloperAgent(_llm),
-        "developer_inspector": DeveloperInspectorAgent(llm=_llm, history=_history),
+        "developer":            DeveloperAgent(_llm, researcher=_researcher_agent, inspector=_inspector_agent),
+        "developer_inspector": _inspector_agent,
         "developer_qna":        DeveloperQnAAgent(llm=_llm, history=_history),
         "code_fix":             CodeFixAgent(llm=_llm),
         "technical_writer":    TechnicalWriterAgent(_history, _llm),
@@ -199,179 +209,151 @@ def _get_pipeline():
     _router     = AgentRouter(_agents)
     _gatekeeper = GatekeeperAgent()
 
+    # ── Phase 2: TaskPlanner + ConsistencyChecker ─────────────────────────
+    from src.orchestrator.task_planner import TaskPlanner, ConsistencyChecker  # noqa: PLC0415
+    _task_planner        = TaskPlanner(agents=_agents, llm=_llm)
+    _consistency_checker = ConsistencyChecker(llm=_llm)
+
+    # ── Phase 3 (Hierarchical Manager): ManagerAgent reviews every agent output
+    from src.agents.manager.agent import ManagerAgent  # noqa: PLC0415
+    _manager_agent = ManagerAgent(llm=_llm)
+
     logger.info(
         "Pipeline initialised: %d agents, %d tools registered.",
         len(_agents), len(_tools),
     )
-    return _history, _agents, _router, _gatekeeper, _tools, _mode_store
+    return _history, _agents, _router, _gatekeeper, _tools
 
 
-# ── Natural-language mode commands ────────────────────────────────────────────
-#
-# Users can check or change mode via plain chat instead of /mode command.
-# Detected BEFORE the gatekeeper so the pipeline short-circuits immediately.
-#
-# _detect_natural_mode_command returns a tuple:
-#   ("status", None)           – user is asking for current mode
-#   ("change", "<mode_key>")   – user wants to switch to mode_key
-#   None                       – not a mode command; proceed normally
+# ── Phase 2: Sequential multi-step plan executor ──────────────────────────────
 
-import re as _re
+async def _execute_plan(
+    plan:            "TaskPlan",
+    task:            "AgentTask",
+    agents:          dict,
+    tools:           dict,
+    status_callback: "StatusCallback",
+    history,
+) -> "AgentTask":
+    """Execute a sequential ``TaskPlan``, forwarding each step's output to the next.
 
-_MODE_STATUS_PATTERNS: list[_re.Pattern[str]] = [
-    _re.compile(r"\bstatus\s+mode\b", _re.I),
-    _re.compile(r"\bmode\s+(?:apa|aktif|sekarang|saat\s+ini|yang\s+aktif)\b", _re.I),
-    _re.compile(r"\bcek\s+mode\b", _re.I),
-    _re.compile(r"\bcheck\s+mode\b", _re.I),
-    _re.compile(r"\bmode\s+status\b", _re.I),
-    _re.compile(r"\blihat\s+mode\b", _re.I),
-    _re.compile(r"\btampilkan\s+mode\b", _re.I),
-    _re.compile(r"\bshow\s+mode\b", _re.I),
-    _re.compile(r"\bapa\s+mode(?:\s+saya)?\b", _re.I),
-    # English variants: "what is my mode", "what's the mode", "what mode am I in"
-    _re.compile(r"\bwhat(?:'s|\s+is|\s+mode)\b", _re.I),
-]
-
-# Maps human-friendly aliases → canonical mode_key
-_MODE_ALIAS_MAP: dict[str, str] = {
-    "all":     "all",
-    "semua":   "all",
-    "default": "all",
-    "dev":     "dev",
-    "developer": "dev",
-    "pengembang": "dev",
-    "development": "dev",
-    "writer":  "writer",
-    "penulis": "writer",
-    "penulisan": "writer",
-    "office":  "office",
-    "kantor":  "office",
-    "kerja":   "office",
-    "media":   "media",
-    "dokumen": "media",
-    "document": "media",
-    "pdf":     "media",
-    "web":     "web",
-    "internet": "web",
-    "browser": "web",
-    "browsing": "web",
-}
-
-_MODE_CHANGE_PATTERN = _re.compile(
-    r"(?:"
-    r"(?:ganti|ubah|pindah|aktifkan|set|switch|change|gunakan|pakai)\s+mode\s+(?:ke\s+|to\s+)?(?P<mode1>\w+)"
-    r"|"
-    r"mode\s+(?:ke\s+|to\s+)?(?P<mode2>\w+)"
-    r"|"
-    r"(?:change|switch|set)\s+(?:to\s+)?(?P<mode3>\w+)\s+mode"
-    r"|"
-    r"(?P<mode4>\w+)\s+mode\s+(?:aktifkan|on|enable|nyalakan)"
-    r")",
-    _re.I,
-)
-
-
-def _detect_natural_mode_command(
-    user_text: str,
-) -> "tuple[str, str | None] | None":
-    """Detect natural-language mode status/change requests.
+    Args:
+        plan:            The decomposed plan from ``TaskPlanner.plan()``.
+        task:            The original ``AgentTask`` (session_id, mode, metadata are read).
+        agents:          The registered agent dict from ``_get_pipeline()``.
+        tools:           The registered tool dict from ``_get_pipeline()``.
+        status_callback: Optional live-update callback for the interface layer.
+        history:         ConversationHistory (not written to – caller handles that).
 
     Returns:
-        ``("status", None)``         – user is asking for the current mode.
-        ``("change", "<mode_key>")`` – user wants to switch to *mode_key*.
-        ``None``                     – not a mode command.
+        The mutated *task* with ``task.result`` set to the final step's output.
     """
-    text = user_text.strip()
+    from src.memory.state import AgentTask as _AgentTask  # noqa: PLC0415
+    from src.orchestrator.task_planner import TaskPlan    # noqa: PLC0415
 
-    # Status check
-    for pat in _MODE_STATUS_PATTERNS:
-        if pat.search(text):
-            return ("status", None)
+    total_steps      = len(plan.steps)
+    accumulated_ctx  = ""  # grows as steps complete; injected into following steps
+    final_result     = ""
 
-    # Change request
-    m = _MODE_CHANGE_PATTERN.search(text)
-    if m:
-        raw = (
-            m.group("mode1")
-            or m.group("mode2")
-            or m.group("mode3")
-            or m.group("mode4")
-            or ""
-        ).lower()
-        mode_key = _MODE_ALIAS_MAP.get(raw)
-        if mode_key:
-            return ("change", mode_key)
+    for step in plan.steps:
+        agent = agents.get(step.agent_name)
+        if agent is None:
+            logger.warning(
+                "_execute_plan: agent '%s' not found; skipping step %d",
+                step.agent_name, step.step_id,
+            )
+            continue
 
-    return None
+        # Enrich instruction with context from previous steps
+        instruction = step.instruction
+        if accumulated_ctx:
+            instruction = (
+                instruction
+                + "\n\n---\n## Hasil dari langkah sebelumnya (gunakan sebagai konteks):\n"
+                + accumulated_ctx
+            )
 
+        # Create a fresh sub-task so we don't mutate the original task's user_input
+        step_task = _AgentTask(
+            session_id   = task.session_id,
+            user_input   = instruction,
+            metadata     = {
+                **task.metadata,
+                "plan_step":       step.step_id,
+                "is_planned_step": True,
+            },
+        )
 
-def _format_mode_status(active_mode: str) -> str:
-    """Build a human-readable status reply for the active mode."""
-    from src.orchestrator.router import MODE_MAP
+        await _notify(
+            status_callback,
+            f"⚙️ **Langkah {step.step_id}/{total_steps}**: {step.description}",
+        )
+        logger.info(
+            "_execute_plan: step %d/%d agent=%s session=%s",
+            step.step_id, total_steps, agent.name, task.session_id,
+        )
 
-    mode_cfg   = MODE_MAP.get(active_mode, MODE_MAP["all"])
-    mode_label = mode_cfg["label"]
-    allowed    = mode_cfg.get("allowed_agents")
+        try:
+            step_task.mark_processing(agent.name)
+            step_task = await agent.run(step_task)
+        except Exception as exc:
+            logger.exception(
+                "_execute_plan: step %d agent '%s' raised: %s",
+                step.step_id, agent.name, exc,
+            )
+            task.mark_failed(f"Langkah {step.step_id} gagal: {exc}")
+            task.result = (
+                f"❌ Proses multi-langkah gagal pada langkah {step.step_id} "
+                f"({step.description}): {exc}"
+            )
+            return task
 
-    # Build a compact agent → capability description map shown in the reply.
-    _AGENT_DESC: dict[str, str] = {
-        "developer":          "💻 Developer — clone repo, edit/fix code, Docker sandbox",
-        "developer_inspector":"🔍 Inspector — cari bug, root cause analysis (read-only)",
-        "developer_qna":      "❓ Dev Q&A — tanya jawab isi repo (API, tech stack, alur)",
-        "code_fix":           "🔧 Code Fix — temukan & perbaiki bug secara otomatis",
-        "sysinfo_agent":      "🖥️ SysInfo — status CPU, RAM, disk server",
-        "log_viewer_agent":   "📜 Log Viewer — tampilkan log bot terbaru",
-        "researcher":         "🔎 Researcher — riset mendalam via internet (Tavily)",
-        "content_creator":    "✍️ Content Creator — buat konten LinkedIn, blog, posting",
-        "technical_writer":   "📄 Technical Writer — buat dokumen teknis PDF/Word",
-        "wbs_agent":          "📊 WBS Agent — buat Work Breakdown Structure proyek",
-        "mandays_agent":      "📅 Mandays Agent — estimasi effort & resource proyek",
-        "reminder_agent":     "⏰ Reminder — set/list/cancel pengingat terjadwal",
-        "pdf_summarizer":     "📑 PDF Summarizer — ringkas & QnA isi dokumen PDF",
-        "quiz_agent":         "🎯 Quiz Agent — konversi PDF → kuis HTML interaktif",
-        "tg_quiz_agent":      "📲 TG Quiz — konversi PDF → polling kuis Telegram",
-        "doc_agent":          "📝 Doc Agent — analisis & QnA isi dokumen .docx",
-        "analysis_diagram":   "🗺️ Diagram — buat flow diagram dari hasil analisa",
-        "web_automation":     "🌐 Web Automation — browse, klik, isi form, screenshot",
-        "responder":          "💬 Responder — pertanyaan umum & percakapan biasa",
-    }
+        # Drain pending tools produced by this step's agent
+        for tool_name in list(step_task.pending_tools):
+            tool = tools.get(tool_name)
+            if tool is None:
+                logger.warning(
+                    "_execute_plan: pending tool '%s' not in registry; skipping.", tool_name
+                )
+                continue
+            try:
+                tool_output = await tool.run(step_task)
+                step_task.tool_results[tool_name] = tool_output
+                # Propagate file paths back to the main task
+                for key in ("excel_path", "document_path", "html_path"):
+                    if key in tool_output:
+                        task.metadata[key] = tool_output[key]
+            except Exception as exc:
+                logger.exception("_execute_plan: post-step tool '%s' raised: %s", tool_name, exc)
+        step_task.pending_tools.clear()
 
-    if allowed is None:
-        scope = "✅ Semua agent aktif (full-orchestrator — tidak ada batasan)."
+        # Propagate metadata keys back to the main task
+        for key in ("excel_path", "document_path", "html_path"):
+            if key in step_task.metadata:
+                task.metadata[key] = step_task.metadata[key]
+
+        # Accumulate step result as context for subsequent steps
+        if step_task.result:
+            final_result = step_task.result
+            accumulated_ctx += (
+                f"\n\n### Langkah {step.step_id}: {step.description}\n{step_task.result}"
+            )
+
+        logger.info(
+            "_execute_plan: step %d done status=%s session=%s",
+            step.step_id, step_task.status.value, task.session_id,
+        )
+
+    # Store the full execution trace in metadata for debugging
+    task.metadata["plan_trace"] = accumulated_ctx
+
+    if final_result:
+        task.mark_done(final_result)
     else:
-        lines = [
-            _AGENT_DESC.get(a, f"• {a}")
-            for a in allowed
-            if a != "responder"
-        ]
-        scope = "Agent aktif di mode ini:\n" + "\n".join(f"  • {l}" for l in lines)
-        scope += "\n  • 💬 Responder — pertanyaan umum & percakapan biasa"
+        task.mark_failed("All plan steps produced empty results.")
+        task.result = "❌ Proses multi-langkah tidak menghasilkan output."
 
-    mode_list = "\n".join(
-        f"  {'✅' if k == active_mode else '○'} {v['label']}"
-        for k, v in MODE_MAP.items()
-    )
-
-    return (
-        f"🎛️ **Status Mode Aktif**\n\n"
-        f"Mode: **{mode_label}**\n\n"
-        f"{scope}\n\n"
-        f"**Mode tersedia:**\n{mode_list}\n\n"
-        "Ketik *ganti mode ke [nama mode]* atau /mode untuk berpindah mode."
-    )
-
-
-def _format_mode_changed(new_mode: str) -> str:
-    """Build a confirmation reply after a mode change."""
-    from src.orchestrator.router import MODE_MAP
-    mode_cfg   = MODE_MAP.get(new_mode, MODE_MAP["all"])
-    mode_label = mode_cfg["label"]
-    prefix     = mode_cfg.get("system_prefix", "") or ""
-    return (
-        f"✅ Mode berhasil diubah ke **{mode_label}**!\n\n"
-        f"{prefix}\n\n"
-        "Ketik *status mode* kapan saja untuk melihat mode aktif."
-    )
+    return task
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -395,10 +377,9 @@ async def process_message(
         task.metadata may contain extra data such as "excel_path").
     """
     from src.memory.state import AgentTask
-    from src.orchestrator.router import MODE_MAP, get_allowed_intents
     from src.tools.progress_tracker import ProgressTracker
 
-    history, agents, router, gatekeeper, tools, mode_store = _get_pipeline()
+    history, agents, router, gatekeeper, tools = _get_pipeline()
 
     # ── Bootstrap progress tracker ─────────────────────────────────────────
     tracker = ProgressTracker(title="⏳ Sedang memproses permintaan...")
@@ -408,33 +389,6 @@ async def process_message(
 
     # 2. Build the task blackboard
     task = AgentTask(session_id=session_id, user_input=user_text)
-
-    # 2b. Fetch the active mode for this session and attach it to the task.
-    active_mode = await asyncio.to_thread(mode_store.get_mode, session_id)
-    task.current_mode = active_mode
-
-    # 2c. Natural-language mode commands – short-circuit the full pipeline.
-    #     Handles "status mode", "ganti mode ke dev", "change mode to writer", etc.
-    mode_cmd = _detect_natural_mode_command(user_text)
-    if mode_cmd is not None:
-        cmd_type, mode_key = mode_cmd
-        if cmd_type == "status":
-            task.result = _format_mode_status(active_mode)
-        else:  # "change"
-            await asyncio.to_thread(mode_store.set_mode, session_id, mode_key)
-            task.current_mode = mode_key
-            task.result = _format_mode_changed(mode_key)
-            logger.info(
-                "Natural mode change: session=%s %s → %s",
-                session_id, active_mode, mode_key,
-            )
-        history.add(session_id, "assistant", task.result)
-        tracker.advance("done")
-        await _notify(status_callback, tracker.render())
-        return task
-
-    # Compute allowed intents for the active mode (None = no restriction).
-    allowed_intents = get_allowed_intents(active_mode)
 
     # 3. Classify intent (gatekeeper) – now also returns which tools to run
     tracker.advance("gatekeeper")
@@ -451,7 +405,6 @@ async def process_message(
             user_text,
             session_id=session_id,
             history=recent_history,
-            allowed_intents=allowed_intents,
         )
     except Exception as gk_exc:
         if _is_rate_limit_error(gk_exc):
@@ -495,6 +448,39 @@ async def process_message(
         await _notify(status_callback, tracker.render())
         return task
 
+    # 3c. TaskPlanner (Phase 2) – detect compound/multi-step requests and
+    #     orchestrate them sequentially before falling back to single-agent routing.
+    if _task_planner is not None and _task_planner.should_plan(user_text):
+        logger.info("TaskPlanner triggered: compound request detected. session=%s", session_id)
+        plan = await _task_planner.plan(user_text, session_id=session_id)
+
+        if plan.is_multi_step:
+            tracker.advance("task_planner")
+            await _notify(status_callback, "🗂️ **Merancang rencana kerja multi-langkah...**")
+            task.agent_trace.append(
+                f"task_planner → sequential plan ({len(plan.steps)} steps)"
+            )
+
+            task = await _execute_plan(plan, task, agents, tools, status_callback, history)
+
+            # Consistency check: Manager reviews the composed answer before delivery
+            if task.result and _consistency_checker is not None:
+                task.result = await _consistency_checker.check(
+                    user_input=user_text,
+                    result=task.result,
+                    session_id=session_id,
+                )
+
+            history.add(session_id, "assistant", task.result or "")
+            tracker.advance("done")
+            await _notify(status_callback, tracker.render())
+            logger.info(
+                "Multi-step plan done: session=%s steps=%d status=%s",
+                session_id, len(plan.steps), task.status.value,
+            )
+            return task
+        # else: plan.mode == "single" → fall through to normal single-agent routing
+
     # 4. Execute tools declared by gatekeeper (before calling specialist agent)
     for tool_name in intent_result.tools:
         tool = tools.get(tool_name)
@@ -529,33 +515,6 @@ async def process_message(
     # 5. Route to specialist agent
     agent = router.resolve(task)
     task.mark_processing(agent.name)
-
-    # 5b. Mode Guard – if the resolved agent is outside the active mode,
-    #     inform the user and suggest switching instead of proceeding.
-    if active_mode != "all" and not router.is_agent_allowed(agent.name, active_mode):
-        mode_label = MODE_MAP.get(active_mode, {}).get("label", active_mode)
-        # Find which mode(s) support the resolved agent and suggest the best one.
-        suggestion = ""
-        for mode_key, mode_cfg in MODE_MAP.items():
-            if mode_key == "all":
-                continue
-            if agent.name in (mode_cfg.get("allowed_agents") or []):
-                suggestion = f" Ketik /mode untuk pindah ke {mode_cfg['label']}."
-                break
-        task.result = (
-            f"⚠️ Permintaan ini di luar cakupan {mode_label} Anda.\n"
-            f"Fitur ini membutuhkan agent lain yang tidak aktif di mode saat ini."
-            f"{(' ' + suggestion.strip()) if suggestion else ''}\n\n"
-            "Ketik /status untuk melihat mode aktif, atau /mode untuk ganti mode."
-        )
-        history.add(session_id, "assistant", task.result)
-        logger.info(
-            "Mode guard triggered: session=%s mode=%s agent=%s",
-            session_id, active_mode, agent.name,
-        )
-        tracker.advance("done")
-        await _notify(status_callback, tracker.render())
-        return task
 
     # 6. Execute agent (task.tool_results is already populated)
     tracker.advance(f"agent:{agent.name}")
@@ -618,6 +577,16 @@ async def process_message(
     # 7. Build final reply text (stored on task for callers)
     if not task.result:
         task.result = "Maaf, saya tidak dapat memproses permintaan Anda saat ini."
+
+    # 7b. Hierarchical Manager review – ManagerAgent mereview output sebelum
+    #     dikirim ke user (non-fatal: output asli dikembalikan jika review gagal).
+    if _manager_agent is not None and task.result:
+        task.result = await _manager_agent.review(
+            user_input   = user_text,
+            agent_name   = agent.name,
+            agent_output = task.result,
+            session_id   = session_id,
+        )
 
     # 8. Record assistant turn in history
     history.add(session_id, "assistant", task.result)

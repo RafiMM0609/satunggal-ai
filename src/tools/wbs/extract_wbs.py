@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import logging
 from datetime import datetime, timedelta
 from openpyxl import load_workbook
 
+logger = logging.getLogger(__name__)
 
 def _get_color_hex(cell):
     """Return color hex (uppercase) for a cell's fill start_color if available."""
@@ -480,10 +482,8 @@ def parse_sheet(path, sheet_name=None):
                     if cur_month > 12:
                         cur_month = 1
                         cur_year += 1
-            except Exception:
-                pass
-
-        # safe weekday detection: attempt to construct a real date
+            except Exception as exc:
+                logger.debug("extract_wbs: month-boundary detection failed for day=%r: %s", d, exc)
         is_weekday = True
         try:
             dt = datetime(cur_year, cur_month, int(d))
@@ -615,11 +615,8 @@ def parse_sheet(path, sheet_name=None):
             try:
                 if str(p['index']) == 'FF92D050' or str(p['index']).endswith('92D050'):
                     return True
-            except Exception:
-                pass
-        return False
-
-    def is_sub_lightblue(cell):
+            except Exception as exc:
+                logger.debug("extract_wbs: is_category_green color-index check failed: %s", exc)
         p = _color_props(cell)
         if p['rgb']:
             if str(p['rgb']).upper().endswith('B7DEE8') or str(p['rgb']).upper().endswith('FFB7DEE8'):

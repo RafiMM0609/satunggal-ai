@@ -264,13 +264,8 @@ async def _handle_pending_edit(
         await context.bot.delete_message(
             chat_id=progress_msg.chat_id, message_id=progress_msg.message_id
         )
-    except Exception:  # noqa: BLE001
-        pass
-
-    if task is None or task.status.value == "failed":
-        error_msg = (task.result if task else None) or "❌ Gagal mengedit dokumen. Coba lagi."
-        await _safe_reply(message, error_msg)
-        return
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not delete doc-edit progress message: %s", exc)
 
     reply = task.result or "✅ Edit tambahan berhasil diterapkan."
     await _safe_reply(message, reply)
