@@ -216,7 +216,7 @@ def _get_pipeline():
 
     # ── Phase 3 (Hierarchical Manager): ManagerAgent reviews every agent output
     from src.agents.manager.agent import ManagerAgent  # noqa: PLC0415
-    _manager_agent = ManagerAgent(llm=_llm)
+    _manager_agent = ManagerAgent(llm=_llm, agents=_agents)
 
     logger.info(
         "Pipeline initialised: %d agents, %d tools registered.",
