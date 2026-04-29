@@ -466,7 +466,20 @@ class GatekeeperLLMClient:
         wib = timezone(timedelta(hours=7))
         now_str = datetime.now(tz=wib).strftime("%A, %d %B %Y %H:%M WIB")
 
-        system_content_base = _build_system_prompt() + f"\n\nWaktu saat ini: {now_str}"
+        current_time_block = (
+            "\n\n"
+            "════════════════════════════════════════════════════════\n"
+            "CURRENT TIME — AUTHORITATIVE (diambil dari datetime.now Python server, BUKAN dari training data LLM)\n"
+            f"  Waktu sekarang : {now_str}\n"
+            "PENTING: Gunakan waktu di atas sebagai satu-satunya referensi hari, tanggal, bulan, dan tahun yang AKURAT.\n"
+            "Jangan pernah mengasumsikan atau menebak tanggal/tahun berdasarkan training cutoff model.\n"
+            "════════════════════════════════════════════════════════"
+        )
+        logger.debug(
+            "GatekeeperLLMClient.classify_intent → current_time=%s (from datetime.now, WIB UTC+7)",
+            now_str,
+        )
+        system_content_base = _build_system_prompt() + current_time_block
 
         # Inject recent conversation history into system prompt so the LLM can
         # correctly classify follow-up commands (e.g. "berikan screenshot" after
