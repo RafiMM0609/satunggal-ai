@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -81,7 +82,7 @@ ATURAN KRITIS:
 - Saat REVISE: pertahankan gaya bahasa asli (formal/santai/slang/Gen Z) persis.
 - Gunakan VALIDATE hanya untuk klaim sangat spesifik & berisiko. Default ke OK jika ragu.
 - Gunakan REVISE hanya jika ada masalah JELAS. Default ke OK jika ragu.
-
+{current_time_note}
 ---
 Pertanyaan pengguna:
 {user_input}
@@ -111,6 +112,61 @@ _VALIDATE_ELIGIBLE_AGENTS: frozenset[str] = frozenset({
     "technical_writer",
     "sysinfo_agent",
 })
+
+# ── Time-validation helpers ───────────────────────────────────────────────────
+#
+# Triggered when the user asks for "latest", "updated", or "this year" data
+# WITHOUT pinning a specific historical date.
+
+# Keywords that signal the user wants current / up-to-date information.
+_LATEST_DATA_RE = re.compile(
+    r"""
+    # ── Indonesian keywords ──────────────────────────────────────────────────
+    terbaru | terkini | terupdate | ter-?update |
+    tahun\s+ini | bulan\s+ini | hari\s+ini |
+    data\s+baru | berita\s+baru | info\s+baru |
+    update\s+terbaru | kabar\s+terbaru | kondisi\s+terkini |
+    saat\s+ini | sekarang | kini |
+    terbaru\s+\d{4} |          # e.g. "terbaru 2026"
+    \d{4}\s+terbaru |          # e.g. "2026 terbaru"
+
+    # ── English keywords ─────────────────────────────────────────────────────
+    latest | most\s+recent | up[\s\-]?to[\s\-]?date |
+    current(?:ly)? | right\s+now | as\s+of\s+today |
+    this\s+year | this\s+month | today |
+    newest | recent\s+news | recent\s+data | recent\s+update
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Matches 4-digit calendar years (2000-2099).
+_YEAR_RE = re.compile(r"\b(20\d{2})\b")
+
+# ── Stale-year threshold ──────────────────────────────────────────────────────
+# If the output presents a year that is >= _STALE_YEAR_DELTA years behind the
+# current year as if it were the latest/current year, flag it for validation.
+_STALE_YEAR_DELTA: int = 1
+
+
+def _requests_latest_data(text: str) -> bool:
+    """Return True if *text* signals the user wants current / up-to-date data."""
+    return bool(_LATEST_DATA_RE.search(text))
+
+
+def _has_stale_year(text: str, current_year: int) -> bool:
+    """Return True if *text* references a year that is clearly outdated.
+
+    We look for the most recent year mentioned in the output.  If that year is
+    more than *_STALE_YEAR_DELTA* years behind *current_year* we treat it as
+    potentially stale (the agent may have used training-data figures instead of
+    live data).
+    """
+    years = [int(m) for m in _YEAR_RE.findall(text)]
+    if not years:
+        # No year mentioned – cannot determine staleness; assume OK.
+        return False
+    latest_mentioned = max(years)
+    return (current_year - latest_mentioned) > _STALE_YEAR_DELTA
 
 
 class ManagerAgent:
@@ -237,11 +293,14 @@ class ManagerAgent:
 
         Alur:
           1. Skip jika output kosong atau agent ada di daftar skip.
-          2. Kirim ke LLM manager untuk mendapat verdict JSON.
-          3. OK       → kembalikan asli.
+          2. Deteksi apakah user meminta data terbaru/terkini.
+             Jika ya, inject waktu sekarang ke prompt agar LLM sadar konteks waktu.
+          3. Kirim ke LLM manager untuk mendapat verdict JSON.
+          4. OK       → cek stale-year (jika user minta data terbaru); jika terdeteksi
+                         tahun basi → override ke VALIDATE untuk verifikasi waktu.
              REVISE   → kembalikan field "output" dari LLM.
              VALIDATE → delegasikan ke researcher, gabungkan fact-check.
-          4. Jika parsing gagal atau LLM error → kembalikan asli (fail-safe).
+          5. Jika parsing gagal atau LLM error → kembalikan asli (fail-safe).
 
         Args:
             user_input:   Teks asli dari pengguna.
@@ -262,10 +321,36 @@ class ManagerAgent:
             )
             return agent_output
 
+        # ── Time-awareness setup ──────────────────────────────────────────────
+        wib          = timezone(timedelta(hours=7))
+        now          = datetime.now(tz=wib)
+        current_year = now.year
+        now_str      = now.strftime("%A, %d %B %Y %H:%M WIB")
+
+        wants_latest = _requests_latest_data(user_input)
+
+        if wants_latest:
+            current_time_note = (
+                "\n"
+                "⚠️  VALIDASI WAKTU AKTIF — pengguna meminta data terbaru/terkini.\n"
+                f"   Waktu server saat ini: {now_str}\n"
+                f"   Tahun yang benar     : {current_year}\n"
+                "   Jika jawaban agent menyebut tahun < " + str(current_year - _STALE_YEAR_DELTA) + " sebagai 'terbaru' atau 'saat ini',\n"
+                "   atau menyebut data yang jelas sudah basi, gunakan verdict VALIDATE\n"
+                "   dan isi validation_query dengan query untuk mendapatkan data terkini.\n"
+            )
+            logger.debug(
+                "ManagerAgent: time-validation active current_year=%d agent=%s session=%s",
+                current_year, agent_name, session_id,
+            )
+        else:
+            current_time_note = ""
+
         system = _SYSTEM_PROMPT.format(
-            user_input   = user_input[:MAX_INPUT_CHARS],
-            agent_name   = agent_name,
-            agent_output = agent_output[:MAX_OUTPUT_CHARS],
+            user_input        = user_input[:MAX_INPUT_CHARS],
+            agent_name        = agent_name,
+            agent_output      = agent_output[:MAX_OUTPUT_CHARS],
+            current_time_note = current_time_note,
         )
         messages = [
             {"role": "system", "content": system},
@@ -288,6 +373,32 @@ class ManagerAgent:
 
         verdict_data = self._parse_verdict(raw)
         verdict      = (verdict_data.get("verdict") or "OK").strip().upper()
+
+        # ── Stale-year override (post-LLM check) ─────────────────────────────
+        # Even if the LLM said OK, force VALIDATE when:
+        #   • user explicitly asked for latest data, AND
+        #   • the output's most recent year mention is too far in the past, AND
+        #   • the agent is eligible for VALIDATE (can delegate to researcher).
+        if (
+            wants_latest
+            and verdict in {"OK", "REVISE"}
+            and agent_name in _VALIDATE_ELIGIBLE_AGENTS
+            and _has_stale_year(agent_output, current_year)
+        ):
+            stale_query = (
+                f"{user_input[:200].strip()} "
+                f"(data terkini tahun {current_year})"
+            )
+            logger.info(
+                "ManagerAgent: stale-year override → VALIDATE "
+                "agent=%s current_year=%d session=%s query=%r",
+                agent_name, current_year, session_id, stale_query[:100],
+            )
+            return await self._delegate_to_researcher(
+                validation_query=stale_query,
+                original_output=agent_output,
+                session_id=session_id,
+            )
 
         if verdict == "OK" or not verdict_data:
             logger.debug(
