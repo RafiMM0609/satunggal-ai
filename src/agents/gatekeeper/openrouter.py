@@ -72,7 +72,7 @@ _INTENT_DESCRIPTIONS: dict[str, str] = {
     "pdf_summarization":      "- pdf_summarization  (user wants to summarize, ask questions about, or understand the content of a PDF document)",
     "doc_audit":              "- doc_audit          (user wants to ask questions about, explore, or get details about a .docx document that was previously uploaded and analyzed in this session)",
     "diagram_from_analysis":  '- diagram_from_analysis (user wants to create a flow diagram or visual summary from the analysis and Q&A done in the current active document session \u2014 keywords: "buat diagram", "flow diagram", "gambarkan alur", "buat flowchart", "visualisasikan", "buat diagram dari diskusi", "generate diagram", "buat diagram dari analisa", "diagram dari hasil qna", "create diagram", "draw diagram", "diagram from analysis")',
-    "reminder":               "- reminder           (user wants to set a timed reminder/alarm, list their reminders, or cancel/delete a reminder)",
+    "reminder":               "- reminder           (user wants to set a timed reminder/alarm, list their reminders, or cancel/delete a reminder; also triggered by schedule-checking phrases like \"cek jadwal\", \"lihat jadwal\", \"info jadwal hari ini\", \"jadwal saya\", \"check my schedule\", \"show my schedule\", \"my agenda\")",
     "unknown":                "- unknown",
 }
 
@@ -318,11 +318,15 @@ _INTENT_RULES: list[tuple[str, "frozenset[str] | None"]] = [
         '22. Use "reminder" when the user wants to set, view, or cancel a timed reminder/alarm:\n'
         '    - Indonesian: ingatkan saya, set reminder, buat pengingat, jadwalkan pengingat, daftar reminder,\n'
         '      lihat reminder, tampilkan reminder, hapus reminder, batalkan reminder, cancel reminder,\n'
-        '      remind me, alarm, pengingat, set alarm, atur pengingat\n'
+        '      remind me, alarm, pengingat, set alarm, atur pengingat,\n'
+        '      lihat jadwal, cek jadwal, info jadwal, jadwal hari ini, jadwal saya, tampilkan jadwal,\n'
+        '      agenda hari ini, pengingat saya, apa saja jadwal saya\n'
         '    - English: remind me, set a reminder, create reminder, schedule reminder, list reminders,\n'
-        '      show reminders, delete reminder, cancel reminder, set alarm\n'
+        '      show reminders, delete reminder, cancel reminder, set alarm,\n'
+        '      check my schedule, show my schedule, what is my schedule, my agenda, my reminders today\n'
         '    - Examples: "ingatkan saya untuk checkin jam 07:59", "remind me to take medicine tomorrow at 8am",\n'
-        '      "lihat daftar reminderku", "hapus reminder #3"',
+        '      "lihat daftar reminderku", "hapus reminder #3", "cek jadwal saya hari ini",\n'
+        '      "check my schedule", "info jadwal hari ini"',
         frozenset({"reminder"}),
     ),
     (
