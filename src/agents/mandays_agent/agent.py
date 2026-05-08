@@ -24,6 +24,10 @@ from src.memory.state import AgentTask
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
+    # ── Critical output constraint (must appear first for reasoning models) ──
+    "OUTPUT FORMAT: Respond with ONLY a single valid JSON object. "
+    "No reasoning text, no markdown fences (```), no explanation before or after the JSON.\n\n"
+    # ── Role & task description ───────────────────────────────────────────
     "Kamu adalah seorang ahli manajemen proyek yang berspesialisasi dalam estimasi effort dan perencanaan mandays.\n"
     "Pengguna akan meminta estimasi mandays, alokasi sumber daya, atau rencana effort untuk suatu proyek atau fitur.\n\n"
     "TUGAS KAMU:\n"
@@ -62,6 +66,8 @@ _SYSTEM_PROMPT = (
     "5. Bagi pekerjaan ke dalam sprint 2-minggu yang realistis.\n"
     "6. Tanggal mulai default: 10 Maret 2026.\n"
     "7. HANYA kembalikan JSON, tanpa teks lain.\n"
+    # ── Repeated constraint at end as anchor for instruction-following ────
+    "\nINGAT: Balas dengan JSON object saja. Tidak ada teks lain sama sekali.\n"
 )
 
 
@@ -80,7 +86,11 @@ class MandaysAgent(BaseAgent):
                 {"role": "user",   "content": task.user_input},
             ]
 
-            reply = await self._llm.chat(messages, max_tokens=4096)
+            reply = await self._llm.chat(
+                messages,
+                temperature=0,    # deterministic — reduces format drift
+                json_mode=True,   # enforce JSON response_format on OpenRouter
+            )
 
             if not reply:
                 task.mark_done("Maaf, LLM tidak memberikan respons. Coba lagi.")
@@ -91,6 +101,17 @@ class MandaysAgent(BaseAgent):
                 logger.warning("MandaysAgent: no valid JSON in reply: %r", reply[:300])
                 task.mark_done(
                     "Maaf, gagal mem-parse rencana mandays dari LLM. Coba ulangi permintaan."
+                )
+                return task
+
+            missing = _validate_schema(data)
+            if missing:
+                logger.warning(
+                    "MandaysAgent: JSON schema incomplete, missing keys=%s session=%s",
+                    missing, task.session_id,
+                )
+                task.mark_done(
+                    "Maaf, struktur data mandays dari LLM tidak lengkap. Coba ulangi permintaan."
                 )
                 return task
 
@@ -123,16 +144,33 @@ class MandaysAgent(BaseAgent):
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _extract_json(text: str) -> dict | None:
-    """Extract and parse the first JSON object from the LLM reply."""
+    """Extract and parse the first JSON object from the LLM reply.
+
+    Strategy 1: pull content from a ```json ... ``` code-fence.
+    Strategy 2: slice from the first '{' to the last '}'.
+    """
+    # Strategy 1 – markdown code-fence
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            logger.debug("_extract_json: code-fence parse failed: %s", exc)
+
+    # Strategy 2 – raw brace extraction
     try:
         start = text.index("{")
         end   = text.rindex("}") + 1
         return json.loads(text[start:end])
-    except (ValueError, json.JSONDecodeError):
-        return None
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.debug("_extract_json: raw-brace parse failed: %s", exc)
+
+    return None
+
+
+_REQUIRED_KEYS = {"project_info", "work_breakdown_structure", "grand_total"}
+
+
+def _validate_schema(data: dict) -> list[str]:
+    """Return a list of missing top-level required keys, or empty list if valid."""
+    return [k for k in _REQUIRED_KEYS if k not in data]

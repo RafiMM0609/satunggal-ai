@@ -130,14 +130,20 @@ class LLMClient:
                 logger.debug("LLMClient[openrouter]: could not extract finish_reason: %s", exc)
 
             if finish_reason == "length":
+                # Token budget exhausted while the model was still reasoning.
+                # The reasoning field contains incomplete internal monologue — NOT
+                # a usable output.  Return empty so callers can surface the error
+                # cleanly instead of trying to parse partial thoughts.
                 logger.warning(
-                    "LLM[openrouter] hit max_tokens limit (finish_reason=length) before producing content. "
-                    "Consider increasing OPENROUTER_MAX_TOKENS for reasoning models. "
-                    "Attempting fallback to reasoning field."
+                    "LLM[openrouter] hit max_tokens limit (finish_reason=length). "
+                    "Content is null and reasoning is incomplete — not falling back. "
+                    "Increase OPENROUTER_MAX_TOKENS or switch to a non-reasoning model."
                 )
-            else:
-                logger.warning("LLM[openrouter] returned null content: %r", data)
+                return ""
 
+            # For other null-content cases, the reasoning field may legitimately
+            # hold the final answer (some reasoning models route output there).
+            logger.warning("LLM[openrouter] returned null content (finish_reason=%s): %r", finish_reason, data)
             reasoning = message.get("reasoning") or message.get("reasoning_content")
             if reasoning and isinstance(reasoning, str) and reasoning.strip():
                 logger.info("Falling back to reasoning field as response content.")
