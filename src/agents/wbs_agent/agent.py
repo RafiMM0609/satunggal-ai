@@ -96,7 +96,7 @@ class WBSAgent(BaseAgent):
                 {"role": "user",   "content": task.user_input},
             ]
 
-            reply = await self._llm.chat(messages, max_tokens=4096)
+            reply = await self._llm.chat(messages)
 
             if not reply:
                 task.mark_done("Maaf, LLM tidak memberikan respons. Coba lagi.")
