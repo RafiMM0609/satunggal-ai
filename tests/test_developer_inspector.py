@@ -858,3 +858,127 @@ class TestCodeSearchGoProto:
         index = build_ast_index(tmp_path)
         assert "user.proto" in index, "user.proto must be indexed"
         assert "User" in index["user.proto"]
+
+
+# ── Hermes ReAct Loop Tests ──────────────────────────────────────────────────
+
+class TestHermesLoop:
+    @pytest.mark.asyncio
+    async def test_hermes_list_dir(self, tmp_path):
+        agent = _make_agent()
+        
+        # Setup files/dirs
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.py").write_text("print('hello')")
+        (tmp_path / "node_modules").mkdir() # should be skipped
+        
+        # Test normal listing
+        res = await agent._hermes_list_dir(tmp_path, "src")
+        assert "📄 src/app.py" in res
+        
+        # Test nonexistent dir
+        res2 = await agent._hermes_list_dir(tmp_path, "nonexistent")
+        assert "tidak ditemukan" in res2
+        
+        # Test directory traversal prevention
+        res3 = await agent._hermes_list_dir(tmp_path, "../outside")
+        assert "di luar repositori" in res3
+
+    @pytest.mark.asyncio
+    async def test_hermes_view_file(self, tmp_path):
+        agent = _make_agent()
+        f = tmp_path / "app.py"
+        f.write_text("line1\nline2\nline3\nline4\nline5")
+        
+        # View whole file
+        res = await agent._hermes_view_file(tmp_path, "app.py")
+        assert "line1" in res
+        assert "line5" in res
+        
+        # View line range
+        res_range = await agent._hermes_view_file(tmp_path, "app.py", 2, 4)
+        assert "line1" not in res_range
+        assert "2: line2" in res_range
+        assert "3: line3" in res_range
+        assert "4: line4" in res_range
+        assert "line5" not in res_range
+
+        # Out of bounds
+        res_err = await agent._hermes_view_file(tmp_path, "app.py", 10, 12)
+        assert "melebihi total baris" in res_err
+
+        # Traversal prevention
+        res_trav = await agent._hermes_view_file(tmp_path, "../outside.py")
+        assert "di luar repositori" in res_trav
+
+    @pytest.mark.asyncio
+    async def test_hermes_grep(self, tmp_path):
+        agent = _make_agent()
+        agent._run_cmd = AsyncMock(return_value="app.py:1:print('hello')")
+        
+        res = await agent._hermes_grep(tmp_path, "hello")
+        assert "print('hello')" in res
+
+    @pytest.mark.asyncio
+    async def test_hermes_git_log_and_diff(self, tmp_path):
+        agent = _make_agent()
+        agent._run_cmd = AsyncMock(return_value="commit1\ncommit2")
+        
+        # git_log
+        with patch("pathlib.Path.exists", return_value=True): # mock .git folder existence
+            res_log = await agent._hermes_git_log(tmp_path, 2)
+            assert "commit1" in res_log
+            
+            # git_diff
+            res_diff = await agent._hermes_git_diff(tmp_path, "HEAD~1 HEAD")
+            assert "commit1" in res_diff
+
+    @pytest.mark.asyncio
+    async def test_hermes_search_symbols(self, tmp_path):
+        agent = _make_agent()
+        # Mock RAG/AST code search
+        symbol_index = {"src/app.py": ["hello", "main"]}
+        ranked_files = ["src/app.py"]
+        
+        with (
+            patch("src.tools.code_search.build_ast_index", return_value=symbol_index),
+            patch("src.tools.code_search.rank_files_by_relevance", return_value=ranked_files),
+        ):
+            res = await agent._hermes_search_symbols(tmp_path, "hello")
+            assert "src/app.py" in res
+            assert "hello" in res
+
+    @pytest.mark.asyncio
+    async def test_run_hermes_loop_react_flow(self, tmp_path):
+        agent = _make_agent()
+        
+        # Simulate ReAct flow:
+        # Step 1: LLM decides to list_dir
+        # Step 2: LLM decides to view a file
+        # Step 3: LLM decides to answer
+        chat_responses = [
+            json.dumps({"thought": "I will list the directory.", "action": "list_dir", "path": "."}),
+            json.dumps({"thought": "I will view main.py.", "action": "view_file", "file_path": "main.py"}),
+            json.dumps({"thought": "I have enough info.", "action": "answer", "content": "## 📋 LAPORAN INSPEKSI REPOSITORI\nAll is fine."}),
+            "Verified report here." # critic pass response
+        ]
+        
+        agent._llm.chat = AsyncMock(side_effect=chat_responses)
+        
+        # Mock internal file/dir helpers so the ReAct loop runs smoothly
+        agent._hermes_list_dir = AsyncMock(return_value="📄 main.py")
+        agent._hermes_view_file = AsyncMock(return_value="1: def main(): pass")
+        agent._verify_report = AsyncMock(return_value="## Verified Report\nAll is fine.")
+        
+        report = await agent._run_hermes_loop(
+            query="Find startup crash root cause",
+            session_id="test-hermes",
+            repo_path=tmp_path,
+            max_steps=5,
+            keywords=["crash"]
+        )
+        
+        assert report == "## Verified Report\nAll is fine."
+        # Ensure LLM chat was called exactly 3 times in ReAct loop.
+        assert agent._llm.chat.call_count == 3
+        agent._verify_report.assert_called_once()

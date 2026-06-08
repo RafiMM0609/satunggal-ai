@@ -223,6 +223,98 @@ _DATA_NEEDED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches <think>…</think> or <thinking>…</thinking> blocks produced by reasoning
+# models (e.g. DeepSeek R1). Must be stripped before parsing structured output.
+_THINK_TAG_RE = re.compile(
+    r"<think(?:ing)?>.*?</think(?:ing)?>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+_HERMES_INSPECTOR_DECISION_PROMPT = """\
+Kamu adalah **Inspektor Kode Senior Mandiri (Hermes Inspector Agent)** yang bertugas melakukan analisis mendalam dan mendiagnosis masalah di dalam repositori kode secara dinamis.
+
+Tugas kamu adalah menginspeksi repositori, melacak dan membaca file secara terarah, mencari kata kunci, memeriksa riwayat git, dan menganalisis kode untuk menemukan akar masalah (root cause) tanpa membuat perubahan pada repositori (READ-ONLY).
+
+Setiap langkah, kamu harus menganalisis informasi yang sudah didapatkan, menentukan apakah bukti sudah cukup untuk diagnosis, dan jika belum, putuskan tindakan berikutnya.
+
+Alat yang tersedia:
+1. `list_dir`: Melihat isi direktori repositori.
+   Parameter: `path` (string, path relatif terhadap root repositori, default ".")
+2. `view_file`: Membaca sebagian atau seluruh isi file dengan nomor baris.
+   Parameter: `file_path` (string, path relatif terhadap root), `start_line` (integer, opsional), `end_line` (integer, opsional)
+3. `grep`: Mencari kata kunci/pola string dalam file-file di repositori (case-insensitive).
+   Parameter: `pattern` (string)
+4. `git_log`: Melihat log commit terbaru untuk memahami riwayat perubahan.
+   Parameter: `limit` (integer, opsional, default 10)
+5. `git_diff`: Melihat statistik dan perubahan terakhir di git HEAD~1 HEAD atau range tertentu.
+   Parameter: `range` (string, opsional, default "HEAD~1 HEAD")
+6. `search_symbols`: Melakukan pencarian simbol/RAG untuk menemukan file-file yang paling relevan dengan deskripsi masalah.
+   Parameter: `query` (string)
+7. `answer`: Memberikan laporan inspeksi akhir yang komprehensif, terstruktur, dan akurat (menyajikan analisis akar masalah dan rekomendasi).
+   Parameter: `content` (string, laporan lengkap dalam format markdown terstruktur)
+
+Aturan Laporan Inspeksi Akhir (`content` pada tindakan `answer`):
+Laporan akhir harus mengikuti format berikut secara ketat:
+
+## 📋 LAPORAN INSPEKSI REPOSITORI
+
+### 1. Ringkasan Eksekutif
+Jelaskan secara singkat apa yang ditemukan (2-4 kalimat). Nyatakan secara jelas apa yang SUDAH DIVERIFIKASI vs yang MASIH DUGAAN.
+
+### 2. Struktur Proyek
+Deskripsikan arsitektur dan organisasi kode berdasarkan penelusuran struktur direktori.
+
+### 3. 🔍 Temuan Masalah
+Daftar semua masalah teridentifikasi dengan tingkat keparahan:
+- 🔴 **KRITIS**: Masalah yang menyebabkan sistem tidak berfungsi.
+- 🟡 **SEDANG**: Degradasi performa atau fungsionalitas.
+- 🟢 **RINGAN**: Masalah kode yang tidak urgent.
+
+Untuk setiap temuan masalah, sertakan wajib:
+  - **Lokasi**: Nama file dan nomor baris (exact, bukan perkiraan).
+  - **Bukti** (WAJIB): Cuplikan kode/log yang dikutip PERSIS dari evidence.
+  - **Deskripsi**: Apa yang salah dan mengapa ini masalah.
+  - **Kepercayaan**: 🟢 CONFIRMED (bukti kuat, dikutip langsung dari kode/log) / 🟡 LIKELY (indikasi kuat tapi perlu verifikasi tambahan) / 🔴 UNVERIFIED (dugaan tanpa bukti langsung).
+
+### 4. 🎯 Analisis Akar Masalah (Root Cause)
+Jelaskan mengapa masalah ini terjadi secara teknis dan mendalam, dengan merujuk pada bukti spesifik dari kode.
+
+### 5. 💡 Rekomendasi Perbaikan
+Langkah perbaikan spesifik dan actionable, diurutkan berdasarkan prioritas.
+- Sertakan nama file dan fungsi yang perlu diubah.
+- Berikan pseudocode atau contoh pattern yang harus diterapkan developer.
+
+### 6. ⚠️ Risiko Jika Tidak Diperbaiki
+Dampak potensial jika masalah dibiarkan.
+
+### 7. 📊 Ringkasan Kepercayaan
+| Temuan | Status | Dasar Bukti |
+|--------|--------|-------------|
+(Tabel semua temuan dengan status CONFIRMED/LIKELY/UNVERIFIED)
+
+Format Output Wajib:
+Kamu harus membalas dalam format JSON yang valid. Jangan sertakan teks lain di luar JSON tersebut.
+Struktur JSON:
+{
+  "thought": "Pemikiranmu tentang apa yang sudah ditemukan, file/direktori apa yang perlu diperiksa berikutnya, dan apa rencana langkah selanjutnya.",
+  "action": "Nama tindakan yang dipilih ('list_dir', 'view_file', 'grep', 'git_log', 'git_diff', 'search_symbols', atau 'answer').",
+  "path": "Path relatif untuk list_dir (hanya diisi jika action adalah 'list_dir').",
+  "file_path": "Path relatif file untuk view_file (hanya diisi jika action adalah 'view_file').",
+  "start_line": 1,
+  "end_line": 100,
+  "pattern": "Pola pencarian untuk grep (hanya diisi jika action adalah 'grep').",
+  "limit": 10,
+  "range": "HEAD~1 HEAD",
+  "query": "Query pencarian untuk search_symbols (hanya diisi jika action adalah 'search_symbols').",
+  "content": "Laporan akhir lengkap dalam markdown (hanya diisi jika action adalah 'answer')."
+}
+
+PENTING:
+- DILARANG HALUSINASI. Setiap temuan harus didasarkan pada file yang benar-benar kamu baca atau log yang kamu lihat.
+- Gunakan tindakan `view_file` untuk membaca file mencurigakan sebelum menyimpulkan akar masalah.
+- Batasan langkah terhitung. Jika ini adalah langkah terakhir, kamu WAJIB menggunakan tindakan 'answer'.
+"""
+
 # Q/A mode LLM prompt
 # (Q/A prompt has moved to DeveloperQnAAgent – src/agents/developer_qna/agent.py)
 
@@ -262,12 +354,395 @@ class DeveloperInspectorAgent(RepoAgentBase):
 
     name = "developer_inspector"
 
+    _MAX_HERMES_STEPS     = 8    # max iterations for main inspection loop
+    _MAX_DELEGATION_STEPS = 4
+
     def __init__(
         self,
         llm: LLMClient | None = None,
         history=None,
     ) -> None:
         super().__init__(llm=llm, history=history)
+
+    # ── Hermes Inspection Tools ───────────────────────────────────────────────
+
+    async def _hermes_list_dir(self, repo_path: Path, sub_path: str = ".") -> str:
+        """List contents of a directory inside the repository (read-only)."""
+        skip_dirs = {
+            ".git", "node_modules", "__pycache__", ".venv", "venv",
+            "env", "dist", "build", ".next", ".nuxt", "coverage",
+        }
+        try:
+            if not sub_path:
+                sub_path = "."
+            clean_sub = sub_path.strip()
+            if clean_sub.startswith("./"):
+                clean_sub = clean_sub[2:]
+            elif clean_sub.startswith("/"):
+                clean_sub = clean_sub[1:]
+                
+            target_path = (repo_path / clean_sub).resolve()
+            
+            # Prevent directory traversal
+            if not target_path.is_relative_to(repo_path) and target_path != repo_path:
+                return f"Error: Path '{sub_path}' berada di luar repositori."
+            
+            if not target_path.exists():
+                return f"Error: Path '{sub_path}' tidak ditemukan."
+            
+            items = []
+            for item in target_path.iterdir():
+                if item.name in skip_dirs:
+                    continue
+                rel = item.relative_to(repo_path)
+                if item.is_dir():
+                    items.append(f"📁 {rel}/")
+                else:
+                    items.append(f"📄 {rel}")
+            
+            if not items:
+                return f"Direktori '{sub_path}' kosong."
+            
+            sorted_items = sorted(items)
+            res = "\n".join(sorted_items[:100])
+            if len(sorted_items) > 100:
+                res += "\n... [dan masih banyak file lainnya]"
+            return res
+        except Exception as exc:
+            return f"Error saat membaca direktori: {exc}"
+
+    async def _hermes_view_file(
+        self,
+        repo_path: Path,
+        file_path: str,
+        start_line: int | None = None,
+        end_line: int | None = None
+    ) -> str:
+        """Read lines of a file in the repository (read-only)."""
+        try:
+            clean_path = file_path.strip()
+            if clean_path.startswith("./"):
+                clean_path = clean_path[2:]
+            elif clean_path.startswith("/"):
+                clean_path = clean_path[1:]
+                
+            target_path = (repo_path / clean_path).resolve()
+            if not target_path.is_relative_to(repo_path) and target_path != repo_path:
+                return f"Error: File '{file_path}' berada di luar repositori."
+                
+            if not target_path.exists() or not target_path.is_file():
+                return f"Error: File '{file_path}' tidak ditemukan."
+                
+            lines = target_path.read_text(errors="replace").splitlines()
+            total_lines = len(lines)
+            
+            s = max(1, start_line or 1)
+            e = min(total_lines, end_line or total_lines)
+            
+            if s > total_lines:
+                return f"Error: start_line {s} melebihi total baris {total_lines}."
+            if s > e:
+                return f"Error: start_line {s} lebih besar dari end_line {e}."
+                
+            formatted = []
+            for idx in range(s - 1, e):
+                formatted.append(f"{idx + 1}: {lines[idx]}")
+                
+            summary = f"[Menampilkan baris {s}-{e} dari {total_lines} total baris di '{file_path}']\n"
+            return summary + "\n".join(formatted)
+        except Exception as exc:
+            return f"Error saat membaca file: {exc}"
+
+    async def _hermes_grep(self, repo_path: Path, pattern: str) -> str:
+        """Search files for pattern using git grep or fallback grep (read-only)."""
+        if not pattern:
+            return "Error: pattern tidak boleh kosong."
+        try:
+            is_git = (repo_path / ".git").exists()
+            if is_git:
+                escaped = re.escape(pattern)
+                out = await self._run_cmd(
+                    f"git grep -n -i -I -E {escaped} 2>/dev/null | head -{MAX_GREP_LINES}",
+                    cwd=repo_path,
+                )
+                if out.strip():
+                    return out.strip()
+            
+            escaped_pat = pattern.replace("'", "'\\''")
+            out = await self._run_cmd(
+                f"grep -rn -i -I -E '{escaped_pat}' "
+                f"--include='*.py' --include='*.js' --include='*.ts' "
+                f"--include='*.go' --include='*.java' --include='*.rb' "
+                f"--include='*.php' --include='*.cs' --include='*.rs' "
+                f"--include='*.vue' --include='*.tsx' --include='*.jsx' "
+                f"--include='*.json' --include='*.yaml' --include='*.yml' "
+                f"--include='*.toml' --include='*.xml' --include='*.env' "
+                f". 2>/dev/null | head -{MAX_GREP_LINES}",
+                cwd=repo_path,
+            )
+            return out.strip() or f"Tidak ada kecocokan ditemukan untuk pattern: {pattern}"
+        except Exception as exc:
+            return f"Error saat melakukan grep: {exc}"
+
+    async def _hermes_git_log(self, repo_path: Path, limit: int = 10) -> str:
+        """View git commit log (read-only)."""
+        is_git = (repo_path / ".git").exists()
+        if not is_git:
+            return "Bukan repositori git (tidak ada log git)."
+        try:
+            limit = min(max(1, limit), 50)
+            out = await self._run_cmd(f"git log --oneline -n {limit}", cwd=repo_path)
+            return out.strip() or "(no git log)"
+        except Exception as exc:
+            return f"Error saat membaca git log: {exc}"
+
+    async def _hermes_git_diff(self, repo_path: Path, diff_range: str = "HEAD~1 HEAD") -> str:
+        """View git diff (read-only)."""
+        is_git = (repo_path / ".git").exists()
+        if not is_git:
+            return "Bukan repositori git (tidak ada diff git)."
+        try:
+            from src.agents.repo_agent_base import MAX_DIFF_LINES
+            cleaned_range = re.sub(r"[^\w~^@/.-]", "", diff_range)
+            if not cleaned_range:
+                cleaned_range = "HEAD~1 HEAD"
+            out = await self._run_cmd(
+                f"git diff {cleaned_range} --stat 2>/dev/null | head -{MAX_DIFF_LINES}",
+                cwd=repo_path,
+            )
+            if not out.strip():
+                out = await self._run_cmd(
+                    f"git diff --stat 2>/dev/null | head -{MAX_DIFF_LINES}",
+                    cwd=repo_path,
+                )
+            return out.strip() or "(no diff)"
+        except Exception as exc:
+            return f"Error saat membaca git diff: {exc}"
+
+    async def _hermes_search_symbols(self, repo_path: Path, query: str) -> str:
+        """Search symbol/code relevance via AST code_search indexing (read-only)."""
+        if not query:
+            return "Error: query tidak boleh kosong."
+        try:
+            from src.tools.code_search import build_ast_index, rank_files_by_relevance
+            symbol_index = build_ast_index(repo_path)
+            candidates   = list(symbol_index.keys())
+            if not candidates:
+                return "Tidak ada file sumber yang terindeks."
+            ranked = rank_files_by_relevance(candidates, symbol_index, query)
+            if not ranked:
+                return "Tidak ada file relevan yang ditemukan."
+            
+            output = []
+            for rank, rel_path in enumerate(ranked[:10], start=1):
+                symbols = symbol_index.get(rel_path, [])
+                symbols_snippet = ", ".join(symbols[:5])
+                if len(symbols) > 5:
+                    symbols_snippet += "..."
+                output.append(f"{rank}. {rel_path} (simbol: {symbols_snippet})")
+            return "File relevan berdasarkan pencarian:\n" + "\n".join(output)
+        except Exception as exc:
+            return f"Error saat melakukan search_symbols: {exc}"
+
+    async def _run_hermes_loop(
+        self,
+        query: str,
+        session_id: str,
+        repo_path: Path,
+        max_steps: int,
+        keywords: list[str] | None = None,
+    ) -> str:
+        """Run the Hermes ReAct loop to dynamically inspect the repository."""
+        import json
+        
+        system_prompt = _HERMES_INSPECTOR_DECISION_PROMPT
+        initial_user_message = f"Daftar kata kunci awal: {keywords}\n\nPermintaan Analisis: {query}"
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": initial_user_message}
+        ]
+        
+        evidence_cache: dict[str, str] = {}
+        step = 0
+        final_answer = ""
+        
+        while step < max_steps:
+            step += 1
+            logger.info(
+                "DeveloperInspectorAgent Hermes Loop: Step %d/%d for session=%s",
+                step, max_steps, session_id
+            )
+            
+            try:
+                raw_response = await self._llm.chat(
+                    messages,
+                    temperature=INSPECTOR_TEMPERATURE,
+                    top_p=INSPECTOR_TOP_P,
+                    max_tokens=8192,
+                    json_mode=True
+                )
+                
+                cleaned_response = _THINK_TAG_RE.sub("", raw_response).strip()
+                
+                try:
+                    action_data = json.loads(cleaned_response)
+                except Exception as exc:
+                    logger.warning("Failed to parse JSON: %s. Raw: %r", exc, cleaned_response)
+                    action_match = re.search(r'"action"\s*:\s*"([^"]+)"', cleaned_response)
+                    action = action_match.group(1) if action_match else "answer"
+                    
+                    content_match = re.search(r'"content"\s*:\s*"(.*)"', cleaned_response, re.DOTALL)
+                    content = content_match.group(1) if content_match else ""
+                    
+                    action_data = {
+                        "thought": "Failed to parse JSON cleanly.",
+                        "action": action,
+                        "content": content
+                    }
+                
+                thought = action_data.get("thought", "")
+                action = action_data.get("action", "answer")
+                logger.info(
+                    "Inspector Step %d: Thought: %s | Action: %s",
+                    step, thought, action
+                )
+                
+                messages.append({"role": "assistant", "content": raw_response})
+                
+                if action == "answer":
+                    final_answer = action_data.get("content", "")
+                    break
+                    
+                elif action == "list_dir":
+                    sub_path = action_data.get("path", ".") or "."
+                    tool_output = await self._hermes_list_dir(repo_path, sub_path)
+                    evidence_cache[f"List Directory ({sub_path})"] = tool_output
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil list_dir untuk: \"{sub_path}\"]\n\n{tool_output}"
+                    })
+                    
+                elif action == "view_file":
+                    file_path = action_data.get("file_path", "")
+                    if not file_path:
+                        messages.append({
+                            "role": "user",
+                            "content": "Error: parameter 'file_path' tidak boleh kosong untuk tindakan 'view_file'."
+                        })
+                        continue
+                    start_line = action_data.get("start_line")
+                    end_line = action_data.get("end_line")
+                    try:
+                        s_line = int(start_line) if start_line is not None else None
+                        e_line = int(end_line) if end_line is not None else None
+                    except (ValueError, TypeError):
+                        s_line = None
+                        e_line = None
+                        
+                    tool_output = await self._hermes_view_file(repo_path, file_path, s_line, e_line)
+                    evidence_cache[f"View File ({file_path} L{start_line or 1}-{end_line or ''})"] = tool_output
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil view_file untuk: \"{file_path}\"]\n\n{tool_output}"
+                    })
+                    
+                elif action == "grep":
+                    pattern = action_data.get("pattern", "")
+                    if not pattern:
+                        messages.append({
+                            "role": "user",
+                            "content": "Error: parameter 'pattern' tidak boleh kosong untuk tindakan 'grep'."
+                        })
+                        continue
+                    tool_output = await self._hermes_grep(repo_path, pattern)
+                    evidence_cache[f"Grep Pattern ({pattern})"] = tool_output
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil grep untuk: \"{pattern}\"]\n\n{tool_output}"
+                    })
+                    
+                elif action == "git_log":
+                    limit_val = action_data.get("limit", 10)
+                    try:
+                        limit = int(limit_val)
+                    except (ValueError, TypeError):
+                        limit = 10
+                    tool_output = await self._hermes_git_log(repo_path, limit)
+                    evidence_cache[f"Git Log (limit={limit})"] = tool_output
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil git_log untuk limit: {limit}]\n\n{tool_output}"
+                    })
+                    
+                elif action == "git_diff":
+                    diff_range = action_data.get("range", "HEAD~1 HEAD") or "HEAD~1 HEAD"
+                    tool_output = await self._hermes_git_diff(repo_path, diff_range)
+                    evidence_cache[f"Git Diff ({diff_range})"] = tool_output
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil git_diff untuk range: \"{diff_range}\"]\n\n{tool_output}"
+                    })
+                    
+                elif action == "search_symbols":
+                    query_val = action_data.get("query", "")
+                    if not query_val:
+                        messages.append({
+                            "role": "user",
+                            "content": "Error: parameter 'query' tidak boleh kosong untuk tindakan 'search_symbols'."
+                        })
+                        continue
+                    tool_output = await self._hermes_search_symbols(repo_path, query_val)
+                    evidence_cache[f"Search Symbols ({query_val})"] = tool_output
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil search_symbols untuk: \"{query_val}\"]\n\n{tool_output}"
+                    })
+                    
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": f"Error: tindakan '{action}' tidak valid. Silakan pilih 'list_dir', 'view_file', 'grep', 'git_log', 'git_diff', 'search_symbols', atau 'answer'."
+                    })
+                    
+            except Exception as exc:
+                logger.error("Error in DeveloperInspectorAgent Hermes step: %s", exc)
+                messages.append({
+                    "role": "user",
+                    "content": f"Terjadi kesalahan internal: {exc}. Silakan perbaiki tindakan atau berikan jawaban akhir."
+                })
+                if step >= max_steps - 1:
+                    break
+                    
+        if not final_answer:
+            logger.info("DeveloperInspectorAgent: forcing final answer generation")
+            force_prompt = (
+                "Langkah inspeksi maksimum telah tercapai. Kamu harus segera memberikan laporan akhir "
+                "sekarang berdasarkan semua bukti/informasi yang terkumpul. "
+                "Gunakan format JSON yang valid dengan 'action': 'answer' dan 'content': '...'."
+            )
+            messages.append({"role": "user", "content": force_prompt})
+            try:
+                raw_response = await self._llm.chat(
+                    messages,
+                    temperature=INSPECTOR_TEMPERATURE,
+                    top_p=INSPECTOR_TOP_P,
+                    max_tokens=8192,
+                    json_mode=True
+                )
+                cleaned = _THINK_TAG_RE.sub("", raw_response).strip()
+                action_data = json.loads(cleaned)
+                final_answer = action_data.get("content", "")
+            except Exception as exc:
+                logger.error("Failed to generate forced final answer: %s", exc)
+                evidence_text = self._build_evidence_text(evidence_cache)
+                final_answer = await self._run_inspection_llm(query, query, evidence_cache)
+                return final_answer
+                
+        logger.info("DeveloperInspectorAgent: Running Critic Verification on Hermes report")
+        evidence_text = self._build_evidence_text(evidence_cache)
+        verified_report = await self._verify_report(final_answer, evidence_text)
+        return verified_report
 
     # ── Inspection-specific evidence helpers ───────────────────────────────────
 
@@ -661,36 +1136,30 @@ class DeveloperInspectorAgent(RepoAgentBase):
         req:       RepoExtractionRequest,
     ) -> AgentTask:
         """
-        Execute the full inspection using Progressive Deepening (Items 5, 6, 7).
-
-        Replaces the single-shot evidence-gather approach with an iterative
-        investigation that:
-          1. Forms a hypothesis from lightweight evidence (dir_tree + git_log).
-          2. Opens only the files the hypothesis identifies as suspicious.
-          3. Re-runs if the LLM signals [DATA TIDAK CUKUP] (Item 7).
-          4. Enforces a MAX_INVESTIGATION_PHASES budget (Item 6).
+        Execute the full inspection using the Hermes ReAct loop.
         """
         try:
             logger.info(
-                "Inspector: starting progressive inspection at %s (branch=%s)",
+                "Inspector: starting Hermes inspection at %s (branch=%s)",
                 repo_path, req.branch,
             )
             t_start = time.monotonic()
 
-            report = await self._progressive_inspection(
-                user_input=req.problem or task.user_input,
-                problem=req.problem or task.user_input,
+            report = await self._run_hermes_loop(
+                query=req.problem or task.user_input,
+                session_id=task.session_id,
                 repo_path=repo_path,
+                max_steps=self._MAX_HERMES_STEPS,
                 keywords=req.keywords,
             )
 
             t_total = time.monotonic() - t_start
-            logger.info("Inspector: progressive inspection complete in %.2fs", t_total)
+            logger.info("Inspector: Hermes inspection complete in %.2fs", t_total)
 
             branch_header = f"🌿 **Branch:** `{req.branch}`\n\n" if req.branch else ""
             perf_footer = (
                 f"\n\n---\n"
-                f"⏱️ *Inspeksi selesai dalam {t_total:.1f}s (progressive deepening, max {MAX_INVESTIGATION_PHASES} iterasi)*"
+                f"⏱️ *Inspeksi selesai dalam {t_total:.1f}s (Hermes ReAct loop, max {self._MAX_HERMES_STEPS} langkah)*"
             )
             task.mark_done(branch_header + report + perf_footer)
 

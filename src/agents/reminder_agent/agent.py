@@ -1,21 +1,15 @@
 """
 ReminderAgent – set, list, and cancel timed reminders delivered via Telegram.
 
-Capabilities:
-1. Set reminder  – propose a detailed reminder suggestion (with conflict check),
-                   wait for user confirmation, then store in SQLite and schedule
-                   an APScheduler job to send via Telegram.
-2. List reminders – return a formatted list of the user's pending reminders.
-3. Cancel reminder – delete a reminder by its number/id.
-
-Scheduling is done with APScheduler (AsyncIOScheduler).  A single process-wide
-scheduler instance is managed in `src.agents.reminder_agent.scheduler`.
+Using the Hermes ReAct loop pattern, this agent can inspect active reminders,
+detect schedule conflicts, and interact with the user via a natural conversational loop.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import json
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -23,190 +17,73 @@ from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
 from src.memory.history import ConversationHistory
 from src.memory.state import AgentTask
-from src.tools.reminder_store import (
-    get_reminder_store,
-    set_pending_suggestion,
-    get_pending_suggestion,
-    clear_pending_suggestion,
-)
+from src.tools.reminder_store import get_reminder_store
 
 logger = logging.getLogger(__name__)
 
-# ── System prompt for LLM parsing ────────────────────────────────────────────
-
-_PARSE_SYSTEM_PROMPT = """\
-Kamu adalah asisten pengingat yang asik dan chill. Tugas kamu adalah mengekstrak jadwal dari pesan pengguna menjadi daftar pengingat yang seru dan penuh semangat.
-
-Hari dan waktu saat ini (UTC+7 / WIB): {now_wib}
-
-Ekstrak dari pesan pengguna. Pengguna bisa meminta SATU atau BANYAK reminder sekaligus.
-
-Untuk setiap reminder/aksi yang ditemukan, buat satu object dengan field:
-1. "message" – apa yang harus diingatkan (singkat dan jelas)
-2. "remind_at_iso" – kapan harus mengirim reminder, dalam format ISO-8601 UTC
-   - Konversi waktu yang disebutkan dari WIB (UTC+7) ke UTC
-   - Jika user menyebut "07:59", dan hari tidak disebutkan, gunakan hari ini (atau besok jika waktunya sudah lewat)
-   - Jika user menyebut "besok pukul 08:00", gunakan tanggal besok
-   - Jika user menyebut "Senin jam 09:00", hitung tanggal Senin berikutnya
-3. "action" – salah satu dari: "set", "list", "cancel", "clarify"
-   - "set" = user ingin membuat reminder baru dengan detail yang cukup jelas
-   - "list" = user ingin melihat daftar reminder
-   - "cancel" = user ingin membatalkan/menghapus reminder
-   - "clarify" = user meminta reminder tapi TIDAK menyebutkan: (a) apa yang harus diingatkan DAN (b) kapan waktunya — permintaan terlalu samar/tidak lengkap
-4. "cancel_id" – integer id reminder yang akan dihapus (hanya untuk action "cancel"), atau null
-
-Balas HANYA dengan JSON array, tanpa markdown, tanpa penjelasan:
-[
-  {{
-    "action": "set" | "list" | "cancel",
-    "message": "<isi reminder atau null>",
-    "remind_at_iso": "<ISO-8601 UTC datetime atau null>",
-    "cancel_id": <integer atau null>
-  }}
-]
-
-Contoh 1 – satu reminder:
-User: "ingatkan saya untuk checkin pada pukul 07:59"
-→ [{{"action": "set", "message": "checkin", "remind_at_iso": "2025-01-15T00:59:00", "cancel_id": null}}]
-
-Contoh 2 – banyak reminder sekaligus:
-User: "ingatkan saya meeting jam 09:00, makan siang jam 12:00, dan standup jam 16:00"
-→ [
-  {{"action": "set", "message": "meeting", "remind_at_iso": "2025-01-15T02:00:00", "cancel_id": null}},
-  {{"action": "set", "message": "makan siang", "remind_at_iso": "2025-01-15T05:00:00", "cancel_id": null}},
-  {{"action": "set", "message": "standup", "remind_at_iso": "2025-01-15T09:00:00", "cancel_id": null}}
-]
-
-Contoh 3 – lihat daftar:
-User: "lihat daftar reminder saya"
-→ [{{"action": "list", "message": null, "remind_at_iso": null, "cancel_id": null}}]
-
-Contoh 4 – hapus:
-User: "hapus reminder nomor 3"
-→ [{{"action": "cancel", "message": null, "remind_at_iso": null, "cancel_id": 3}}]
-"""
-
-_PARSE_USER_TEMPLATE = "Pesan pengguna: {user_input}"
-
-# ── System prompt for generating a detailed reminder suggestion ───────────────
-
-_SUGGEST_SYSTEM_PROMPT = """\
-Kamu adalah asisten pintar yang membantu membuat reminder yang efektif dan terperinci.
-
-Hari dan waktu saat ini (UTC+7 / WIB): {now_wib}
-
-Reminder aktif pengguna saat ini:
-{existing_reminders}
-
-Berdasarkan permintaan pengguna, buatlah 1 hingga 3 SARAN reminder yang berbeda-beda sehingga pengguna bisa memilih yang paling sesuai.
-Setiap saran harus memiliki variasi yang bermakna — misalnya: waktu berbeda, fokus berbeda, atau tingkat detail yang berbeda.
-
-Untuk setiap saran:
-1. Perjelas judul/isi reminder agar spesifik dan actionable (bukan hanya kata kunci)
-2. Tentukan waktu yang masuk akal — konversi ke UTC untuk remind_at_iso
-3. Tambahkan "notes" berisi tips atau catatan berguna jika relevan, atau null jika tidak perlu
-4. Jika ini event penting (meeting, interview, presentasi, penerbangan, ujian, deadline), sertakan "prep_reminder" sekitar 30 menit sebelumnya; jika tidak relevan, set ke null
-
-Selain itu:
-5. Periksa reminder aktif — tandai di "conflicts" jika waktunya berdekatan (±1 jam dari salah satu saran baru)
-
-Balas HANYA dengan JSON, tanpa markdown, tanpa penjelasan:
-{{
-  "suggestions": [
-    {{
-      "message": "<isi reminder yang jelas dan spesifik>",
-      "remind_at_iso": "<ISO-8601 UTC datetime>",
-      "notes": "<catatan berguna atau null>",
-      "prep_reminder": {{
-        "message": "<isi reminder persiapan atau null>",
-        "remind_at_iso": "<ISO-8601 UTC datetime atau null>"
-      }}
-    }}
-  ],
-  "conflicts": [
-    {{"id": <int>, "message": "<isi reminder>", "remind_at_wib": "<tanggal dan jam WIB>"}}
-  ]
-}}
-
-Contoh untuk permintaan "ingatkan meeting besok":
-{{
-  "suggestions": [
-    {{
-      "message": "Meeting tim — persiapkan agenda dan materi",
-      "remind_at_iso": "2026-04-11T02:00:00",
-      "notes": "Pastikan koneksi internet stabil sebelum meeting",
-      "prep_reminder": {{
-        "message": "Persiapan meeting: cek agenda dan buka aplikasi video call",
-        "remind_at_iso": "2026-04-11T01:30:00"
-      }}
-    }},
-    {{
-      "message": "Meeting tim besok pagi",
-      "remind_at_iso": "2026-04-10T23:00:00",
-      "notes": "Reminder malam hari agar bisa persiapan dari malam",
-      "prep_reminder": null
-    }},
-    {{
-      "message": "Meeting tim — 15 menit sebelum mulai",
-      "remind_at_iso": "2026-04-11T01:45:00",
-      "notes": null,
-      "prep_reminder": null
-    }}
-  ],
-  "conflicts": []
-}}
-"""
-
-# ── System prompt for elaborating a vague reminder request ───────────────────
-
-_ELABORATE_SYSTEM_PROMPT = """\
-Kamu adalah asisten yang membantu membuat detail reminder dari permintaan yang samar.
-Berdasarkan konteks percakapan, buat detail reminder yang masuk akal.
-
-Hari dan waktu saat ini (UTC+7 / WIB): {now_wib}
-
-Tentukan:
-1. "message" – isi reminder yang jelas dan spesifik (singkat, maks 20 kata)
-2. "remind_at_iso" – waktu reminder dalam ISO-8601 UTC (pilih waktu yang masuk akal berdasarkan konteks)
-3. "action" – selalu "set"
-
-Balas HANYA dengan JSON, tanpa markdown, tanpa penjelasan:
-{{
-  "action": "set",
-  "message": "<isi reminder>",
-  "remind_at_iso": "<ISO-8601 UTC datetime>",
-  "cancel_id": null
-}}
-"""
-
-# ── Affirmative / negative patterns ──────────────────────────────────────────
-
-_AFFIRMATIVE_RE = re.compile(
-    r"\b(iya|ya|yes|ok|oke|okee|boleh|silakan|lanjut|benar|betul|tentu|sure|yep|yup|gas|gaskeun|iyaa+|yaa+|setuju|acc|konfirmasi|buat|buatkan)\b",
-    re.IGNORECASE,
+# Matches <think>…</think> or <thinking>…</thinking> blocks produced by reasoning models.
+_THINK_TAG_RE = re.compile(
+    r"<think(?:ing)?>.*?</think(?:ing)?>",
+    flags=re.DOTALL | re.IGNORECASE,
 )
 
-_NEGATIVE_RE = re.compile(
-    r"\b(tidak|nggak|ngga|gak|ga|no|jangan|batal|cancel|batalkan|stop|tidak jadi|nope|ndak|nda)\b",
-    re.IGNORECASE,
-)
+_HERMES_REMINDER_DECISION_PROMPT = """\
+Kamu adalah **Asisten Pengingat Pribadi Mandiri (Hermes Reminder Agent)** yang chill, asik, dan sangat fleksibel.
+Tugas kamu adalah membantu pengguna mengelola pengingat (reminder) mereka secara alami melalui percakapan, layaknya asisten manusia asli.
 
-# Matches "pilih 1", "opsi 2", "option 3", "nomor 1", "no 2", or a bare digit word "1"/"2"/"3"
-_SELECTION_RE = re.compile(
-    r"(?:pilih|opsi|option|nomor|no\.?)\s*([1-9])|\b([1-9])\b",
-    re.IGNORECASE,
-)
+Kamu memiliki akses ke database pengingat aktif pengguna saat ini dan beberapa alat (tools) berikut:
+1. `get_current_time`: Mendapatkan waktu dan hari saat ini (dalam format WIB dan UTC). Gunakan ini sebagai referensi utama untuk menghitung waktu relatif seperti "besok", "lusa", "Senin jam 10 pagi", "minggu depan", dll.
+   Parameter: Tidak ada.
+2. `list_reminders`: Mengembalikan daftar pengingat aktif/belum terkirim milik pengguna ini. Gunakan ini untuk melihat jadwal mereka atau mendeteksi tabrakan waktu.
+   Parameter: Tidak ada.
+3. `add_reminder`: Membuat pengingat baru di waktu tertentu.
+   Parameter:
+     - `message` (string, isi pengingat yang spesifik dan jelas)
+     - `remind_at_iso` (string, format ISO-8601 UTC datetime string)
+4. `cancel_reminder`: Membatalkan/menghapus pengingat aktif berdasarkan ID reminder.
+   Parameter:
+     - `reminder_id` (integer)
+5. `answer`: Memberikan tanggapan akhir kepada pengguna. Gunakan tindakan ini untuk menyapa, bertanya balik, mengonfirmasi, memberikan saran, menjelaskan konflik jadwal, atau membalas secara ramah dan santai (sesuai Contextual Vibe Awareness).
+   Parameter:
+     - `content` (string, pesan yang akan dikirim ke pengguna)
 
-# Matches "semua", "all", "semuanya" — confirm all suggestions
-_ALL_RE = re.compile(r"\b(semua|semuanya|all)\b", re.IGNORECASE)
+Format Output Wajib:
+Kamu harus membalas dalam format JSON yang valid. Jangan sertakan markdown atau penjelasan di luar JSON tersebut.
+Struktur JSON:
+{
+  "thought": "Pemikiranmu tentang apa yang diinginkan user, analisis waktu saat ini, konflik jadwal, atau rencana langkah selanjutnya.",
+  "action": "Nama tindakan yang dipilih ('get_current_time', 'list_reminders', 'add_reminder', 'cancel_reminder', atau 'answer').",
+  "message": "Pesan reminder (hanya diisi jika action adalah 'add_reminder').",
+  "remind_at_iso": "Waktu UTC ISO-8601 (hanya diisi jika action adalah 'add_reminder').",
+  "reminder_id": <integer atau null jika action adalah 'cancel_reminder'>,
+  "content": "Pesan balasan ke user dalam bahasa santai/chill (hanya diisi jika action adalah 'answer')."
+}
 
-_CLARIFICATION_MARKER = "apakah perlu saya bantu detailkan"
+PANDUAN INTERAKSI:
+- **Jangan Kaku:** Jangan langsung membuat reminder jika ada ketidakpastian. Tanyakan dulu atau berikan saran waktu.
+- **Deteksi Konflik:** Jika pengguna meminta reminder di waktu yang berdekatan dengan reminder yang sudah ada (selisih kurang dari 1 jam), beri tahu mereka secara ramah dan tanyakan apakah ingin tetap diset atau disesuaikan.
+- **Konfirmasi Otomatis vs Tanya Balik:**
+  - Jika detailnya sudah sangat jelas (misal: "ingetin meeting besok jam 10 pagi"), buatlah reminder-nya (`add_reminder`), lalu gunakan `answer` untuk mengonfirmasi bahwa sudah berhasil dibuat.
+  - Jika ada yang kurang jelas atau tidak lengkap, tanyakan balik secara asik.
+  - Jika ada konfirmasi (misal: "oke set aja", "cancel yang tadi"), periksa riwayat percakapan untuk menentukan reminder mana yang dimaksud.
+"""
 
 
 class ReminderAgent(BaseAgent):
-    """Manages timed reminders stored in SQLite and delivered via Telegram."""
+    """Manages timed reminders stored in SQLite and scheduled via APScheduler using a Hermes ReAct loop."""
 
     name = "reminder_agent"
+
+    role = "Asisten Pengingat Pribadi (Reminder Assistant)"
+    goal = "Membantu pengguna mengelola, menjadwalkan, dan membatalkan pengingat secara alami, asik, dan fleksibel."
+    backstory = (
+        "Kamu adalah asisten pengingat yang sangat ramah, santai, dan pengertian. "
+        "Kamu berbicara dengan gaya bahasa santai/casual (slang/Gen Z atau gabungan Indonesia-Inggris yang asik). "
+        "Tugas utama kamu adalah memastikan pengguna tidak melewatkan jadwal mereka, "
+        "sembari memastikan jadwal yang dibuat bebas dari bentrokan/konflik."
+    )
+
+    _MAX_HERMES_STEPS = 5
 
     def __init__(
         self,
@@ -217,24 +94,15 @@ class ReminderAgent(BaseAgent):
         self._llm = llm or LLMClient()
         self._store = get_reminder_store()
 
-    # ── Main entry ────────────────────────────────────────────────────────────
-
     async def run(self, task: AgentTask) -> AgentTask:
         try:
-            parsed_list = await self._parse_intent(task.user_input)
-            replies: list[str] = []
-
-            for parsed in parsed_list:
-                action = parsed.get("action", "set")
-                if action == "list":
-                    replies.append(self._handle_list(task.session_id))
-                elif action == "cancel":
-                    cancel_id = parsed.get("cancel_id")
-                    replies.append(self._handle_cancel(task.session_id, cancel_id))
-                else:
-                    replies.append(await self._handle_set(task.session_id, parsed))
-
-            task.mark_done("\n\n".join(replies))
+            history_messages = self._history.get_as_llm_messages(task.session_id)
+            reply = await self._run_hermes_loop(
+                query=task.user_input,
+                session_id=task.session_id,
+                history_messages=history_messages
+            )
+            task.mark_done(reply)
         except Exception as exc:
             logger.exception("ReminderAgent error: %s", exc)
             task.mark_failed(str(exc))
@@ -242,428 +110,198 @@ class ReminderAgent(BaseAgent):
 
         return task
 
-    # ── Clarification helpers ─────────────────────────────────────────────────
-
-    @staticmethod
-    def _clarification_question() -> str:
-        return (
-            "Permintaan reminder Anda kurang lengkap.\n"
-            "Apakah perlu saya bantu detailkan task dan buatkan remindernya?"
-        )
-
-    @staticmethod
-    def _is_affirmative(text: str) -> bool:
-        return bool(_AFFIRMATIVE_RE.search(text.strip()))
-
-    @staticmethod
-    def _is_negative(text: str) -> bool:
-        return bool(_NEGATIVE_RE.search(text.strip()))
-
-    @staticmethod
-    def _parse_selection(text: str, num_suggestions: int) -> list[int] | None:
-        """Parse user input to determine which suggestion(s) to confirm.
-
-        Returns a list of 0-based indices if the user made a selection or said
-        "ya"/"semua".  Returns None if the input is not a recognisable selection.
-
-        Rules:
-        - "ya" / affirmative (single suggestion or "all") → [0] or all indices
-        - "semua" / "all"  → all indices [0..n-1]
-        - "pilih 1" / "1"  → [0]
-        - "pilih 2,3"      → [1, 2]
-        """
-        stripped = text.strip()
-
-        # "semua" / "all" → confirm every suggestion
-        if _ALL_RE.search(stripped):
-            return list(range(num_suggestions))
-
-        # plain affirmative → confirm all (keeps backwards-compat for single suggestion)
-        if _AFFIRMATIVE_RE.search(stripped):
-            return list(range(num_suggestions))
-
-        # numbered selection, e.g. "pilih 1", "opsi 2", bare "1"
-        found = [int(m.group(1) or m.group(2)) for m in _SELECTION_RE.finditer(stripped)]
-        if found:
-            # convert 1-based to 0-based, clamp to valid range
-            indices = sorted({n - 1 for n in found if 1 <= n <= num_suggestions})
-            return indices if indices else None
-
-        return None
-
-    def _get_pre_clarification_request(self, session_id: str) -> str | None:
-        """Return the user message that preceded our last clarification question.
-
-        Searches backwards through history for the clarification marker in an
-        assistant message, then returns the user message just before it.
-        Skips the most-recent user message (the current affirmative reply).
-        """
-        messages = self._history.get_as_llm_messages(session_id)
-        if not messages:
-            return None
-
-        # Skip the last message if it is the current user turn (the affirmative reply)
-        search_end = len(messages)
-        if messages[-1]["role"] == "user":
-            search_end -= 1
-
-        for i in range(search_end - 1, -1, -1):
-            msg = messages[i]
-            if msg["role"] == "assistant" and _CLARIFICATION_MARKER in msg["content"].lower():
-                # The user message before this assistant message is what we want
-                if i > 0 and messages[i - 1]["role"] == "user":
-                    return messages[i - 1]["content"]
-        return None
-
-    # ── Suggestion flow ───────────────────────────────────────────────────────
-
-    async def _handle_suggest(
-        self, session_id: str, parsed: dict
-    ) -> str:
-        """Ask LLM to generate 1-3 reminder suggestions, check conflicts,
-        store them as pending, and return formatted options for user to choose."""
-        now_utc = datetime.now(timezone.utc)
-        now_wib = now_utc + timedelta(hours=7)
-        now_wib_str = now_wib.strftime("%A, %d %B %Y %H:%M WIB")
-
-        # Format existing reminders for LLM context
-        existing = self._store.list_pending(session_id)
-        if existing:
-            existing_lines = []
-            for r in existing:
-                wib = r.remind_at + timedelta(hours=7)
-                existing_lines.append(
-                    f"- #{r.id}: \"{r.message}\" → {wib.strftime('%A, %d %b %Y %H:%M WIB')}"
-                )
-            existing_str = "\n".join(existing_lines)
-        else:
-            existing_str = "(tidak ada reminder aktif)"
-
-        system_prompt = _SUGGEST_SYSTEM_PROMPT.format(
-            now_wib=now_wib_str,
-            existing_reminders=existing_str,
-        )
-
-        # Build a combined user request from parsed data
-        parts = []
-        if parsed.get("message"):
-            parts.append(f"Isi: {parsed['message']}")
-        if parsed.get("remind_at_iso"):
-            parts.append(f"Waktu (UTC): {parsed['remind_at_iso']}")
-        user_content = "; ".join(parts) if parts else "Buat reminder baru"
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ]
-
-        raw = await self._llm.chat(messages)
-        result = self._extract_json(raw)
-
-        suggestions_raw = result.get("suggestions") or []
-        conflicts = result.get("conflicts") or []
-
-        # Validate and normalise each suggestion; skip invalid ones
-        valid_suggestions: list[dict] = []
-        for s in suggestions_raw:
-            msg = s.get("message")
-            iso = s.get("remind_at_iso")
-            if not msg or not iso:
-                continue
-            try:
-                dt = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                continue
-            if dt <= now_utc:
-                dt += timedelta(days=1)
-                if dt <= now_utc:
-                    continue
-                iso = dt.replace(tzinfo=None).isoformat()
-
-            # Validate prep reminder if present
-            prep = s.get("prep_reminder") or {}
-            valid_prep: dict | None = None
-            if prep.get("message") and prep.get("remind_at_iso"):
-                try:
-                    prep_dt = datetime.fromisoformat(prep["remind_at_iso"]).replace(
-                        tzinfo=timezone.utc
-                    )
-                    if prep_dt > now_utc:
-                        valid_prep = {
-                            "message": prep["message"],
-                            "remind_at_iso": prep["remind_at_iso"],
-                        }
-                except (ValueError, TypeError) as exc:
-                    logger.debug(
-                        "ReminderAgent: invalid prep_reminder datetime '%s': %s",
-                        prep.get("remind_at_iso"), exc,
-                    )
-
-            valid_suggestions.append({
-                "message": msg,
-                "remind_at_iso": iso,
-                "notes": s.get("notes"),
-                "prep": valid_prep,
-            })
-
-        if not valid_suggestions:
-            return (
-                "⚠️ Saya kesulitan memahami detail reminder Anda.\n"
-                "Coba tulis lebih spesifik, contoh:\n"
-                "• *ingatkan saya untuk meeting besok jam 10:00*\n"
-                "• *reminder minum obat setiap hari jam 08:00*"
-            )
-
-        # Build response lines
-        lines: list[str] = []
-        is_multi = len(valid_suggestions) > 1
-        header = (
-            "🔔 *Berikut beberapa saran reminder, pilih yang paling sesuai:*\n"
-            if is_multi
-            else "🔔 *Berikut saran reminder dari saya:*\n"
-        )
-        lines.append(header)
-
-        for idx, s in enumerate(valid_suggestions, start=1):
-            dt = datetime.fromisoformat(s["remind_at_iso"]).replace(tzinfo=timezone.utc)
-            wib = dt + timedelta(hours=7)
-            time_str = wib.strftime("%A, %d %B %Y pukul %H:%M WIB")
-
-            if is_multi:
-                lines.append(f"*Opsi {idx}*")
-            lines.append(f"📌 *Judul:* {s['message']}")
-            lines.append(f"📅 *Waktu:* {time_str}")
-            if s.get("notes"):
-                lines.append(f"📝 *Catatan:* {s['notes']}")
-            if s.get("prep"):
-                prep_dt = datetime.fromisoformat(s["prep"]["remind_at_iso"]).replace(
-                    tzinfo=timezone.utc
-                )
-                prep_wib = prep_dt + timedelta(hours=7)
-                prep_time_str = prep_wib.strftime("%A, %d %B %Y pukul %H:%M WIB")
-                lines.append(
-                    f"💡 *Reminder Persiapan:* \"{s['prep']['message']}\"\n"
-                    f"   ⏰ {prep_time_str}"
-                )
-            if is_multi and idx < len(valid_suggestions):
-                lines.append("")  # blank line between options
-
-        # Conflict warnings
-        if conflicts:
-            lines.append("")
-            for c in conflicts:
-                lines.append(
-                    f"⚠️ *Jadwal bertabrakan:* #{c.get('id')} \"{c.get('message')}\" "
-                    f"— {c.get('remind_at_wib')}"
-                )
-
-        lines.append("")
-        if is_multi:
-            lines.append(
-                "Balas *pilih 1*, *pilih 2*, dst untuk memilih opsi tertentu, "
-                "atau *semua* untuk membuat semua reminder.\n"
-                "Ketik *batal* untuk membatalkan."
-            )
-        else:
-            lines.append(
-                "Balas *ya* untuk membuat reminder ini, "
-                "atau jelaskan perubahan yang diinginkan."
-            )
-
-        # Persist suggestions as pending
-        set_pending_suggestion(session_id, {"suggestions": valid_suggestions})
-
-        return "\n".join(lines)
-
-    async def _confirm_pending(
+    async def _run_hermes_loop(
         self,
+        query: str,
         session_id: str,
-        pending: dict,
-        selected_indices: list[int] | None = None,
+        history_messages: list[dict] | None = None
     ) -> str:
-        """Create reminder(s) for the selected suggestion indices.
+        """Run the Hermes ReAct loop to dynamically process and manage reminders."""
+        persona = self.get_persona_prompt()
+        system_prompt = _HERMES_REMINDER_DECISION_PROMPT
+        if persona:
+            system_prompt = persona + "\n\n" + system_prompt
 
-        selected_indices: 0-based list; None or empty = all suggestions.
-        """
-        clear_pending_suggestion(session_id)
+        messages = [{"role": "system", "content": system_prompt}]
+        if history_messages:
+            # Keep last 8 turns for history context to prevent bloating
+            messages.extend(history_messages[-8:])
 
-        suggestions = pending.get("suggestions", [])
-        if selected_indices is None:
-            selected_indices = list(range(len(suggestions)))
+        # If history is empty or the last message doesn't match current query, append it
+        if not history_messages or history_messages[-1]["content"] != query:
+            messages.append({"role": "user", "content": query})
 
-        reply_parts: list[str] = []
-        for idx in selected_indices:
-            if idx < 0 or idx >= len(suggestions):
-                continue
-            s = suggestions[idx]
-            primary_reply = await self._handle_set(session_id, s)
-            reply_parts.append(primary_reply)
-            if s.get("prep"):
-                prep_reply = await self._handle_set(
-                    session_id, s["prep"], is_prep=True
+        step = 0
+        final_answer = ""
+
+        while step < self._MAX_HERMES_STEPS:
+            step += 1
+            logger.info(
+                "ReminderAgent Hermes Loop: Step %d/%d for session=%s",
+                step, self._MAX_HERMES_STEPS, session_id
+            )
+
+            try:
+                raw_response = await self._llm.chat(
+                    messages,
+                    max_tokens=2048,
+                    json_mode=True
                 )
-                reply_parts.append(prep_reply)
 
-        return "\n\n".join(reply_parts) if reply_parts else (
-            "⚠️ Tidak ada reminder yang dibuat."
-        )
+                cleaned_response = _THINK_TAG_RE.sub("", raw_response).strip()
 
-    async def _handle_clarify_and_suggest(
-        self, session_id: str, original_request: str
-    ) -> str:
-        """Use LLM to elaborate on a vague request, then present as a suggestion."""
-        now_utc = datetime.now(timezone.utc)
-        now_wib = now_utc + timedelta(hours=7)
-        now_wib_str = now_wib.strftime("%A, %d %B %Y %H:%M WIB")
+                try:
+                    action_data = json.loads(cleaned_response)
+                except Exception as exc:
+                    logger.warning("Failed to parse JSON: %s. Raw: %r", exc, cleaned_response)
+                    action_match = re.search(r'"action"\s*:\s*"([^"]+)"', cleaned_response)
+                    action = action_match.group(1) if action_match else "answer"
 
-        system_prompt = _ELABORATE_SYSTEM_PROMPT.format(now_wib=now_wib_str)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Permintaan awal: {original_request}"},
-        ]
-        raw = await self._llm.chat(messages)
-        parsed = self._extract_json(raw)
-        return await self._handle_suggest(session_id, parsed)
+                    content_match = re.search(r'"content"\s*:\s*"(.*)"', cleaned_response, re.DOTALL)
+                    content = content_match.group(1) if content_match else ""
 
-    # ── Action handlers ───────────────────────────────────────────────────────
+                    action_data = {
+                        "thought": "Failed to parse JSON cleanly.",
+                        "action": action,
+                        "content": content
+                    }
 
-    async def _handle_set(
-        self,
-        chat_id: str,
-        parsed: dict,
-        is_prep: bool = False,
-    ) -> str:
-        message = parsed.get("message")
-        remind_at_iso = parsed.get("remind_at_iso")
+                thought = action_data.get("thought", "")
+                action = action_data.get("action", "answer")
+                logger.info(
+                    "ReminderAgent Step %d: Thought: %s | Action: %s",
+                    step, thought, action
+                )
 
-        if not message or not remind_at_iso:
-            return (
-                "⚠️ Saya tidak bisa memahami detail reminder Anda.\n"
-                "Coba tulis seperti ini:\n"
-                "• *ingatkan saya untuk meeting jam 14:00*\n"
-                "• *remind me to take medicine at 08:00 tomorrow*"
+                messages.append({"role": "assistant", "content": raw_response})
+
+                if action == "answer":
+                    final_answer = action_data.get("content", "")
+                    break
+
+                elif action == "get_current_time":
+                    now_utc = datetime.now(timezone.utc)
+                    now_wib = now_utc + timedelta(hours=7)
+                    tool_output = (
+                        f"Current Date/Time:\n"
+                        f"- UTC: {now_utc.isoformat(timespec='seconds')}\n"
+                        f"- WIB (Local): {now_wib.strftime('%A, %d %B %Y %H:%M:%S WIB')}"
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil get_current_time]\n{tool_output}"
+                    })
+
+                elif action == "list_reminders":
+                    reminders = self._store.list_pending(session_id)
+                    if not reminders:
+                        tool_output = "No pending reminders."
+                    else:
+                        lines = []
+                        for r in reminders:
+                            wib_time = r.remind_at + timedelta(hours=7)
+                            lines.append(
+                                f"- ID #{r.id}: \"{r.message}\" at {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
+                            )
+                        tool_output = "\n".join(lines)
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil list_reminders]\n{tool_output}"
+                    })
+
+                elif action == "add_reminder":
+                    message_text = action_data.get("message")
+                    remind_at_iso = action_data.get("remind_at_iso")
+
+                    if not message_text or not remind_at_iso:
+                        tool_output = "Error: parameters 'message' and 'remind_at_iso' are required."
+                    else:
+                        try:
+                            # Normalize ISO format
+                            iso_str = remind_at_iso.strip()
+                            if iso_str.endswith('Z'):
+                                iso_str = iso_str[:-1] + '+00:00'
+                            dt = datetime.fromisoformat(iso_str)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            else:
+                                dt = dt.astimezone(timezone.utc)
+
+                            # Save to DB
+                            reminder = self._store.add(session_id, message_text, dt)
+
+                            # Register scheduler job
+                            from src.agents.reminder_agent.scheduler import schedule_reminder
+                            await schedule_reminder(reminder)
+
+                            wib_time = dt + timedelta(hours=7)
+                            tool_output = (
+                                f"Success: Reminder ID #{reminder.id} created for "
+                                f"\"{reminder.message}\" at {wib_time.strftime('%A, %d %B %Y %H:%M WIB')}."
+                            )
+                        except Exception as exc:
+                            tool_output = f"Error adding reminder: {exc}"
+
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil add_reminder]\n{tool_output}"
+                    })
+
+                elif action == "cancel_reminder":
+                    reminder_id_val = action_data.get("reminder_id")
+                    if reminder_id_val is None:
+                        tool_output = "Error: parameter 'reminder_id' is required."
+                    else:
+                        try:
+                            rid = int(reminder_id_val)
+                            from src.agents.reminder_agent.scheduler import cancel_scheduled_reminder
+                            cancel_scheduled_reminder(rid)
+                            deleted = self._store.delete(rid, session_id)
+                            if deleted:
+                                tool_output = f"Success: Reminder ID #{rid} cancelled."
+                            else:
+                                tool_output = f"Error: Reminder ID #{rid} not found or not owned by you."
+                        except Exception as exc:
+                            tool_output = f"Error cancelling reminder: {exc}"
+
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil cancel_reminder]\n{tool_output}"
+                    })
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": f"Error: action '{action}' is invalid. Choose from: get_current_time, list_reminders, add_reminder, cancel_reminder, answer."
+                    })
+            except Exception as exc:
+                logger.error("Error in ReminderAgent Hermes step: %s", exc)
+                messages.append({
+                    "role": "user",
+                    "content": f"Terjadi kesalahan internal: {exc}. Silakan selesaikan dengan action 'answer'."
+                })
+                if step >= self._MAX_HERMES_STEPS - 1:
+                    break
+
+        if not final_answer:
+            logger.info("ReminderAgent: forcing final answer generation")
+            force_prompt = (
+                "Langkah maksimum ReAct loop telah tercapai. Kamu harus segera memberikan jawaban akhir "
+                "kepada pengguna menggunakan tindakan 'answer' dan parameter 'content'."
             )
-
-        try:
-            remind_at = datetime.fromisoformat(remind_at_iso).replace(tzinfo=timezone.utc)
-        except ValueError:
-            return f"⚠️ Format waktu tidak valid: `{remind_at_iso}`"
-
-        now_utc = datetime.now(timezone.utc)
-        if remind_at <= now_utc:
-            # If time already passed today, it might be intended for tomorrow
-            remind_at += timedelta(days=1)
-            if remind_at <= now_utc:
-                return "⚠️ Waktu reminder sudah lewat. Silakan tentukan waktu di masa mendatang."
-
-        # Save to DB
-        reminder = self._store.add(chat_id, message, remind_at)
-
-        # Schedule the job
-        from src.agents.reminder_agent.scheduler import schedule_reminder
-        await schedule_reminder(reminder)
-
-        # Format display time in WIB (UTC+7)
-        wib_time = remind_at + timedelta(hours=7)
-        time_str = wib_time.strftime("%d %B %Y pukul %H:%M WIB")
-
-        label = "Reminder persiapan" if is_prep else "Reminder"
-        return (
-            f"✅ {label} berhasil dibuat!\n\n"
-            f"📌 *#{reminder.id}* — {reminder.message}\n"
-            f"⏰ {time_str}"
-        )
-
-    def _handle_list(self, chat_id: str) -> str:
-        reminders = self._store.list_pending(chat_id)
-        if not reminders:
-            return "📭 Tidak ada reminder aktif."
-
-        lines = ["📋 *Daftar Reminder Aktif:*\n"]
-
-        for r in reminders:
-            wib_time = r.remind_at + timedelta(hours=7)
-            time_str = wib_time.strftime("%d %b %Y %H:%M WIB")
-            lines.append(f"• *#{r.id}* — {r.message}\n  ⏰ {time_str}")
-
-        lines.append(f"\n_Total: {len(reminders)} reminder aktif_")
-        lines.append("_Untuk menghapus: \"hapus reminder #[id]\"_")
-        return "\n".join(lines)
-
-    def _handle_cancel(self, chat_id: str, cancel_id) -> str:
-        if cancel_id is None:
-            return (
-                "⚠️ ID reminder tidak ditemukan. "
-                "Gunakan `/list reminder` untuk melihat daftar, lalu "
-                "tulis \"hapus reminder #[nomor]\"."
-            )
-
-        try:
-            rid = int(cancel_id)
-        except (TypeError, ValueError):
-            return f"⚠️ ID reminder tidak valid: `{cancel_id}`"
-
-        # Also remove the scheduler job
-        from src.agents.reminder_agent.scheduler import cancel_scheduled_reminder
-        cancel_scheduled_reminder(rid)
-
-        deleted = self._store.delete(rid, chat_id)
-        if deleted:
-            return f"🗑️ Reminder *#{rid}* berhasil dihapus."
-        return (
-            f"⚠️ Reminder *#{rid}* tidak ditemukan atau bukan milik Anda, "
-            "atau sudah terkirim."
-        )
-
-    # ── LLM parsing ───────────────────────────────────────────────────────────
-
-    async def _parse_intent(self, user_input: str) -> list[dict]:
-        """Use LLM to parse the user's reminder request into a list of structured actions."""
-        now_utc = datetime.now(timezone.utc)
-        now_wib = now_utc + timedelta(hours=7)
-        now_wib_str = now_wib.strftime("%A, %d %B %Y %H:%M WIB")
-
-        system_prompt = _PARSE_SYSTEM_PROMPT.format(now_wib=now_wib_str)
-        user_prompt = _PARSE_USER_TEMPLATE.format(user_input=user_input)
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        raw = await self._llm.chat(messages)
-        return self._extract_json_list(raw)
-
-    @staticmethod
-    def _extract_json_list(raw: str) -> list[dict]:
-        """Extract a JSON array of reminder actions from the LLM response.
-
-        Falls back gracefully if the LLM returns a single object instead of an array.
-        """
-        import json
-
-        _fallback = [{"action": "set", "message": None, "remind_at_iso": None, "cancel_id": None}]
-
-        # Strip markdown code fences if present
-        cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
-
-        # Try array first: [ ... ]
-        match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-        if match:
+            messages.append({"role": "user", "content": force_prompt})
             try:
-                result = json.loads(match.group())
-                if isinstance(result, list) and result:
-                    return result
-            except json.JSONDecodeError:
-                pass
+                raw_response = await self._llm.chat(
+                    messages,
+                    max_tokens=1024,
+                    json_mode=True
+                )
+                cleaned = _THINK_TAG_RE.sub("", raw_response).strip()
+                action_data = json.loads(cleaned)
+                final_answer = action_data.get("content", "")
+                if not final_answer:
+                    final_answer = "Maaf, saya kesulitan memproses permintaan reminder Anda saat ini."
+            except Exception as exc:
+                logger.error("Failed to generate forced final answer: %s", exc)
+                final_answer = "Maaf, saya kesulitan memproses permintaan reminder Anda saat ini."
 
-        # Fallback: single object { ... } → wrap in list
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if match:
-            try:
-                return [json.loads(match.group())]
-            except json.JSONDecodeError as exc:
-                logger.warning("ReminderAgent: JSON parse error: %s — raw: %s", exc, raw[:200])
-
-        logger.warning("ReminderAgent: no JSON found in LLM response: %s", raw[:200])
-        return _fallback
+        return final_answer
