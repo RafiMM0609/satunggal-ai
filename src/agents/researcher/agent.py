@@ -28,6 +28,8 @@ from src.agents.llm_client import LLMClient
 from src.memory.history import ConversationHistory
 from src.memory.state import AgentTask
 from src.tools.telegram_formatter import sanitize_for_telegram
+from src.tools.tavily_search import TavilySearchTool
+from src.tools.web_reader import WebReaderTool
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,40 @@ Aturan ketat:
 """
 
 # ── Office-mode addendum: appended to the final-answer prompt only. ───────────
+_HERMES_DECISION_PROMPT = """\
+Kamu adalah asisten riset mandiri (Hermes Agent) yang melakukan investigasi mendalam secara iteratif.
+Tugas kamu adalah menjawab pertanyaan atau melakukan riset untuk pengguna dengan menggunakan alat pencarian (Search) dan pembaca halaman web (Read).
+
+Setiap langkah, kamu harus menganalisis informasi yang sudah didapatkan, menentukan apakah informasi tersebut sudah cukup, dan jika belum, putuskan tindakan berikutnya.
+
+Alat yang tersedia:
+1. `search`: Melakukan pencarian web menggunakan kata kunci/query tertentu. Gunakan ini untuk menemukan link atau rangkuman awal.
+   Parameter yang dibutuhkan: `query` (string)
+2. `read`: Membaca teks lengkap dari halaman web tertentu berdasarkan URL. Gunakan ini setelah menemukan URL yang relevan dari pencarian.
+   Parameter yang dibutuhkan: `url` (string)
+3. `answer`: Memberikan jawaban/laporan akhir yang komprehensif, terstruktur, dan akurat kepada pengguna berdasarkan riset yang telah kamu lakukan.
+   Parameter yang dibutuhkan: `content` (string)
+
+Format Output Wajib:
+Kamu harus membalas dalam format JSON yang valid. Jangan sertakan teks lain di luar JSON tersebut.
+Struktur JSON:
+{
+  "thought": "Pemikiranmu tentang apa yang sudah ditemukan, apa yang kurang, dan apa rencana langkah selanjutnya.",
+  "action": "Nama tindakan yang dipilih ('search', 'read', atau 'answer').",
+  "query": "Query pencarian (hanya diisi jika action adalah 'search').",
+  "url": "URL halaman web (hanya diisi jika action adalah 'read').",
+  "content": "Jawaban akhir dalam markdown yang rapi, lengkap, dan informatif (hanya diisi jika action adalah 'answer')."
+}
+
+PENTING:
+- Lakukan riset secara mendalam dan iteratif. Jika pencarian pertama kurang spesifik, lakukan pencarian kedua dengan kata kunci yang lebih tajam.
+- Jika ada URL penting dalam hasil pencarian, gunakan tindakan 'read' untuk membaca isinya sebelum membuat kesimpulan.
+- Cantumkan sumber/referensi URL di bagian akhir laporan jika kamu memilih tindakan 'answer'.
+- Jangan membuat tindakan 'read' atau 'search' berulang-ulang tanpa kemajuan.
+- Maksimal langkah riset dibatasi. Jika ini adalah langkah terakhir, kamu WAJIB menggunakan tindakan 'answer'.
+"""
+
+# ── Office-mode addendum: appended to the final-answer prompt only. ───────────
 # Internal steps (decompose, plan) are unaffected so their strict QUERY: prefix
 # parsing keeps working.  We only change the *tone* of the user-facing response.
 class ResearcherAgent(BaseAgent):
@@ -150,6 +186,8 @@ class ResearcherAgent(BaseAgent):
     _PLAN_MAX_TOKENS      = 512  # budget for building the research outline
     _PLAN_CONTEXT_MAX_CHARS = 3000  # preview fed to planner – keeps planning call cheap
     _MAX_HISTORY_MESSAGES = 8    # keep last N turns in context window
+    _MAX_HERMES_STEPS     = 5    # max iterations for main research loop
+    _MAX_DELEGATION_STEPS = 3    # max iterations for delegation research loop
 
     def __init__(
         self,
@@ -256,6 +294,213 @@ class ResearcherAgent(BaseAgent):
             logger.warning("Multi-point Tavily search failed (non-fatal): %s", exc)
             return None
 
+    async def _run_hermes_loop(
+        self,
+        query: str,
+        session_id: str,
+        max_steps: int,
+        delegation_mode: bool = False,
+        history_messages: list[dict] | None = None
+    ) -> str:
+        """Run the iterative ReAct loop to search the web and read pages."""
+        tavily_tool = TavilySearchTool()
+        reader_tool = WebReaderTool()
+
+        system_prompt = _HERMES_DECISION_PROMPT
+        if delegation_mode:
+            system_prompt += (
+                "\n\nCATATAN DELEGASI:\n"
+                "Kamu sedang dihubungi oleh Agen lain yang membutuhkan informasi ringkas. "
+                "Ketika kamu memberikan jawaban akhir ('action': 'answer'), pastikan kontennya "
+                "sangat ringkas, terfokus pada data teknis yang dibutuhkan, dan actionable."
+            )
+
+        persona = self.get_persona_prompt()
+        if persona:
+            system_prompt = persona + "\n\n" + system_prompt
+
+        messages = [{"role": "system", "content": system_prompt}]
+        if history_messages:
+            messages.extend(history_messages[-self._MAX_HISTORY_MESSAGES:])
+
+        if not history_messages or history_messages[-1]["content"] != query:
+            messages.append({"role": "user", "content": query})
+
+        step = 0
+        final_answer = ""
+
+        while step < max_steps:
+            step += 1
+            logger.info(
+                "ResearcherAgent Hermes Loop: Step %d/%d for session=%s",
+                step, max_steps, session_id
+            )
+
+            try:
+                raw_response = await self._llm.chat(
+                    messages,
+                    max_tokens=self._DECOMPOSE_MAX_TOKENS,
+                    json_mode=True
+                )
+
+                cleaned_response = _THINK_TAG_RE.sub("", raw_response).strip()
+                # Parse action
+                import json
+                try:
+                    action_data = json.loads(cleaned_response)
+                except Exception as exc:
+                    logger.warning("Failed to parse JSON cleanly: %s. Raw: %r", exc, cleaned_response)
+                    # Try fallback regex
+                    action_match = re.search(r'"action"\s*:\s*"([^"]+)"', cleaned_response)
+                    action = action_match.group(1) if action_match else "answer"
+                    
+                    query_match = re.search(r'"query"\s*:\s*"([^"]+)"', cleaned_response)
+                    sq = query_match.group(1) if query_match else ""
+                    
+                    url_match = re.search(r'"url"\s*:\s*"([^"]+)"', cleaned_response)
+                    su = url_match.group(1) if url_match else ""
+                    
+                    content_match = re.search(r'"content"\s*:\s*"(.*)"', cleaned_response, re.DOTALL)
+                    sc = content_match.group(1) if content_match else ""
+                    
+                    action_data = {
+                        "thought": "Failed to parse JSON cleanly.",
+                        "action": action,
+                        "query": sq,
+                        "url": su,
+                        "content": sc
+                    }
+
+                logger.info(
+                    "ResearcherAgent Step %d: Thought: %s | Action: %s",
+                    step, action_data.get("thought", ""), action_data.get("action", "")
+                )
+
+                # Append assistant message so LLM maintains its context
+                messages.append({"role": "assistant", "content": raw_response})
+
+                action = action_data.get("action", "answer")
+
+                if action == "answer":
+                    final_answer = action_data.get("content", "")
+                    break
+
+                elif action == "search":
+                    search_query = action_data.get("query", "")
+                    if not search_query:
+                        messages.append({
+                            "role": "user",
+                            "content": "Error: parameter 'query' tidak boleh kosong untuk tindakan 'search'."
+                        })
+                        continue
+
+                    logger.info("ResearcherAgent executing Tavily Search for: %r", search_query)
+                    try:
+                        search_resp = await tavily_tool.search(search_query)
+                        if search_resp.results:
+                            parts = []
+                            for idx, r in enumerate(search_resp.results, start=1):
+                                parts.append(
+                                    f"Sumber {idx}: {r.title}\n"
+                                    f"URL: {r.url}\n"
+                                    f"Snippet: {r.content}\n"
+                                )
+                            tool_output = "\n".join(parts)
+                        else:
+                            tool_output = "Tidak ada hasil pencarian ditemukan."
+                    except Exception as exc:
+                        tool_output = f"Error saat melakukan pencarian: {exc}"
+
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil Pencarian untuk: \"{search_query}\"]\n\n{tool_output}"
+                    })
+
+                elif action == "read":
+                    read_url = action_data.get("url", "")
+                    if not read_url:
+                        messages.append({
+                            "role": "user",
+                            "content": "Error: parameter 'url' tidak boleh kosong untuk tindakan 'read'."
+                        })
+                        continue
+
+                    logger.info("ResearcherAgent executing WebReader for: %r", read_url)
+                    temp_task = AgentTask(
+                        session_id=session_id,
+                        user_input="",
+                        metadata={"target_url": read_url}
+                    )
+                    try:
+                        reader_result = await reader_tool.run(temp_task)
+                        if "error" in reader_result:
+                            tool_output = f"Error saat membaca halaman: {reader_result['error']}"
+                        else:
+                            title = reader_result.get("title", "No Title")
+                            text = reader_result.get("page_text", "")
+                            truncated = text[:4000]
+                            tool_output = (
+                                f"Judul: {title}\n"
+                                f"URL Akhir: {reader_result.get('url', read_url)}\n"
+                                f"Isi Halaman:\n{truncated}"
+                            )
+                    except Exception as exc:
+                        tool_output = f"Error saat membaca halaman: {exc}"
+
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil Pembacaan Web untuk: \"{read_url}\"]\n\n{tool_output}"
+                    })
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": f"Error: tindakan '{action}' tidak valid. Silakan pilih 'search', 'read', atau 'answer'."
+                    })
+
+            except Exception as exc:
+                logger.error("Error in ResearcherAgent Hermes step: %s", exc)
+                messages.append({
+                    "role": "user",
+                    "content": f"Terjadi kesalahan internal: {exc}. Silakan perbaiki tindakan atau berikan jawaban akhir."
+                })
+                if step >= max_steps - 1:
+                    break
+
+        if not final_answer:
+            logger.info("ResearcherAgent: forcing final answer generation")
+            force_prompt = (
+                "Langkah riset maksimum telah tercapai. Kamu harus segera memberikan jawaban/laporan akhir "
+                "sekarang berdasarkan semua informasi yang terkumpul. "
+                "Gunakan format JSON yang valid dengan 'action': 'answer' dan 'content': '...'."
+            )
+            messages.append({"role": "user", "content": force_prompt})
+            try:
+                raw_response = await self._llm.chat(
+                    messages,
+                    max_tokens=self._DECOMPOSE_MAX_TOKENS,
+                    json_mode=True
+                )
+                cleaned = _THINK_TAG_RE.sub("", raw_response).strip()
+                action_data = json.loads(cleaned)
+                final_answer = action_data.get("content", "")
+            except Exception as exc:
+                logger.error("Failed to generate forced final answer: %s", exc)
+                # Ultimate fallback - plain text prompt using accumulated user/tool messages
+                fallback_prompt = (
+                    f"Buat laporan akhir riset komprehensif tentang '{query}' berdasarkan riwayat pencarian berikut.\n\n"
+                )
+                for msg in messages:
+                    if msg["role"] == "user" and (msg["content"].startswith("[Hasil") or msg["content"].startswith("Hasil")):
+                        fallback_prompt += f"\n---\n{msg['content']}\n"
+                
+                fallback_messages = [
+                    {"role": "system", "content": _SYSTEM_PROMPT_WITH_SEARCH},
+                    {"role": "user", "content": fallback_prompt}
+                ]
+                final_answer = await self._llm.chat(fallback_messages, max_tokens=8192)
+
+        return final_answer.strip()
+
     async def research_for_delegation(
         self,
         query: str,
@@ -272,44 +517,19 @@ class ResearcherAgent(BaseAgent):
 
         Returns:
             A concise, plain-text research summary the calling agent can inject
-            into its own prompt.  Returns a short error message on failure so
-            the caller can continue gracefully.
+            into its own prompt.
         """
         logger.info(
             "ResearcherAgent.research_for_delegation: query=%r session=%s",
             query[:120], session_id,
         )
         try:
-            sub_queries = await self._decompose_query(query)
-            web_context = await self._search_sub_queries(sub_queries)
-
-            system = (
-                _SYSTEM_PROMPT_WITH_SEARCH + "\n\n" + web_context
-                if web_context
-                else _SYSTEM_PROMPT
+            return await self._run_hermes_loop(
+                query=query,
+                session_id=session_id,
+                max_steps=self._MAX_DELEGATION_STEPS,
+                delegation_mode=True
             )
-            # Persona block to keep the LLM in researcher mode
-            persona = self.get_persona_prompt()
-            if persona:
-                system = persona + "\n\n" + system
-
-            messages = [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": (
-                        "Berikan ringkasan singkat dan actionable untuk pertanyaan berikut "
-                        "(fokus pada informasi yang dibutuhkan oleh agen lain, bukan jawaban panjang):\n\n"
-                        + query
-                    ),
-                },
-            ]
-            summary = await self._llm.chat(messages, max_tokens=1024)
-            logger.info(
-                "ResearcherAgent.research_for_delegation: done (%d chars) session=%s",
-                len(summary), session_id,
-            )
-            return summary.strip()
         except Exception as exc:
             logger.warning(
                 "ResearcherAgent.research_for_delegation failed: %s session=%s", exc, session_id
@@ -317,76 +537,22 @@ class ResearcherAgent(BaseAgent):
             return f"[Research unavailable: {exc}]"
 
     async def run(self, task: AgentTask) -> AgentTask:
+        task.mark_processing(self.name)
         try:
             history_messages = self._history.get_as_llm_messages(task.session_id)
 
-            # ── Step 1: Decompose query into focused sub-points ───────────────
-            logger.info(
-                "ResearcherAgent: decomposing query for session=%s", task.session_id
+            reply = await self._run_hermes_loop(
+                query=task.user_input,
+                session_id=task.session_id,
+                max_steps=self._MAX_HERMES_STEPS,
+                history_messages=history_messages
             )
-            sub_queries = await self._decompose_query(task.user_input)
-            logger.info(
-                "ResearcherAgent: %d sub-queries generated for session=%s: %s",
-                len(sub_queries), task.session_id, sub_queries,
-            )
-
-            # ── Step 2: Multi-point Tavily search ─────────────────────────────
-            web_context = await self._search_sub_queries(sub_queries)
-
-            if web_context:
-                logger.debug(
-                    "ResearcherAgent: multi-point search yielded %d chars for session=%s",
-                    len(web_context), task.session_id,
-                )
-            else:
-                # Fallback 1: use orchestrator pre-fetched context (single-query search)
-                logger.info(
-                    "ResearcherAgent: multi-point search empty – falling back to "
-                    "orchestrator pre-fetched context for session=%s", task.session_id,
-                )
-                tavily_tr   = task.tool_results.get("tavily_search", {})
-                web_context = tavily_tr.get("context_text") or None
-
-            # ── Step 3: Build research plan (outline) ─────────────────────────
-            research_plan = await self._plan_research(task.user_input, web_context)
-            if research_plan:
-                logger.info(
-                    "ResearcherAgent: research plan built (%d chars) for session=%s",
-                    len(research_plan), task.session_id,
-                )
-
-            # ── Step 4: Build system prompt with context + plan ───────────────
-            if web_context:
-                system_content = _SYSTEM_PROMPT_WITH_SEARCH + "\n\n" + web_context
-            else:
-                system_content = _SYSTEM_PROMPT
-
-            if research_plan:
-                system_content += (
-                    "\n\n## Rencana Riset (ikuti urutan dan cakupan ini persis)\n\n"
-                    + research_plan
-                    + "\n\nPastikan setiap bagian dalam rencana di atas dijawab secara lengkap dan berurutan."
-                )
-
-            # ── Step 5: Build message list ────────────────────────────────────
-            messages = [{"role": "system", "content": system_content}]
-            messages.extend(history_messages[-self._MAX_HISTORY_MESSAGES:])
-            if not history_messages or history_messages[-1]["content"] != task.user_input:
-                messages.append({"role": "user", "content": task.user_input})
-
-            logger.debug(
-                "ResearcherAgent sending messages (count=%d) for session=%s",
-                len(messages), task.session_id,
-            )
-            reply = await self._llm.chat(messages, max_tokens=8192)
-            logger.debug("ResearcherAgent raw reply: %s", reply)
 
             reply = sanitize_for_telegram(reply)
             task.mark_done(reply)
             logger.info(
-                "Researcher done for session=%s (web_search=%s, sub_queries=%d, plan=%s)",
-                task.session_id, web_context is not None, len(sub_queries),
-                research_plan is not None,
+                "Researcher done for session=%s",
+                task.session_id,
             )
         except Exception as exc:
             logger.exception("ResearcherAgent failed: %s", exc)
