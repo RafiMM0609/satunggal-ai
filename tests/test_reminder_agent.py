@@ -37,6 +37,16 @@ def mock_store():
 
 
 @pytest.fixture
+def mock_profile_store():
+    store = MagicMock()
+    store.get_all_preferences.return_value = {
+        "preferred_name": "Boss",
+        "timezone_offset": "7"
+    }
+    return store
+
+
+@pytest.fixture
 def mock_llm():
     return MagicMock()
 
@@ -47,9 +57,11 @@ class TestReminderAgentHermes:
 
     @pytest.mark.asyncio
     @patch("src.agents.reminder_agent.agent.get_reminder_store")
-    async def test_agent_get_current_time_flow(self, mock_get_store, mock_history, mock_store, mock_llm):
+    @patch("src.agents.reminder_agent.agent.get_user_profile_store")
+    async def test_agent_get_current_time_flow(self, mock_get_profile, mock_get_store, mock_history, mock_store, mock_profile_store, mock_llm):
         """Test that the agent can execute the get_current_time tool and answer."""
         mock_get_store.return_value = mock_store
+        mock_get_profile.return_value = mock_profile_store
         agent = ReminderAgent(history=mock_history, llm=mock_llm)
 
         # Mock LLM to call get_current_time then answer
@@ -67,10 +79,12 @@ class TestReminderAgentHermes:
 
     @pytest.mark.asyncio
     @patch("src.agents.reminder_agent.agent.get_reminder_store")
+    @patch("src.agents.reminder_agent.agent.get_user_profile_store")
     @patch("src.agents.reminder_agent.scheduler.schedule_reminder")
-    async def test_agent_add_reminder_flow(self, mock_schedule, mock_get_store, mock_history, mock_store, mock_llm):
+    async def test_agent_add_reminder_flow(self, mock_schedule, mock_get_profile, mock_get_store, mock_history, mock_store, mock_profile_store, mock_llm):
         """Test that the agent can parse, save, and schedule a reminder."""
         mock_get_store.return_value = mock_store
+        mock_get_profile.return_value = mock_profile_store
         agent = ReminderAgent(history=mock_history, llm=mock_llm)
 
         # Mock LLM to add reminder
@@ -89,9 +103,11 @@ class TestReminderAgentHermes:
 
     @pytest.mark.asyncio
     @patch("src.agents.reminder_agent.agent.get_reminder_store")
-    async def test_agent_list_reminders_flow(self, mock_get_store, mock_history, mock_store, mock_llm):
+    @patch("src.agents.reminder_agent.agent.get_user_profile_store")
+    async def test_agent_list_reminders_flow(self, mock_get_profile, mock_get_store, mock_history, mock_store, mock_profile_store, mock_llm):
         """Test that the agent can query the database for pending reminders."""
         mock_get_store.return_value = mock_store
+        mock_get_profile.return_value = mock_profile_store
         agent = ReminderAgent(history=mock_history, llm=mock_llm)
 
         # Set some active reminders on mock store
@@ -121,10 +137,12 @@ class TestReminderAgentHermes:
 
     @pytest.mark.asyncio
     @patch("src.agents.reminder_agent.agent.get_reminder_store")
+    @patch("src.agents.reminder_agent.agent.get_user_profile_store")
     @patch("src.agents.reminder_agent.scheduler.cancel_scheduled_reminder")
-    async def test_agent_cancel_reminder_flow(self, mock_cancel_sched, mock_get_store, mock_history, mock_store, mock_llm):
+    async def test_agent_cancel_reminder_flow(self, mock_cancel_sched, mock_get_profile, mock_get_store, mock_history, mock_store, mock_profile_store, mock_llm):
         """Test that the agent can delete a reminder from database and scheduler."""
         mock_get_store.return_value = mock_store
+        mock_get_profile.return_value = mock_profile_store
         agent = ReminderAgent(history=mock_history, llm=mock_llm)
 
         # Mock LLM to cancel reminder
@@ -143,9 +161,55 @@ class TestReminderAgentHermes:
 
     @pytest.mark.asyncio
     @patch("src.agents.reminder_agent.agent.get_reminder_store")
-    async def test_agent_forces_answer_at_max_steps(self, mock_get_store, mock_history, mock_store, mock_llm):
+    @patch("src.agents.reminder_agent.agent.get_user_profile_store")
+    async def test_agent_get_user_profile_flow(self, mock_get_profile, mock_get_store, mock_history, mock_store, mock_profile_store, mock_llm):
+        """Test that the agent can retrieve the user profile and adapt response."""
+        mock_get_store.return_value = mock_store
+        mock_get_profile.return_value = mock_profile_store
+        agent = ReminderAgent(history=mock_history, llm=mock_llm)
+
+        # Mock LLM to read user profile
+        mock_llm.chat = AsyncMock(side_effect=[
+            '{"thought": "Load user profile", "action": "get_user_profile"}',
+            '{"thought": "Profile loaded. Preferred name is Boss.", "action": "answer", "content": "Halo Boss! Ada yang bisa dibantu?"}'
+        ])
+
+        task = AgentTask(session_id="sess123", user_input="Halo")
+        result_task = await agent.run(task)
+
+        assert result_task.status.value == "done"
+        assert "Boss" in result_task.result
+        mock_profile_store.get_all_preferences.assert_called_once_with("sess123")
+
+    @pytest.mark.asyncio
+    @patch("src.agents.reminder_agent.agent.get_reminder_store")
+    @patch("src.agents.reminder_agent.agent.get_user_profile_store")
+    async def test_agent_update_user_profile_flow(self, mock_get_profile, mock_get_store, mock_history, mock_store, mock_profile_store, mock_llm):
+        """Test that the agent can save preferences to user profile store."""
+        mock_get_store.return_value = mock_store
+        mock_get_profile.return_value = mock_profile_store
+        agent = ReminderAgent(history=mock_history, llm=mock_llm)
+
+        # Mock LLM to update user profile preference
+        mock_llm.chat = AsyncMock(side_effect=[
+            '{"thought": "User wants to be called Boss", "action": "update_user_profile", "profile_key": "preferred_name", "profile_value": "Boss"}',
+            '{"thought": "Updated. Confirming to user", "action": "answer", "content": "Siap, mulai sekarang aku panggil Boss ya."}'
+        ])
+
+        task = AgentTask(session_id="sess123", user_input="Mulai sekarang panggil gue Boss")
+        result_task = await agent.run(task)
+
+        assert result_task.status.value == "done"
+        assert "Boss" in result_task.result
+        mock_profile_store.set_preference.assert_called_once_with("sess123", "preferred_name", "Boss")
+
+    @pytest.mark.asyncio
+    @patch("src.agents.reminder_agent.agent.get_reminder_store")
+    @patch("src.agents.reminder_agent.agent.get_user_profile_store")
+    async def test_agent_forces_answer_at_max_steps(self, mock_get_profile, mock_get_store, mock_history, mock_store, mock_profile_store, mock_llm):
         """Test that the agent generates a fallback response if it hits _MAX_HERMES_STEPS."""
         mock_get_store.return_value = mock_store
+        mock_get_profile.return_value = mock_profile_store
         agent = ReminderAgent(history=mock_history, llm=mock_llm)
 
         # Set max steps low for quick testing
@@ -157,11 +221,5 @@ class TestReminderAgentHermes:
         task = AgentTask(session_id="sess123", user_input="ping")
         result_task = await agent.run(task)
 
-        # The loop should stop, force prompt added, and fall back (we mock the forced chat call too)
         assert result_task.status.value == "done"
-        # Since mock_llm.chat returned looping action each time, final force fallback message will be used.
-        # But wait, our mock_llm.chat returned get_current_time, even on forced final chat.
-        # So json.loads will see "action": "get_current_time" or it will raise.
-        # If it returns "get_current_time" (which doesn't have "content" field), final_answer becomes empty,
-        # triggering the ultimate text fallback.
         assert "Maaf, saya kesulitan" in result_task.result

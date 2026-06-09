@@ -2,7 +2,8 @@
 ReminderAgent – set, list, and cancel timed reminders delivered via Telegram.
 
 Using the Hermes ReAct loop pattern, this agent can inspect active reminders,
-detect schedule conflicts, and interact with the user via a natural conversational loop.
+detect schedule conflicts, interact with the user via a natural conversational loop,
+and manage permanent user preferences using a Long-Term User Profile Store.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from src.agents.llm_client import LLMClient
 from src.memory.history import ConversationHistory
 from src.memory.state import AgentTask
 from src.tools.reminder_store import get_reminder_store
+from src.tools.user_profile_store import get_user_profile_store
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,7 @@ _HERMES_REMINDER_DECISION_PROMPT = """\
 Kamu adalah **Asisten Pengingat Pribadi Mandiri (Hermes Reminder Agent)** yang chill, asik, dan sangat fleksibel.
 Tugas kamu adalah membantu pengguna mengelola pengingat (reminder) mereka secara alami melalui percakapan, layaknya asisten manusia asli.
 
-Kamu memiliki akses ke database pengingat aktif pengguna saat ini dan beberapa alat (tools) berikut:
+Kamu memiliki akses ke database pengingat aktif, riwayat chat, dan profil preferensi jangka panjang pengguna. Kamu memiliki beberapa alat (tools) berikut:
 1. `get_current_time`: Mendapatkan waktu dan hari saat ini (dalam format WIB dan UTC). Gunakan ini sebagai referensi utama untuk menghitung waktu relatif seperti "besok", "lusa", "Senin jam 10 pagi", "minggu depan", dll.
    Parameter: Tidak ada.
 2. `list_reminders`: Mengembalikan daftar pengingat aktif/belum terkirim milik pengguna ini. Gunakan ini untuk melihat jadwal mereka atau mendeteksi tabrakan waktu.
@@ -43,7 +45,13 @@ Kamu memiliki akses ke database pengingat aktif pengguna saat ini dan beberapa a
 4. `cancel_reminder`: Membatalkan/menghapus pengingat aktif berdasarkan ID reminder.
    Parameter:
      - `reminder_id` (integer)
-5. `answer`: Memberikan tanggapan akhir kepada pengguna. Gunakan tindakan ini untuk menyapa, bertanya balik, mengonfirmasi, memberikan saran, menjelaskan konflik jadwal, atau membalas secara ramah dan santai (sesuai Contextual Vibe Awareness).
+5. `get_user_profile`: Membaca seluruh informasi profil, nama panggilan, aturan, atau preferensi penting pengguna yang tersimpan secara jangka panjang (permanen).
+   Parameter: Tidak ada.
+6. `update_user_profile`: Menyimpan atau memperbarui informasi profil, aturan khusus, atau fakta jangka panjang penting tentang pengguna.
+   Parameter:
+     - `profile_key` (string, kategori informasi, misal: `preferred_name`, `rules`, `routines`, `relationships`, `locations`)
+     - `profile_value` (string, nilai/detail preferensi dalam format teks biasa atau JSON)
+7. `answer`: Memberikan tanggapan akhir kepada pengguna. Gunakan tindakan ini untuk menyapa, bertanya balik, mengonfirmasi, memberikan saran, menjelaskan konflik jadwal, atau membalas secara ramah dan santai (sesuai Contextual Vibe Awareness).
    Parameter:
      - `content` (string, pesan yang akan dikirim ke pengguna)
 
@@ -52,15 +60,18 @@ Kamu harus membalas dalam format JSON yang valid. Jangan sertakan markdown atau 
 Struktur JSON:
 {
   "thought": "Pemikiranmu tentang apa yang diinginkan user, analisis waktu saat ini, konflik jadwal, atau rencana langkah selanjutnya.",
-  "action": "Nama tindakan yang dipilih ('get_current_time', 'list_reminders', 'add_reminder', 'cancel_reminder', atau 'answer').",
+  "action": "Nama tindakan yang dipilih ('get_current_time', 'list_reminders', 'add_reminder', 'cancel_reminder', 'get_user_profile', 'update_user_profile', atau 'answer').",
   "message": "Pesan reminder (hanya diisi jika action adalah 'add_reminder').",
   "remind_at_iso": "Waktu UTC ISO-8601 (hanya diisi jika action adalah 'add_reminder').",
   "reminder_id": <integer atau null jika action adalah 'cancel_reminder'>,
+  "profile_key": "Kunci profil (hanya diisi jika action adalah 'update_user_profile')",
+  "profile_value": "Nilai profil (hanya diisi jika action adalah 'update_user_profile')",
   "content": "Pesan balasan ke user dalam bahasa santai/chill (hanya diisi jika action adalah 'answer')."
 }
 
-PANDUAN INTERAKSI:
-- **Jangan Kaku:** Jangan langsung membuat reminder jika ada ketidakpastian. Tanyakan dulu atau berikan saran waktu.
+PANDUAN INTERAKSI & MEMORI:
+- **Langkah Pertama:** Pada langkah pertama percakapan (Step 1), jika kamu belum memuat profil pengguna, gunakan `get_user_profile` terlebih dahulu agar kamu tahu nama panggilan kesukaan mereka dan aturan khusus yang mereka tetapkan.
+- **Deteksi Preferensi Baru:** Jika pengguna memberikan instruksi khusus atau fakta baru yang penting untuk diingat selamanya (misal: "Mulai sekarang panggil gue Boss", "Selalu buat reminder persiapan 30 menit sebelum meeting"), simpan segera menggunakan `update_user_profile` sebelum membuat pengingat atau menjawab.
 - **Deteksi Konflik:** Jika pengguna meminta reminder di waktu yang berdekatan dengan reminder yang sudah ada (selisih kurang dari 1 jam), beri tahu mereka secara ramah dan tanyakan apakah ingin tetap diset atau disesuaikan.
 - **Konfirmasi Otomatis vs Tanya Balik:**
   - Jika detailnya sudah sangat jelas (misal: "ingetin meeting besok jam 10 pagi"), buatlah reminder-nya (`add_reminder`), lalu gunakan `answer` untuk mengonfirmasi bahwa sudah berhasil dibuat.
@@ -93,6 +104,7 @@ class ReminderAgent(BaseAgent):
         self._history = history
         self._llm = llm or LLMClient()
         self._store = get_reminder_store()
+        self._profile_store = get_user_profile_store()
 
     async def run(self, task: AgentTask) -> AgentTask:
         try:
@@ -268,10 +280,32 @@ class ReminderAgent(BaseAgent):
                         "role": "user",
                         "content": f"[Hasil cancel_reminder]\n{tool_output}"
                     })
+
+                elif action == "get_user_profile":
+                    prefs = self._profile_store.get_all_preferences(session_id)
+                    tool_output = json.dumps(prefs, indent=2)
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil get_user_profile]\n{tool_output}"
+                    })
+
+                elif action == "update_user_profile":
+                    key = action_data.get("profile_key")
+                    val = action_data.get("profile_value")
+                    if not key or val is None:
+                        tool_output = "Error: parameters 'profile_key' and 'profile_value' are required."
+                    else:
+                        self._profile_store.set_preference(session_id, key, val)
+                        tool_output = f"Success: Updated user profile preference '{key}'."
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil update_user_profile]\n{tool_output}"
+                    })
+
                 else:
                     messages.append({
                         "role": "user",
-                        "content": f"Error: action '{action}' is invalid. Choose from: get_current_time, list_reminders, add_reminder, cancel_reminder, answer."
+                        "content": f"Error: action '{action}' is invalid. Choose from: get_current_time, list_reminders, add_reminder, cancel_reminder, get_user_profile, update_user_profile, answer."
                     })
             except Exception as exc:
                 logger.error("Error in ReminderAgent Hermes step: %s", exc)

@@ -20,8 +20,10 @@ Fallback chain (when Tavily is unavailable or returns no results):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+from datetime import datetime, timezone, timedelta
 
 from src.agents.base_agent import BaseAgent
 from src.agents.llm_client import LLMClient
@@ -30,6 +32,14 @@ from src.memory.state import AgentTask
 from src.tools.telegram_formatter import sanitize_for_telegram
 from src.tools.tavily_search import TavilySearchTool
 from src.tools.web_reader import WebReaderTool
+
+# NOTE ON SHARED DATABASE (reminders.db):
+# ResearcherAgent utilizes the UserProfileStore which persists data in 'reminders.db'.
+# We share the 'reminders.db' SQLite file with ReminderAgent to maintain a unified user profile 
+# (e.g. 'preferred_name', timezone, language/formatting preferences) across all agents in the platform.
+# This prevents database fragmentation, reduces DB file management, and ensures a consistent 
+# user experience across the different conversational agents.
+from src.tools.user_profile_store import get_user_profile_store
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +132,7 @@ Aturan ketat:
 # ── Office-mode addendum: appended to the final-answer prompt only. ───────────
 _HERMES_DECISION_PROMPT = """\
 Kamu adalah asisten riset mandiri (Hermes Agent) yang melakukan investigasi mendalam secara iteratif.
-Tugas kamu adalah menjawab pertanyaan atau melakukan riset untuk pengguna dengan menggunakan alat pencarian (Search) dan pembaca halaman web (Read).
+Tugas kamu adalah menjawab pertanyaan atau melakukan riset untuk pengguna dengan menggunakan alat pencarian (Search) dan pembaca halaman web (Read), serta memuat/mengubah preferensi pengguna jika dibutuhkan.
 
 Setiap langkah, kamu harus menganalisis informasi yang sudah didapatkan, menentukan apakah informasi tersebut sudah cukup, dan jika belum, putuskan tindakan berikutnya.
 
@@ -131,7 +141,15 @@ Alat yang tersedia:
    Parameter yang dibutuhkan: `query` (string)
 2. `read`: Membaca teks lengkap dari halaman web tertentu berdasarkan URL. Gunakan ini setelah menemukan URL yang relevan dari pencarian.
    Parameter yang dibutuhkan: `url` (string)
-3. `answer`: Memberikan jawaban/laporan akhir yang komprehensif, terstruktur, dan akurat kepada pengguna berdasarkan riset yang telah kamu lakukan.
+3. `get_current_time`: Mendapatkan tanggal dan waktu saat ini (UTC & WIB). Gunakan ini jika ada pencarian/pertanyaan yang sensitif terhadap waktu ("hari ini", "berita terbaru", dll) agar kamu tahu tahun/bulan saat ini.
+   Parameter: Tidak ada.
+4. `get_user_profile`: Membaca seluruh preferensi riset pengguna yang disimpan secara jangka panjang (nama panggilan, preferred_language, trusted_domains, ignored_domains, explanation_style).
+   Parameter: Tidak ada.
+5. `update_user_profile`: Menyimpan atau memperbarui preferensi riset pengguna secara jangka panjang.
+   Parameter:
+     - `profile_key` (string, kategori informasi, misal: `preferred_name`, `explanation_style`, `trusted_domains`, `ignored_domains`)
+     - `profile_value` (string, nilai preferensi yang baru)
+6. `answer`: Memberikan jawaban/laporan akhir yang komprehensif, terstruktur, dan akurat kepada pengguna berdasarkan riset yang telah kamu lakukan.
    Parameter yang dibutuhkan: `content` (string)
 
 Format Output Wajib:
@@ -139,13 +157,17 @@ Kamu harus membalas dalam format JSON yang valid. Jangan sertakan teks lain di l
 Struktur JSON:
 {
   "thought": "Pemikiranmu tentang apa yang sudah ditemukan, apa yang kurang, dan apa rencana langkah selanjutnya.",
-  "action": "Nama tindakan yang dipilih ('search', 'read', atau 'answer').",
+  "action": "Nama tindakan yang dipilih ('search', 'read', 'get_current_time', 'get_user_profile', 'update_user_profile', atau 'answer').",
   "query": "Query pencarian (hanya diisi jika action adalah 'search').",
   "url": "URL halaman web (hanya diisi jika action adalah 'read').",
+  "profile_key": "Kunci profil (hanya diisi jika action adalah 'update_user_profile')",
+  "profile_value": "Nilai profil (hanya diisi jika action adalah 'update_user_profile')",
   "content": "Jawaban akhir dalam markdown yang rapi, lengkap, dan informatif (hanya diisi jika action adalah 'answer')."
 }
 
 PENTING:
+- **Langkah Pertama:** Pada langkah pertama percakapan (Step 1), jika kamu belum memuat profil pengguna, gunakan `get_user_profile` terlebih dahulu agar kamu tahu nama panggilan kesukaan mereka dan preferensi gaya riset mereka.
+- **Deteksi Preferensi Baru:** Jika pengguna memberikan instruksi khusus tentang cara melakukan riset (misal: "Selalu gunakan gaya penjelasan singkat", "Abaikan domain wikipedia"), simpan segera menggunakan `update_user_profile` sebelum mencari atau menjawab.
 - Lakukan riset secara mendalam dan iteratif. Jika pencarian pertama kurang spesifik, lakukan pencarian kedua dengan kata kunci yang lebih tajam.
 - Jika ada URL penting dalam hasil pencarian, gunakan tindakan 'read' untuk membaca isinya sebelum membuat kesimpulan.
 - Cantumkan sumber/referensi URL di bagian akhir laporan jika kamu memilih tindakan 'answer'.
@@ -196,6 +218,7 @@ class ResearcherAgent(BaseAgent):
     ) -> None:
         self._history = history
         self._llm     = llm or LLMClient()
+        self._profile_store = get_user_profile_store()
 
     async def _decompose_query(self, query: str) -> list[str]:
         """Use the LLM to break the user query into focused search sub-queries.
@@ -312,7 +335,9 @@ class ResearcherAgent(BaseAgent):
                 "\n\nCATATAN DELEGASI:\n"
                 "Kamu sedang dihubungi oleh Agen lain yang membutuhkan informasi ringkas. "
                 "Ketika kamu memberikan jawaban akhir ('action': 'answer'), pastikan kontennya "
-                "sangat ringkas, terfokus pada data teknis yang dibutuhkan, dan actionable."
+                "sangat ringkas, terfokus pada data teknis yang dibutuhkan, dan actionable.\n"
+                "PENTING: Jangan gunakan tindakan 'get_user_profile', 'update_user_profile', atau 'get_current_time' "
+                "karena pendelegasi menginginkan eksekusi langsung yang cepat."
             )
 
         persona = self.get_persona_prompt()
@@ -360,6 +385,12 @@ class ResearcherAgent(BaseAgent):
                     url_match = re.search(r'"url"\s*:\s*"([^"]+)"', cleaned_response)
                     su = url_match.group(1) if url_match else ""
                     
+                    key_match = re.search(r'"profile_key"\s*:\s*"([^"]+)"', cleaned_response)
+                    sk = key_match.group(1) if key_match else ""
+                    
+                    val_match = re.search(r'"profile_value"\s*:\s*"([^"]+)"', cleaned_response)
+                    sv = val_match.group(1) if val_match else ""
+                    
                     content_match = re.search(r'"content"\s*:\s*"(.*)"', cleaned_response, re.DOTALL)
                     sc = content_match.group(1) if content_match else ""
                     
@@ -368,6 +399,8 @@ class ResearcherAgent(BaseAgent):
                         "action": action,
                         "query": sq,
                         "url": su,
+                        "profile_key": sk,
+                        "profile_value": sv,
                         "content": sc
                     }
 
@@ -451,10 +484,44 @@ class ResearcherAgent(BaseAgent):
                         "role": "user",
                         "content": f"[Hasil Pembacaan Web untuk: \"{read_url}\"]\n\n{tool_output}"
                     })
+                elif action == "get_current_time":
+                    now_utc = datetime.now(timezone.utc)
+                    now_wib = now_utc + timedelta(hours=7)
+                    tool_output = (
+                        f"Current Date/Time:\n"
+                        f"- UTC: {now_utc.isoformat(timespec='seconds')}\n"
+                        f"- WIB (Local): {now_wib.strftime('%A, %d %B %Y %H:%M:%S WIB')}"
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil get_current_time]\n{tool_output}"
+                    })
+
+                elif action == "get_user_profile":
+                    prefs = self._profile_store.get_all_preferences(session_id)
+                    tool_output = json.dumps(prefs, indent=2)
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil get_user_profile]\n{tool_output}"
+                    })
+
+                elif action == "update_user_profile":
+                    key = action_data.get("profile_key")
+                    val = action_data.get("profile_value")
+                    if not key or val is None:
+                        tool_output = "Error: parameters 'profile_key' and 'profile_value' are required."
+                    else:
+                        self._profile_store.set_preference(session_id, key, val)
+                        tool_output = f"Success: Updated user profile preference '{key}'."
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Hasil update_user_profile]\n{tool_output}"
+                    })
+
                 else:
                     messages.append({
                         "role": "user",
-                        "content": f"Error: tindakan '{action}' tidak valid. Silakan pilih 'search', 'read', atau 'answer'."
+                        "content": f"Error: tindakan '{action}' tidak valid. Silakan pilih 'search', 'read', 'get_current_time', 'get_user_profile', 'update_user_profile', atau 'answer'."
                     })
 
             except Exception as exc:
