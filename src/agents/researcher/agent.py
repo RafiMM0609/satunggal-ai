@@ -567,6 +567,72 @@ class ResearcherAgent(BaseAgent):
                 final_answer = await self._llm.chat(fallback_messages, max_tokens=8192)
 
         return final_answer.strip()
+    async def research_for_briefing(
+        self,
+        topic: str,
+        language: str = "id",
+        session_id: str = "proactive_briefing",
+    ) -> str:
+        """Deep research flow tailored for daily briefing using multi-point search.
+
+        Decomposes the topic into 3-4 sub-queries, executes them in parallel,
+        and generates a highly-structured news briefing section for that topic.
+        """
+        logger.info(
+            "ResearcherAgent.research_for_briefing: topic=%r session=%s",
+            topic[:120], session_id,
+        )
+        try:
+            # 1. Decompose the topic into 3-4 focused sub-queries
+            sub_queries = await self._decompose_query(topic)
+            logger.info("Decomposed topic %r into sub-queries: %s", topic, sub_queries)
+
+            # 2. Search all sub-queries in parallel using TavilySearchTool
+            web_context = await self._search_sub_queries(sub_queries)
+
+            # If no results found, fallback to direct search of the topic
+            if not web_context:
+                logger.warning("Parallel search returned no results, falling back to direct topic search.")
+                web_context = await self._search_sub_queries([topic])
+
+            # 3. Create the prompt context (inject current time to keep it time-aware)
+            now_utc = datetime.now(timezone.utc)
+            now_wib = now_utc + timedelta(hours=7)
+            time_info = f"Current Date/Time: {now_wib.strftime('%A, %d %B %Y %H:%M:%S WIB')} (WIB)"
+
+            system_prompt = _SYSTEM_PROMPT_WITH_SEARCH
+            
+            user_content = (
+                f"{time_info}\n\n"
+                f"Topik Riset: {topic}\n\n"
+                f"Lakukan riset mendalam tentang topik di atas berdasarkan hasil pencarian web berikut:\n"
+                f"{web_context or 'Tidak ada hasil pencarian web yang tersedia.'}\n\n"
+                f"Tugas kamu:\n"
+                f"1. Berikan ringkasan berita dan perkembangan terkini tentang topik tersebut.\n"
+                f"2. Fokus pada hal yang paling penting, menarik, dan relevan hari ini.\n"
+                f"3. Gunakan bahasa {'Indonesia' if language == 'id' else 'English'}.\n"
+                f"4. Format laporan menggunakan header markdown (##), bullet points, dan pisahkan dengan baris kosong.\n"
+                f"5. Jangan potong penjelasan di tengah jalan. Pastikan semua kalimat selesai dengan baik.\n"
+                f"6. Cantumkan referensi URL sumber yang valid secara rapi di bagian akhir."
+            )
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ]
+
+            # 4. Generate response
+            response = await self._llm.chat(
+                messages,
+                max_tokens=self._DECOMPOSE_MAX_TOKENS,
+            )
+            return response.strip()
+
+        except Exception as exc:
+            logger.warning(
+                "ResearcherAgent.research_for_briefing failed: %s session=%s", exc, session_id
+            )
+            return f"[Briefing research failed: {exc}]"
 
     async def research_for_delegation(
         self,

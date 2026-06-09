@@ -118,3 +118,29 @@ class TestResearcherAgentHermes:
         # Check that CATATAN DELEGASI and constraint warning are present in system prompt
         assert "CATATAN DELEGASI" in system_message["content"]
         assert "Jangan gunakan tindakan 'get_user_profile', 'update_user_profile', atau 'get_current_time'" in system_message["content"]
+
+    @pytest.mark.asyncio
+    @patch("src.agents.researcher.agent.get_user_profile_store")
+    async def test_research_for_briefing_flow(self, mock_get_profile, mock_history, mock_profile_store, mock_llm):
+        """Test that research_for_briefing decomposes the query, performs search, and generates a briefing."""
+        mock_get_profile.return_value = mock_profile_store
+        agent = ResearcherAgent(history=mock_history, llm=mock_llm)
+
+        # Mock query decomposition output
+        # Mock LLM chat calls: first call for decompose, second call for final synthesis
+        mock_llm.chat = AsyncMock(side_effect=[
+            "QUERY: subquery1\nQUERY: subquery2",  # _decompose_query response
+            "Riset harian: hasil riset mendalam."     # Final briefing synthesis response
+        ])
+
+        # Mock TavilySearchTool within the agent's parallel search method
+        mock_search_result = MagicMock()
+        mock_search_result.results = [MagicMock(title="Title1", url="http://test.com/1", content="Content snippet")]
+        mock_search_result.as_context_text.return_value = "Title1: Content snippet"
+
+        with patch("src.tools.tavily_search.TavilySearchTool.search", AsyncMock(return_value=mock_search_result)):
+            briefing = await agent.research_for_briefing(topic="AI terbaru", language="id")
+
+            assert briefing == "Riset harian: hasil riset mendalam."
+            assert mock_llm.chat.call_count == 2
+

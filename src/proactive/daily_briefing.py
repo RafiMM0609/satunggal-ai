@@ -114,6 +114,81 @@ def get_current_config() -> dict:
 
 # ── Job entry point ────────────────────────────────────────────────────────────
 
+async def _send_long_message(bot: "Bot", chat_id: str, text: str) -> None:
+    """Kirim pesan panjang dengan membaginya menjadi beberapa bagian (maksimal 4000 karakter per bagian).
+
+    Membagi teks berdasarkan baris/paragraf agar format tetap rapi dan tidak merusak
+    tag markdown. Jika terjadi kesalahan parsing markdown, bagian tersebut dikirim
+    kembali sebagai teks biasa (tanpa formatting).
+    """
+    from telegram.constants import ParseMode
+
+    if len(text) <= 4000:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            logger.warning("Failed to send markdown message, falling back to plain text: %s", exc)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+            )
+        return
+
+    paragraphs = text.split("\n")
+    current_chunk = ""
+
+    for para in paragraphs:
+        # Jika penambahan paragraf ini melebihi 4000 karakter, kirim chunk saat ini
+        if len(current_chunk) + len(para) + 1 > 4000:
+            if current_chunk:
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=current_chunk,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to send markdown chunk, falling back to plain text: %s", exc)
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=current_chunk,
+                    )
+            # Jika paragraf itu sendiri > 4000 karakter, pecah berdasarkan karakter
+            if len(para) > 4000:
+                sub_chunks = [para[i:i+4000] for i in range(0, len(para), 4000)]
+                for sub in sub_chunks[:-1]:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=sub,
+                    )
+                current_chunk = sub_chunks[-1]
+            else:
+                current_chunk = para
+        else:
+            if current_chunk:
+                current_chunk += "\n" + para
+            else:
+                current_chunk = para
+
+    if current_chunk:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=current_chunk,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            logger.warning("Failed to send final markdown chunk, falling back to plain text: %s", exc)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=current_chunk,
+            )
+
+
 async def _run_briefing(chat_id: str, topics: list[str], language: str) -> None:
     """APScheduler callback: research semua topik lalu kirim ke Telegram."""
     from src.agents.llm_client import LLMClient
@@ -139,15 +214,12 @@ async def _run_briefing(chat_id: str, topics: list[str], language: str) -> None:
     sections: list[str] = []
     for topic in topics:
         try:
-            summary = await agent.research_for_delegation(
-                query=(
-                    f"Berikan ringkasan berita dan perkembangan terkini tentang: {topic}. "
-                    f"Fokus pada hal yang paling penting dan relevan hari ini. "
-                    f"Gunakan bahasa {'Indonesia' if language == 'id' else 'English'}."
-                ),
+            summary = await agent.research_for_briefing(
+                topic=topic,
+                language=language,
                 session_id="proactive_briefing",
             )
-            if summary and "[Research unavailable" not in summary:
+            if summary and "[Briefing research failed" not in summary:
                 sections.append(f"📌 *{topic.strip().title()}*\n{summary}")
         except Exception as exc:
             logger.warning("ProactiveBriefing: topic '%s' failed: %s", topic, exc)
@@ -156,8 +228,7 @@ async def _run_briefing(chat_id: str, topics: list[str], language: str) -> None:
         logger.warning("ProactiveBriefing: all topics failed, skipping send.")
         return
 
-    from telegram.constants import ParseMode
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone, timedelta
 
     now_wib = (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M")
     header  = (
@@ -167,17 +238,8 @@ async def _run_briefing(chat_id: str, topics: list[str], language: str) -> None:
     body    = "\n\n".join(sections)
     message = header + body
 
-    # Telegram max message = 4096 chars; potong agar tidak error
-    MAX_LEN = 4000
-    if len(message) > MAX_LEN:
-        message = message[:MAX_LEN] + "\n\n_[pesan terpotong]_"
-
     try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=message,
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await _send_long_message(bot, chat_id, message)
         logger.info(
             "ProactiveBriefing: sent to chat_id=%s (%d chars)", chat_id, len(message)
         )
