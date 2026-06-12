@@ -388,7 +388,7 @@ Balas HANYA dengan SATU JSON object (bukan array) dengan field berikut:
     - click:             {"text": "..."}
     - type:              {"selector": "...", "label": "...", "text": "..."}
     - scroll:            {"direction": "down"|"up"}
-    - screenshot:        {}
+    - screenshot:        {}  (gunakan untuk mengambil screenshot; setelah berhasil, SEGERA panggil "done")
     - get_content:       {}
     - get_full_content:  {}
     - get_links:         {}
@@ -467,6 +467,7 @@ Panduan aksi baru:
     perubahan kepada pengguna.
   • "solve_captcha" – coba dulu sebelum minta bantuan manual. Jika "solved": false dan
     "fallback_manual": true, output "done" dengan pesan minta bantuan.
+  • "screenshot" – gunakan untuk mengambil tangkapan layar. Setelah memanggil action ini, langkah berikutnya WAJIB "done" dengan pesan bahwa screenshot berhasil diambil. JANGAN mengambil screenshot berulang kali (meskipun kamu tidak melihat data gambar di result).
   • "schedule_task" – gunakan ketika pengguna meminta monitoring berkala (misalnya "cek
     harga setiap jam", "pantau stok setiap 30 menit").
 
@@ -790,7 +791,6 @@ class WebAutomationAgent(BaseAgent):
                 val["screenshot_b64"]
                 for val in task.tool_results.values()
                 if isinstance(val, dict)
-                and val.get("action") == "screenshot"
                 and val.get("screenshot_b64")
             ]
             if screenshots:
