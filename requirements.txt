@@ -49,6 +49,7 @@ python-docx>=1.1.0        # Baca & bedah file .docx (Heading → sections)
 
 # ── Web Automation (Autonomous Browsing Agent) ─────────────────────────────────
 playwright>=1.51.0         # Headless browser automation (Chromium/Firefox/WebKit)
+playwright-stealth>=2.0.0  # Anti-bot fingerprint evasion for Playwright
 
 # ── Reminder Agent (Timed Telegram Notifications) ─────────────────────────────
 APScheduler>=3.10.4        # In-process async job scheduler for timed reminders

@@ -330,6 +330,18 @@ Penanganan Pop-up dan Iklan (WAJIB):
   • Jika "close_popup" tidak berhasil (dismissed: false), coba "scroll" ke bawah terlebih dahulu
     agar form masuk ke viewport, kemudian ulangi aksi.
 
+Panduan website JavaScript / SPA berat (React, Vue, Angular, Next.js, Nuxt):
+  • Setelah navigate ke halaman SPA, gunakan get_content untuk membaca konten awal.
+  • Jika kemungkinan halaman menggunakan infinite scroll, rencanakan langkah scroll → get_content
+    secara berulang sampai konten yang dicari ditemukan.
+  • Jika kamu perlu SELURUH konten halaman, gunakan get_full_content (auto-scroll + networkidle).
+  • Jika hasil get_content menyertakan field "api_data", gunakan data tersebut untuk menjawab –
+    biasanya lebih lengkap dari page_text yang mungkin ter-clip oleh virtual DOM.
+
+Penanganan Bot Challenge / Cloudflare:
+  • Jika navigate menghasilkan halaman dengan judul "Just a moment" atau "Attention Required",
+    tambahkan langkah "done" dengan pesan bahwa bot challenge terdeteksi dan perlu intervensi manual.
+
 Aturan:
 1. Balas HANYA dengan JSON array dari langkah-langkah tersebut – tidak ada teks lain.
 2. Selalu akhiri dengan langkah "done" yang berisi ringkasan apa yang sudah dilakukan.
@@ -547,13 +559,40 @@ Gunakan action "done" dengan ringkasan komprehensif ketika:
   - Langkah-langkah sebelumnya gagal dan sudah ada informasi yang cukup untuk dilaporkan
   - Mendekati batas langkah maksimum
 
+Panduan website JavaScript / SPA berat (React, Vue, Angular, Next.js, Nuxt) – WAJIB DIIKUTI:
+  • Setelah navigate ke halaman SPA, SELALU gunakan get_content untuk membaca konten awal.
+  • Jika page_text sangat pendek (< 200 karakter) padahal halaman seharusnya memiliki konten,
+    ini tanda SPA belum selesai render. Gunakan wait_for_element dengan selector umum seperti
+    "main", "article", "#app", atau "[role='main']" lalu get_content lagi.
+  • Jika hasil get_content atau get_full_content menyertakan field "api_data":
+    - Field ini berisi data JSON yang di-intercept dari XHR/fetch API calls halaman tersebut.
+    - Data api_data biasanya lebih lengkap dari page_text (tidak ter-truncate oleh virtualisasi).
+    - PRIORITASKAN api_data untuk menjawab pertanyaan jika page_text terlalu pendek.
+    - Cantumkan sumber data api_data dalam summary agar pengguna tahu data berasal dari API.
+  • Untuk halaman dengan infinite scroll / pagination dinamis:
+    - Gunakan scroll → get_content → scroll → get_content secara berulang.
+    - Hentikan jika konten yang dicari sudah ditemukan ATAU jika page_text tidak bertambah.
+    - Gunakan get_full_content jika pengguna meminta SELURUH konten halaman.
+  • Jika hasil get_content menunjukkan halaman yang sama dengan step sebelumnya (URL sama,
+    page_text identik), JANGAN get_content lagi – langsung ambil tindakan berbeda.
+
+Penanganan Bot Challenge / Cloudflare (WAJIB):
+  • Jika navigate atau get_content mengembalikan "page_error" yang mengandung "Bot challenge
+    page detected" atau "Just a moment":
+    - Ini berarti website mendeteksi kita sebagai bot dan menampilkan halaman verifikasi.
+    - SEGERA output "done" dengan pesan: "⚠️ Website terdeteksi bot challenge (Cloudflare/
+      anti-bot). Halaman memerlukan verifikasi browser manual. Tidak dapat melanjutkan
+      secara otomatis. Coba gunakan /reset dan ulangi perintah, atau akses halaman secara manual."
+    - JANGAN coba navigate ulang atau get_content berulang kali ke URL yang sama.
+  • Jika menerima bot_challenge: true dalam result, langsung output "done" dengan pesan di atas.
+
 Aturan:
   1. Balas HANYA dengan SATU JSON object – tidak ada teks lain di luar JSON.
   2. Jangan mengulangi langkah yang persis sama jika sudah dilakukan dan gagal.
   3. Selalu akhiri dengan "done" yang berisi ringkasan lengkap.
 """
 
-_MAX_REACT_STEPS       = 20    # max number of tool-execution steps in the ReAct loop
+_MAX_REACT_STEPS       = 25    # max number of tool-execution steps in the ReAct loop (↑ from 20 for JS-heavy sites)
 _MAX_STEP_RETRIES      = 2     # max immediate LLM re-plan retries on a failed step
 _MAX_TOKENS            = 8192
 _SUMMARISE_TEXT_CHARS  = 2000  # page text characters included per result in summariser
@@ -561,7 +600,7 @@ _FULL_PAGE_SUMMARISE_TEXT_CHARS = 8_000  # higher budget for get_full_content re
 _SUMMARISE_ITEMS_LIMIT = 50    # max extracted items shown in summariser
 _HISTORY_MSG_CHARS     = 500   # max characters per message included in planner context
 _MAX_ERROR_MSG_CHARS   = 400   # max error message characters included in action log entries
-_REACT_RESULT_TEXT_CHARS = 1500  # max page_text chars kept in each compact ReAct step result
+_REACT_RESULT_TEXT_CHARS = 2500  # max page_text chars kept in each compact ReAct step result (↑ from 1500)
 _REACT_LINKS_LIMIT     = 60    # max links kept per step in compact ReAct context
 _REACT_LOCATORS_LIMIT  = 50    # max interactive element locators kept per step in compact context
 
@@ -595,6 +634,19 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
     # Limit interactive locators – the LLM uses these to target click/type actions
     if "locators" in compact and isinstance(compact["locators"], list):
         compact["locators"] = compact["locators"][:_REACT_LOCATORS_LIMIT]
+    # Limit api_data – include at most 2 intercepted API responses, each data
+    # truncated to a JSON string of at most 500 chars so LLM can see the shape
+    # of the data without the full payload dominating the context.
+    if "api_data" in compact and isinstance(compact["api_data"], list):
+        truncated = []
+        for entry in compact["api_data"][:2]:
+            entry_copy = dict(entry)
+            if "data" in entry_copy:
+                raw = json.dumps(entry_copy["data"], ensure_ascii=False)
+                if len(raw) > 500:
+                    entry_copy["data"] = raw[:500] + "…"
+            truncated.append(entry_copy)
+        compact["api_data"] = truncated
     return compact
 
 

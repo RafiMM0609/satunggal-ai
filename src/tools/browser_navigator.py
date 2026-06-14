@@ -39,6 +39,20 @@ from urllib.parse import urlparse
 
 from src.tools.base_tool import BaseTool
 
+try:
+    from playwright_stealth import Stealth as _Stealth
+    _STEALTH_INSTANCE = _Stealth(
+        # Override navigator.languages to Indonesian + English
+        navigator_languages_override=("id-ID", "en-US"),
+        # Keep navigator.platform as Win32 (common desktop fingerprint)
+        navigator_platform_override="Win32",
+        # Enable all evasions (the defaults cover webdriver, plugins, etc.)
+    )
+    _STEALTH_AVAILABLE = True
+except ImportError:  # noqa: BLE001
+    _STEALTH_AVAILABLE = False
+    _STEALTH_INSTANCE = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:
     from src.memory.state import AgentTask
 
@@ -53,6 +67,40 @@ _CLICK_NAV_TEXT_CHARS    = 3_000    # page-text snippet captured inside click re
 _SPA_RENDER_WAIT_MS      = 3_000    # extra wait for SPA to render content after navigation/click
 _CLICK_LOCATE_TIMEOUT_MS = 4_000    # timeout for each individual click locator attempt
 _MAX_LOCATORS            = 60       # max interactive elements returned in get_content "locators"
+
+# ── Anti-bot / stealth constants ──────────────────────────────────────────────
+# Pool of realistic Chrome user-agent strings (Windows + macOS, recent versions).
+# One is chosen at random per browser session to avoid a fixed fingerprint.
+_UA_POOL = [
+    # Chrome 124 / Windows 10
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    # Chrome 123 / Windows 11
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    # Chrome 124 / macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    # Chrome 122 / macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    # Chrome 124 / Linux (Ubuntu)
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+# Pool of common desktop viewport sizes (width × height).
+_VIEWPORT_POOL = [
+    {"width": 1920, "height": 1080},
+    {"width": 1440, "height": 900},
+    {"width": 1366, "height": 768},
+    {"width": 1536, "height": 864},
+    {"width": 1280, "height": 800},
+]
+
+# Cloudflare / bot challenge page markers (title prefix and body class)
+_BOT_CHALLENGE_TITLES = ("just a moment", "attention required", "ddos-guard", "robot check")
+_BOT_CHALLENGE_BODY_MARKERS = (
+    "cf-browser-verification",
+    "cf_chl_",
+    "__cf_chl_captcha",
+    "ddos-guard",
+    "perisai ddos",
+)
 
 # Captcha detection: iframe src patterns and text phrases that indicate a CAPTCHA challenge.
 _CAPTCHA_IFRAME_PATTERNS = (
@@ -81,6 +129,13 @@ _POPUP_CLOSE_TEXTS = (
     "tidak, terima kasih", "no thanks", "no, thanks", "skip",
     "lewati", "accept", "terima", "ok", "got it", "mengerti",
     "setuju", "agree", "allow", "izinkan", "continue", "lanjutkan",
+    # Cookie consent / GDPR
+    "accept all", "accept cookies", "i accept", "i agree",
+    "saya setuju", "izinkan semua", "terima semua", "oke",
+    "understood", "paham", "iya", "ya",
+    # Notification permission
+    "not now", "nanti saja", "don't allow", "block",
+    "no, thank you", "tidak terima kasih",
 )
 # CSS selectors that commonly identify modal/popup close buttons or overlays.
 _POPUP_CLOSE_SELECTORS = (
@@ -88,6 +143,7 @@ _POPUP_CLOSE_SELECTORS = (
     "[aria-label='Close']",
     "[aria-label='close']",
     "[aria-label='Tutup']",
+    "[aria-label='Dismiss']",
     ".modal-close",
     ".close-button",
     ".btn-close",
@@ -96,13 +152,20 @@ _POPUP_CLOSE_SELECTORS = (
     ".overlay-close",
     "[class*='close']",
     "[id*='close']",
+    # Cookie banners
+    "#onetrust-accept-btn-handler",
+    "#accept-cookies",
+    ".cc-accept",
+    "[data-action='accept-cookies']",
+    "[data-testid='cookie-accept']",
+    "button[data-gdpr-action='accept']",
 )
 
 # Full-page content (get_full_content): auto-scroll settings
 _FULL_PAGE_SCROLL_PX        = 600   # pixels per scroll step when sweeping the full page
-_FULL_PAGE_SCROLL_WAIT_S    = 0.5   # seconds to wait after each scroll for lazy content to render
+_FULL_PAGE_SCROLL_WAIT_S    = 0.8   # seconds to wait after each scroll for lazy content to render (↑ from 0.5)
 _MAX_FULL_PAGE_SCROLL_STEPS = 30    # safety cap – stops auto-scroll after this many steps
-_MAX_FULL_PAGE_TEXT_CHARS   = 50_000  # higher text cap for full-page content extraction
+_MAX_FULL_PAGE_TEXT_CHARS   = 80_000  # higher text cap for full-page content extraction (↑ from 50K)
 
 # ARIA roles treated as interactive – used to build the compact locators list in get_content.
 # These match Playwright's get_by_role() expectations, so the LLM can use the "name" value
@@ -135,6 +198,74 @@ _ERROR_CONTENT_PHRASES = (
     "koneksi internet terputus",    # Indonesian "internet connection lost"
     "cors",                         # CORS error message fragments
 )
+
+# ── JS stealth script injected before every page load ─────────────────────────
+# This overrides browser automation fingerprints that are detectable by
+# anti-bot systems even when using playwright-stealth.
+_STEALTH_INIT_SCRIPT = """
+// 1. Hide webdriver flag
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined, configurable: true});
+
+// 2. Fake plugins array (real browsers have at least 3)
+const _pluginData = [
+  {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+  {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
+  {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''},
+];
+Object.defineProperty(navigator, 'plugins', {
+  get: () => {
+    const arr = _pluginData.map(p => {
+      const plugin = Object.create(Plugin.prototype);
+      Object.defineProperty(plugin, 'name', {get: () => p.name});
+      Object.defineProperty(plugin, 'filename', {get: () => p.filename});
+      Object.defineProperty(plugin, 'description', {get: () => p.description});
+      Object.defineProperty(plugin, 'length', {get: () => 0});
+      return plugin;
+    });
+    arr.item = (i) => arr[i];
+    arr.namedItem = (name) => arr.find(p => p.name === name) || null;
+    Object.defineProperty(arr, 'length', {get: () => _pluginData.length});
+    return arr;
+  }, configurable: true
+});
+
+// 3. Fake mimeTypes
+Object.defineProperty(navigator, 'mimeTypes', {get: () => ({length: 2}), configurable: true});
+
+// 4. Languages
+Object.defineProperty(navigator, 'languages', {get: () => ['id-ID', 'en-US', 'en'], configurable: true});
+
+// 5. chrome.runtime must exist and not throw
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) window.chrome.runtime = {sendMessage: () => {}, connect: () => ({})};
+
+// 6. Notifications permission should not be 'denied' by default (bot heuristic)
+try {
+  const origQuery = window.Notification && window.Notification.permission !== undefined
+    ? null : null;
+  if (navigator.permissions && navigator.permissions.query) {
+    const origFn = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (params) => {
+      if (params && params.name === 'notifications') {
+        return Promise.resolve({state: 'default', onchange: null});
+      }
+      return origFn(params);
+    };
+  }
+} catch(e) {}
+
+// 7. Hardware concurrency (bots often report 1)
+if (navigator.hardwareConcurrency === 1) {
+  Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 4, configurable: true});
+}
+
+// 8. DeviceMemory (bots often report 0.25)
+try {
+  if (navigator.deviceMemory !== undefined && navigator.deviceMemory < 2) {
+    Object.defineProperty(navigator, 'deviceMemory', {get: () => 8, configurable: true});
+  }
+} catch(e) {}
+"""  # noqa: E501
 
 
 async def _random_delay(
@@ -257,6 +388,11 @@ class BrowserNavigatorTool(BaseTool):
         self._tabs:            dict[str, Any] = {}   # tab_id → Page
         self._active_tab_id:   str            = ""   # currently active tab
         self._tab_counter:     int            = 0    # monotonic id counter
+        # ── SPA API response capture ───────────────────────────────────────
+        # Populated by the response event listener in _ensure_browser so that
+        # get_content / get_full_content can include JSON API data alongside
+        # the rendered page text for SPA-heavy websites.
+        self._api_responses:   list[dict[str, Any]] = []
 
     # ── Active-page property (multi-tab compatibility shim) ───────────────────
 
@@ -362,7 +498,16 @@ class BrowserNavigatorTool(BaseTool):
     # ── Browser lifecycle ─────────────────────────────────────────────────────
 
     async def _ensure_browser(self, session_path: Optional[str] = None) -> None:
-        """Launch browser + context + page if not already open."""
+        """Launch browser + context + page if not already open.
+
+        On first call the browser is launched with stealth configuration:
+          * Chromium flags that disable automation-detection markers
+          * A random realistic user-agent and viewport from curated pools
+          * Indonesian locale / Jakarta timezone to match target audience
+          * playwright-stealth applied to the page (if available)
+          * Custom JS init-script to override remaining fingerprint leaks
+          * Lightweight API-response interceptor for SPA data capture
+        """
         if self._page is not None:
             return  # already open
 
@@ -374,18 +519,54 @@ class BrowserNavigatorTool(BaseTool):
             new_page = await self._context.new_page()
             new_page.set_default_timeout(_TIMEOUT_MS)
             new_page.set_default_navigation_timeout(_TIMEOUT_MS)
+            # Apply stealth + init script to the new page as well
+            await self._apply_stealth(new_page)
             self._tabs[tab_id]   = new_page
             self._active_tab_id  = tab_id
             return
 
         from playwright.async_api import async_playwright  # lazy import
 
-        self._playwright = await async_playwright().start()
-        self._browser    = await self._playwright.chromium.launch(headless=True)
+        rng = random.SystemRandom()
+        ua       = rng.choice(_UA_POOL)
+        viewport = rng.choice(_VIEWPORT_POOL)
 
+        self._playwright = await async_playwright().start()
+
+        # ── Stealth launch args ───────────────────────────────────────────────
+        # These Chromium flags suppress well-known automation fingerprints that
+        # headless-detection scripts inspect (AutomationControlled feature,
+        # Blink expose-intl property, etc.)
+        stealth_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--no-service-autorun",
+            "--disable-dev-shm-usage",
+            "--disable-web-security",
+            "--allow-running-insecure-content",
+            f"--window-size={viewport['width']},{viewport['height']}",
+        ]
+
+        self._browser = await self._playwright.chromium.launch(
+            headless=True,
+            args=stealth_args,
+        )
+
+        # ── Context fingerprint ───────────────────────────────────────────────
         context_kwargs: dict[str, Any] = {
             "java_script_enabled": True,
             "accept_downloads":    False,
+            "user_agent":          ua,
+            "viewport":            viewport,
+            "locale":              "id-ID",
+            "timezone_id":         "Asia/Jakarta",
+            "color_scheme":        "light",
+            "extra_http_headers": {
+                "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
         }
         if session_path and Path(session_path).exists():
             context_kwargs["storage_state"] = session_path
@@ -393,7 +574,7 @@ class BrowserNavigatorTool(BaseTool):
 
         self._context = await self._browser.new_context(**context_kwargs)
 
-        # Block resource-heavy types to conserve RAM
+        # ── Resource blocking (RAM conservation) ─────────────────────────────
         async def _block(route, request):  # noqa: ANN001
             if request.resource_type in _BLOCKED_RESOURCES:
                 await route.abort()
@@ -402,13 +583,65 @@ class BrowserNavigatorTool(BaseTool):
 
         await self._context.route("**/*", _block)
 
+        # ── Intercept API responses for SPA data capture ──────────────────────
+        # Store captured JSON API responses so _extract_page_text can return
+        # them alongside the rendered page text.  This is especially useful for
+        # SPAs that render content from XHR/fetch API calls.
+        self._api_responses: list[dict[str, Any]] = []
+
+        async def _capture_api_response(response: Any) -> None:  # noqa: ANN001
+            try:
+                ct = response.headers.get("content-type", "")
+                if "application/json" in ct and response.status == 200:
+                    body = await response.json()
+                    if isinstance(body, (dict, list)):
+                        self._api_responses.append({
+                            "url":    response.url,
+                            "status": response.status,
+                            "data":   body,
+                        })
+                        # Keep only the 5 most recent API responses to limit memory
+                        if len(self._api_responses) > 5:
+                            self._api_responses = self._api_responses[-5:]
+            except Exception:  # noqa: BLE001
+                pass  # Silently ignore non-JSON or unreadable responses
+
+        self._context.on("response", _capture_api_response)
+
         self._tab_counter += 1
         tab_id   = f"tab_{self._tab_counter}"
         new_page = await self._context.new_page()
         new_page.set_default_timeout(_TIMEOUT_MS)
         new_page.set_default_navigation_timeout(_TIMEOUT_MS)
+
+        # ── Apply playwright-stealth + custom JS init script ──────────────────
+        await self._apply_stealth(new_page)
+
         self._tabs[tab_id]   = new_page
         self._active_tab_id  = tab_id
+
+    async def _apply_stealth(self, page: Any) -> None:
+        """Apply all stealth measures to a Playwright Page object.
+
+        Combines playwright-stealth (if installed) with our custom JS init script
+        that overrides remaining detectable fingerprint leaks.
+
+        Args:
+            page: A Playwright ``Page`` object (newly created, before first goto).
+        """
+        # 1. playwright-stealth v2: uses Stealth class with apply_stealth_async()
+        if _STEALTH_AVAILABLE and _STEALTH_INSTANCE is not None:
+            try:
+                await _STEALTH_INSTANCE.apply_stealth_async(page)
+                logger.debug("BrowserNavigatorTool: playwright-stealth applied")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("BrowserNavigatorTool: playwright-stealth failed: %s", exc)
+
+        # 2. Custom JS init script: additional overrides not covered by stealth lib
+        try:
+            await page.add_init_script(script=_STEALTH_INIT_SCRIPT)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("BrowserNavigatorTool: add_init_script failed: %s", exc)
 
     async def close(self) -> None:
         """Close the browser and release all resources."""
@@ -945,6 +1178,10 @@ class BrowserNavigatorTool(BaseTool):
         This implements the token-efficient "Accessibility Tree" strategy:
         instead of reading the full page HTML the agent reads a structured
         snapshot of interactive elements and targets them by role + name.
+
+        For SPA-heavy websites this action also includes any JSON API responses
+        intercepted during navigation in ``api_data`` so the LLM can access
+        the raw data powering the page without needing extra steps.
         """
         if self._page is None:
             return {
@@ -954,7 +1191,9 @@ class BrowserNavigatorTool(BaseTool):
             }
 
         title     = await self._page.title()
-        page_text = await self._extract_page_text()
+        # Use light_scroll=True to trigger Intersection Observer lazy loaders
+        # that only fire on the first scroll – common in React/Vue apps.
+        page_text = await self._extract_page_text(light_scroll=True)
         a11y_tree = await self._extract_page_a11y()
 
         # Build a compact locators list containing only interactive elements.
@@ -965,7 +1204,7 @@ class BrowserNavigatorTool(BaseTool):
             if n.get("role", "").lower() in _INTERACTIVE_ROLES and n.get("name")
         ][:_MAX_LOCATORS]
 
-        return {
+        result: dict[str, Any] = {
             "action":    "get_content",
             "success":   True,
             "title":     title,
@@ -975,6 +1214,21 @@ class BrowserNavigatorTool(BaseTool):
             "locators":  locators,
             "message":   f"Content extracted from {self._page.url} – \"{title}\"",
         }
+
+        # Include recent intercepted API responses for SPA data capture
+        if self._api_responses:
+            # Summarise each response (truncate large payloads to stay token-safe)
+            result["api_data"] = [
+                {
+                    "url":  r["url"],
+                    "data": r["data"] if isinstance(r["data"], list) else
+                            {k: v for k, v in list(r["data"].items())[:30]}
+                            if isinstance(r["data"], dict) else r["data"],
+                }
+                for r in self._api_responses[-3:]  # last 3 API calls
+            ]
+
+        return result
 
     async def _action_get_full_content(self, task: "AgentTask") -> dict[str, Any]:
         """Extract the COMPLETE page content by auto-scrolling from top to bottom.
@@ -988,13 +1242,16 @@ class BrowserNavigatorTool(BaseTool):
            lazy-loaded (infinite-scroll) content can render into the DOM.
         3. Stops when the scroll position no longer advances (bottom reached) or
            after at most ``_MAX_FULL_PAGE_SCROLL_STEPS`` iterations.
-        4. Extracts the full visible text from the now-complete DOM and returns it
+        4. Waits for ``networkidle`` once more so that any XHR/fetch calls
+           triggered by scroll events finish before we extract the final text.
+        5. Extracts the full visible text from the now-complete DOM and returns it
            without the usual ``_MAX_PAGE_TEXT_CHARS`` truncation (capped at the
            much larger ``_MAX_FULL_PAGE_TEXT_CHARS`` instead).
 
         The result carries ``"full_page": True`` so downstream code (the agent
         summariser) can recognise that this is a comprehensive snapshot and
         allocate a larger text budget when building the LLM summary.
+        Also includes any intercepted API responses in ``api_data``.
         """
         if self._page is None:
             return {
@@ -1036,7 +1293,15 @@ class BrowserNavigatorTool(BaseTool):
             await asyncio.sleep(_FULL_PAGE_SCROLL_WAIT_S)
             scroll_steps += 1
 
-        # ── 3. Extract full content from the now-complete DOM ─────────────────
+        # ── 3. Wait for networkidle after scrolling so XHR responses finish ───
+        # SPAs often fire fetch/XHR on scroll (infinite scroll, lazy sections);
+        # waiting here ensures that data loaded by scroll events is in the DOM.
+        try:
+            await self._page.wait_for_load_state("networkidle", timeout=_NETWORK_IDLE_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001
+            logger.debug("get_full_content: post-scroll networkidle timed out")
+
+        # ── 4. Extract full content from the now-complete DOM ─────────────────
         title     = await self._page.title()
         page_text = await self._extract_page_text()
         a11y_tree = await self._extract_page_a11y()
@@ -1052,7 +1317,7 @@ class BrowserNavigatorTool(BaseTool):
             scroll_steps, char_count, self._page.url,
         )
 
-        return {
+        result: dict[str, Any] = {
             "action":       "get_full_content",
             "success":      True,
             "title":        title,
@@ -1067,6 +1332,20 @@ class BrowserNavigatorTool(BaseTool):
                 f"({scroll_steps} scroll steps, {char_count:,} chars)"
             ),
         }
+
+        # Include recent intercepted API responses for SPA data capture
+        if self._api_responses:
+            result["api_data"] = [
+                {
+                    "url":  r["url"],
+                    "data": r["data"] if isinstance(r["data"], list) else
+                            {k: v for k, v in list(r["data"].items())[:30]}
+                            if isinstance(r["data"], dict) else r["data"],
+                }
+                for r in self._api_responses[-3:]
+            ]
+
+        return result
 
 
     async def _action_extract_data(self, task: "AgentTask") -> dict[str, Any]:
@@ -1486,28 +1765,49 @@ class BrowserNavigatorTool(BaseTool):
         }
 
     async def _detect_error_page(self) -> str:
-        """Check whether the current page is displaying an error state.
+        """Check whether the current page is displaying an error or bot-challenge state.
 
         Returns a human-readable description of the error if detected, or an
-        empty string if the page appears normal.  Recognises common patterns
-        using the module-level ``_ERROR_URL_SEGMENTS`` and
-        ``_ERROR_CONTENT_PHRASES`` constants, which can be extended to support
-        additional sites without modifying this method.
+        empty string if the page appears normal.  Recognises:
+          * Standard HTTP error pages (/500, /404, /error, etc.)
+          * Known error text phrases (server error, CORS, etc.)
+          * Cloudflare / DDoS Guard bot-challenge pages ("Just a moment...")
         """
         if self._page is None:
             return ""
         try:
             url = self._page.url
             url_lower = url.lower()
+            title = await self._page.title()
+            title_lower = title.lower()
             page_text_raw = await self._extract_page_text()
             snippet = page_text_raw[:300] if page_text_raw else ""
 
-            # URL-based detection (e.g. /500, /error, /not-found)
+            # ── Bot / Cloudflare challenge detection ──────────────────────────
+            if any(marker in title_lower for marker in _BOT_CHALLENGE_TITLES):
+                return (
+                    f"⚠️ Bot challenge page detected (title: {title!r}) at {url}. "
+                    "Cloudflare or similar anti-bot system requires browser verification. "
+                    "The agent cannot proceed automatically."
+                )
+            page_html_snippet = ""
+            try:
+                page_html_snippet = await self._page.evaluate(
+                    "() => document.body ? document.body.innerHTML.slice(0, 1000) : ''"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            if any(marker in page_html_snippet for marker in _BOT_CHALLENGE_BODY_MARKERS):
+                return (
+                    f"⚠️ Bot challenge page detected (body marker) at {url}. "
+                    "Anti-bot verification required. The agent cannot proceed automatically."
+                )
+
+            # ── URL-based detection (e.g. /500, /error, /not-found) ───────────
             if any(seg in url_lower for seg in _ERROR_URL_SEGMENTS):
-                title = await self._page.title()
                 return f"Error page detected at {url} (title: {title!r}). {snippet}"
 
-            # Content-based detection: look for known error phrases
+            # ── Content-based detection: look for known error phrases ─────────
             page_text_lower = page_text_raw.lower()
             matched = [p for p in _ERROR_CONTENT_PHRASES if p in page_text_lower]
             if matched:
@@ -1519,9 +1819,37 @@ class BrowserNavigatorTool(BaseTool):
             logger.debug("_detect_error_page: check failed: %s", exc)
         return ""
 
-    async def _extract_page_text(self) -> str:
-        """Extract visible text from the current page, stripping scripts/styles."""
+    async def _extract_page_text(self, light_scroll: bool = False) -> str:
+        """Extract visible text from the current page, with multi-layer fallback.
+
+        Extraction strategy (tried in order, first non-empty result wins):
+          1. Primary: ``innerText`` of a clean clone of ``<body>`` (fast, accurate
+             for server-rendered HTML and React/Vue apps that write to the DOM).
+          2. JS semantic extraction: collect ``textContent`` from semantic HTML tags
+             (``p``, ``h1``–``h6``, ``li``, ``td``, ``blockquote``, ``article``,
+             ``section``, etc.) and de-duplicate lines.  Works on SPAs that
+             build content inside container divs without ``innerText`` support.
+          3. Shadow DOM traversal: search ``shadowRoot`` of custom elements for
+             text – handles websites built with Web Components (e.g. Lit, Stencil).
+          4. ``<noscript>`` fallback: some SSR pages place the full text in
+             ``<noscript>`` tags; extract when all other methods fail.
+
+        Args:
+            light_scroll: When True perform a tiny 200 px scroll before extracting
+                          to trigger lazy-content loaders that activate on first
+                          scroll (e.g. Intersection Observer-based widgets).
+        """
         assert self._page is not None  # noqa: S101
+
+        # Optional: tiny scroll to wake up Intersection Observer lazy loaders
+        if light_scroll:
+            try:
+                await self._page.evaluate("window.scrollBy(0, 200)")
+                await asyncio.sleep(0.3)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ── Strategy 1: primary innerText extraction ──────────────────────────
         try:
             text: str = await self._page.evaluate(
                 """() => {
@@ -1530,10 +1858,85 @@ class BrowserNavigatorTool(BaseTool):
                     return (clone.innerText || clone.textContent || '').replace(/\\s+/g, ' ').trim();
                 }"""
             )
-            return text
+            if text and len(text.strip()) > 150:
+                return text
         except Exception as exc:
-            logger.warning("BrowserNavigatorTool: text extraction failed: %s", exc)
-            return ""
+            logger.debug("_extract_page_text: primary extraction failed: %s", exc)
+            text = ""
+
+        # ── Strategy 2: JS semantic tag extraction ────────────────────────────
+        # Collects textContent from meaningful content tags, deduplicates lines.
+        # Effective for React/Vue SPAs where innerText may return empty or minimal.
+        try:
+            semantic_text: str = await self._page.evaluate(
+                """() => {
+                    const tags = ['p','h1','h2','h3','h4','h5','h6','li','td','th',
+                                  'blockquote','article','section','main','aside',
+                                  'figcaption','caption','dt','dd','pre','code'];
+                    const lines = new Set();
+                    tags.forEach(tag => {
+                        document.querySelectorAll(tag).forEach(el => {
+                            const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                            if (t.length > 10) lines.add(t);
+                        });
+                    });
+                    return Array.from(lines).join('\\n');
+                }"""
+            )
+            if semantic_text and len(semantic_text.strip()) > 150:
+                logger.debug("_extract_page_text: using semantic JS fallback")
+                return semantic_text
+        except Exception as exc:
+            logger.debug("_extract_page_text: semantic extraction failed: %s", exc)
+
+        # ── Strategy 3: Shadow DOM traversal ─────────────────────────────────
+        # Websites built with Web Components (Lit, Stencil, FAST) render
+        # content inside shadow roots invisible to normal DOM queries.
+        try:
+            shadow_text: str = await self._page.evaluate(
+                """() => {
+                    function extractFromShadow(root) {
+                        const texts = [];
+                        const walker = document.createTreeWalker(
+                            root, NodeFilter.SHOW_TEXT,
+                            { acceptNode: n => n.nodeValue.trim().length > 3
+                              ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP }
+                        );
+                        let node;
+                        while ((node = walker.nextNode())) texts.push(node.nodeValue.trim());
+                        // Recurse into shadow roots
+                        root.querySelectorAll('*').forEach(el => {
+                            if (el.shadowRoot) texts.push(...extractFromShadow(el.shadowRoot).split('\\n'));
+                        });
+                        return texts.join('\\n');
+                    }
+                    return extractFromShadow(document.body || document.documentElement);
+                }"""
+            )
+            if shadow_text and len(shadow_text.strip()) > 150:
+                logger.debug("_extract_page_text: using Shadow DOM fallback")
+                return shadow_text
+        except Exception as exc:
+            logger.debug("_extract_page_text: shadow DOM extraction failed: %s", exc)
+
+        # ── Strategy 4: <noscript> tag fallback ───────────────────────────────
+        # Some SSR frameworks (Next.js, Nuxt) embed full page content inside
+        # <noscript> tags for non-JS environments; grab this as a last resort.
+        try:
+            noscript_text: str = await self._page.evaluate(
+                """() => {
+                    const ns = document.querySelectorAll('noscript');
+                    return Array.from(ns).map(n => n.innerText || n.textContent || '').join('\\n').trim();
+                }"""
+            )
+            if noscript_text and len(noscript_text.strip()) > 50:
+                logger.debug("_extract_page_text: using noscript fallback")
+                return noscript_text
+        except Exception as exc:
+            logger.debug("_extract_page_text: noscript extraction failed: %s", exc)
+
+        # Return whatever the primary strategy produced (may be short/empty)
+        return text or ""
 
     async def _extract_page_a11y(self) -> list[dict[str, Any]]:
         """Return a simplified accessibility tree from the current page.
